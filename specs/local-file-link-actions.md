@@ -17,6 +17,15 @@ workspace. This applies to both Markdown links and tool file entries. External
 files remain readonly, and genuinely missing files still show a not-found error.
 Remote preview authorization remains restricted to its existing allowed roots.
 
+Rendered Markdown in the file preview resolves workspace-relative image references
+against the Markdown document's directory and reads them through the owning file
+source. The resolver accepts bounded image reads (including SVG text), rejects
+absolute paths and references that escape the workspace, and releases temporary
+browser object URLs when the preview is closed. External image URLs keep their
+existing browser behavior. This is a viewer capability, not a self-contained
+Markdown export: copied or CLI-generated Markdown must retain its referenced
+files (for example, the export's `artifacts` directory).
+
 For a binary file without an inline viewer, the preview explains that it cannot
 render the file in the shared rounded notice card, with full-width stacked actions
 and Copy file path. On Electron with the session running on this machine, it offers

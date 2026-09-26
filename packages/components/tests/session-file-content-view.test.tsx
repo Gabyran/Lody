@@ -1032,6 +1032,43 @@ describe('SessionFileContentView', () => {
     expect(view.querySelector('button[aria-label="Preview"]')).not.toBeNull();
   });
 
+  it('loads workspace-relative Markdown images through the file provider', async () => {
+    const provider = createFakeSessionFileProvider({
+      files: [
+        { path: 'docs/report.md', kind: 'text', sourceState: 'live-readonly' },
+        { path: 'assets/diagram.png', kind: 'binary', sourceState: 'live-readonly' },
+      ],
+      snapshots: {
+        'docs/report.md': {
+          kind: 'text',
+          text: '![diagram](../assets/diagram.png)\n\n![outside](../../outside.png)',
+        },
+        'assets/diagram.png': {
+          kind: 'binary',
+          url: 'lody-resource://test/diagram.png',
+          mimeType: 'image/png',
+        },
+      },
+    });
+    const openFile = vi.spyOn(provider, 'openFile');
+
+    const view = await render(
+      createElement(SessionFileContentView, {
+        sessionId: session.id,
+        session,
+        filePath: 'docs/report.md',
+        fileProvider: provider,
+        fileProviderPending: false,
+      })
+    );
+    await flushMicrotasks();
+
+    expect(view.querySelector('img')?.getAttribute('src')).toBe('lody-resource://test/diagram.png');
+    expect(openFile).toHaveBeenCalledWith('assets/diagram.png');
+    expect(openFile).not.toHaveBeenCalledWith('../../outside.png');
+    expect(view.querySelector('[aria-label="outside"]')).not.toBeNull();
+  });
+
   it('copies the full Markdown source from the toolbar and external mobile request', async () => {
     const markdown = '# Copy me\n\n- whole document';
     const provider = createFakeSessionFileProvider({

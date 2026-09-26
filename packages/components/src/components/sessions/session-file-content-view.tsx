@@ -17,7 +17,9 @@ import { useTranslation } from 'react-i18next';
 import { toast } from '@/lib/toast';
 import {
   getMachineFlockLocalProjects,
+  SESSION_IMAGE_MAX_SIZE_BYTES,
   type CodeCollabContentUnavailableReason,
+  type LocalProjectFileReadResult,
   type SessionId,
   type SessionMeta,
   type VisualAnnotationReferencePayload,
@@ -61,8 +63,10 @@ import {
 import { normalizePinnedProviderOpenResult } from '@/lib/session-file-provider-open-result';
 import { SessionFileBinaryPreview } from './session-file-binary-preview';
 import { SessionFileImagePreview } from './session-file-image-preview';
-import { MarkdownRenderer } from '../ai-gui/markdown-renderer';
+import { MarkdownRenderer, type MarkdownImageResolver } from '../ai-gui/markdown-renderer';
 import { isSvgPath } from '@/lib/image-file-preview';
+import { resolveMarkdownImagePath } from '@/lib/markdown-image-path';
+import { createMarkdownImageSource, type MarkdownImageSource } from '@/lib/markdown-image-source';
 import { logCodeCollabDebug } from '@/lib/code-collab-debug';
 import {
   decideCodeCollabLiveTextUpdate,
@@ -202,6 +206,15 @@ const isHtmlPath = (filePath: string): boolean => /\.(?:html|htm)$/iu.test(fileP
 // past 64 KiB behind a banner. Ask for the machine's whole allowance instead;
 // it clamps this to its own hard ceiling.
 const LOCAL_FILE_VIEWER_READ_MAX_BYTES = 5 * 1024 * 1024;
+
+function createLocalMarkdownSvgSource(
+  path: string,
+  result: LocalProjectFileReadResult | null
+): MarkdownImageSource | null {
+  if (!result || result.truncated || result.encoding === 'base64') return null;
+  if (!isSvgPath(path)) return null;
+  return createMarkdownImageSource(path, { kind: 'text', text: result.content });
+}
 
 function getCodeCollabTextChangeChecker(
   provider: SessionFileProvider
@@ -370,6 +383,121 @@ function SessionFileContentViewImpl({
     providerEditorDirtyRef.current = false;
   }
 
+  const readLocalFile = useCallback(
+    async (path: string, maxBytes: number): Promise<LocalProjectFileReadResult | null> => {
+      if (!localFileSourceKind) {
+        throw new Error(
+          tRef.current('sessions.codeSession.files.unavailable', 'Files are unavailable.')
+        );
+      }
+
+      if (localFileSourceKind === 'local-project' && localProjectWorkspaceId && localProjectId) {
+        const canUseIpc =
+          Boolean(getIpcServices()) &&
+          (!localProjectMachineId || localProjectMachineId === localMachineId);
+        if (canUseIpc) {
+          return await createLocalProjectIpcFileTransport({
+            workspaceId: localProjectWorkspaceId,
+            localProjectId,
+          }).readFile({ relativePath: path, maxBytes });
+        }
+        if (!workspaceRuntime || !currentUserId || !localProjectMachineId) {
+          throw new Error(
+            tRef.current(
+              'sessions.localProject.files.apiUnavailable',
+              'Local file API is unavailable.'
+            )
+          );
+        }
+        return await createLocalProjectRpcFileTransport({
+          workspaceId: localProjectWorkspaceId,
+          machineId: localProjectMachineId,
+          localProjectId,
+          requestedByUserId: currentUserId,
+          requestLocalProjectControl: (request, requestOptions) =>
+            workspaceRuntime.requestLocalProjectControl(request, requestOptions),
+        }).readFile({ relativePath: path, maxBytes });
+      }
+
+      const services = getIpcServices();
+      const reader = services?.localProjects.readSessionWorktreeFile.bind(services.localProjects);
+      if (!reader) {
+        throw new Error(
+          tRef.current(
+            'sessions.worktree.files.apiUnavailable',
+            'Local worktree file API is unavailable.'
+          )
+        );
+      }
+      if (!localWorktreeRepoKey || !localWorktreeSessionId) {
+        throw new Error(
+          tRef.current('sessions.worktree.files.unavailable', 'Session worktree is unavailable.')
+        );
+      }
+      return await reader(localWorktreeRepoKey, localWorktreeSessionId, path, { maxBytes });
+    },
+    [
+      currentUserId,
+      localFileSourceKind,
+      localMachineId,
+      localProjectId,
+      localProjectMachineId,
+      localProjectWorkspaceId,
+      localWorktreeRepoKey,
+      localWorktreeSessionId,
+      tRef,
+      workspaceRuntime,
+    ]
+  );
+
+  const resolveMarkdownImageSource = useCallback<MarkdownImageResolver>(
+    async (source) => {
+      const imagePath = resolveMarkdownImagePath(normalizedPath, source);
+      if (!imagePath) return null;
+
+      if (shouldUseProviderFileContent && fileProvider) {
+        const result = await fileProvider.openFile(imagePath);
+        if (result.status !== 'ready') return null;
+        if (result.snapshot.kind === 'binary' || result.snapshot.kind === 'text') {
+          return createMarkdownImageSource(imagePath, result.snapshot);
+        }
+        return null;
+      }
+
+      if (shouldUseLocalFileContent) {
+        if (isSvgPath(imagePath)) {
+          return createLocalMarkdownSvgSource(
+            imagePath,
+            await readLocalFile(imagePath, SESSION_IMAGE_MAX_SIZE_BYTES)
+          );
+        }
+        if (!workspaceRuntime) return null;
+        const preview = await workspaceRuntime.requestFilePreview(
+          session.machineId,
+          {
+            sessionId,
+            path: imagePath,
+            maxBytes: SESSION_IMAGE_MAX_SIZE_BYTES,
+          },
+          { ownerSessionId: sessionId }
+        );
+        if (preview.status !== 'resource' || preview.kind !== 'binary') return null;
+        return { src: preview.url };
+      }
+      return null;
+    },
+    [
+      fileProvider,
+      normalizedPath,
+      readLocalFile,
+      session.machineId,
+      sessionId,
+      shouldUseLocalFileContent,
+      shouldUseProviderFileContent,
+      workspaceRuntime,
+    ]
+  );
+
   useEffect(() => {
     setData({ status: 'loading' });
     setProviderEntry(null);
@@ -444,65 +572,7 @@ function SessionFileContentViewImpl({
             );
           }
 
-          const readResult =
-            localFileSourceKind === 'local-project' && localProjectWorkspaceId && localProjectId
-              ? (() => {
-                  const canUseIpc =
-                    Boolean(getIpcServices()) &&
-                    (!localProjectMachineId || localProjectMachineId === localMachineId);
-                  if (canUseIpc) {
-                    return createLocalProjectIpcFileTransport({
-                      workspaceId: localProjectWorkspaceId,
-                      localProjectId,
-                    }).readFile({
-                      relativePath: normalizedPath,
-                      maxBytes: LOCAL_FILE_VIEWER_READ_MAX_BYTES,
-                    });
-                  }
-                  if (!workspaceRuntime || !currentUserId || !localProjectMachineId) {
-                    throw new Error(
-                      tRef.current(
-                        'sessions.localProject.files.apiUnavailable',
-                        'Local file API is unavailable.'
-                      )
-                    );
-                  }
-                  return createLocalProjectRpcFileTransport({
-                    workspaceId: localProjectWorkspaceId,
-                    machineId: localProjectMachineId,
-                    localProjectId,
-                    requestedByUserId: currentUserId,
-                    requestLocalProjectControl: (request, requestOptions) =>
-                      workspaceRuntime.requestLocalProjectControl(request, requestOptions),
-                  }).readFile({
-                    relativePath: normalizedPath,
-                    maxBytes: LOCAL_FILE_VIEWER_READ_MAX_BYTES,
-                  });
-                })()
-              : (() => {
-                  const reader = getIpcServices()?.localProjects.readSessionWorktreeFile.bind(
-                    getIpcServices()!.localProjects
-                  );
-                  if (!reader) {
-                    throw new Error(
-                      tRef.current(
-                        'sessions.worktree.files.apiUnavailable',
-                        'Local worktree file API is unavailable.'
-                      )
-                    );
-                  }
-                  if (!localWorktreeRepoKey || !localWorktreeSessionId) {
-                    throw new Error(
-                      tRef.current(
-                        'sessions.worktree.files.unavailable',
-                        'Session worktree is unavailable.'
-                      )
-                    );
-                  }
-                  return reader(localWorktreeRepoKey, localWorktreeSessionId, normalizedPath, {
-                    maxBytes: LOCAL_FILE_VIEWER_READ_MAX_BYTES,
-                  });
-                })();
+          const readResult = readLocalFile(normalizedPath, LOCAL_FILE_VIEWER_READ_MAX_BYTES);
 
           const result = await readResult;
           if (cancelled) return;
@@ -614,6 +684,7 @@ function SessionFileContentViewImpl({
     shouldUseLocalFileContent,
     shouldUseProviderFileContent,
     shouldWaitForFileProvider,
+    readLocalFile,
     sessionId,
     tRef,
     workspaceRuntime,
@@ -1139,7 +1210,11 @@ function SessionFileContentViewImpl({
       className="mx-auto w-full max-w-3xl px-3 py-3 select-text sm:px-4 sm:py-4"
       data-native-selection-allow
     >
-      <MarkdownRenderer text={markdownPreviewText} size={conversationFontSize} />
+      <MarkdownRenderer
+        text={markdownPreviewText}
+        size={conversationFontSize}
+        resolveImageSource={resolveMarkdownImageSource}
+      />
     </div>
   ) : isSvgTextFile && data.status === 'ready' && data.snapshot.kind === 'text' ? (
     <SessionFileImagePreview path={normalizedPath} svgText={data.snapshot.text} />

@@ -19,13 +19,18 @@ import { conversationFontSizeAtom } from '@/atoms';
 import { FileIcon, FolderIcon } from '@/components/icons/file-icons';
 import { MobileEdgeBackSwipeZone } from '@/components/mobile/mobile-edge-back-swipe';
 import { SessionFileImagePreview } from '@/components/sessions/session-file-image-preview';
-import { MarkdownRenderer } from '@/components/ai-gui/markdown-renderer';
+import {
+  MarkdownRenderer,
+  type MarkdownImageResolver,
+} from '@/components/ai-gui/markdown-renderer';
 import { SessionMonacoTextViewer } from '@/components/sessions/session-monaco-text-viewer';
 import { useFileWorkspaceTree } from '@/hooks/use-code-session';
 import { isNativeAppShell } from '@/lib/native-platform';
 import type { FileWorkspaceProvider, FileWorkspaceSnapshot } from '@/lib/file-workspace-provider';
 import { getImageMimeTypeForPath, isSvgPath } from '@/lib/image-file-preview';
 import { getSessionFileMonacoLanguageId, isSessionMarkdownPath } from '@/lib/session-file-language';
+import { createMarkdownImageSource } from '@/lib/markdown-image-source';
+import { resolveMarkdownImagePath } from '@/lib/markdown-image-path';
 import { cn } from '@/lib/utils';
 import { useActiveVSCodeTheme, useResolvedTheme } from '../../theme-provider';
 
@@ -726,6 +731,7 @@ function MobileFilePreview({
 
   return (
     <MobileTextPreview
+      provider={provider}
       path={path}
       text={snapshot.text}
       onScrollActivity={onScrollActivity}
@@ -757,11 +763,13 @@ function MobileImagePreview({
 }
 
 function MobileTextPreview({
+  provider,
   path,
   text,
   onScrollActivity,
   bottomClearanceClassName,
 }: {
+  readonly provider: FileWorkspaceProvider | null;
   readonly path: string;
   readonly text: string;
   readonly onScrollActivity?: (scrollTop: number) => void;
@@ -770,6 +778,16 @@ function MobileTextPreview({
   const resolvedTheme = useResolvedTheme();
   const activeVSCodeTheme = useActiveVSCodeTheme();
   const conversationFontSize = useAtomValue(conversationFontSizeAtom);
+  const resolveImageSource = useCallback<MarkdownImageResolver>(
+    async (source) => {
+      const imagePath = resolveMarkdownImagePath(path, source);
+      if (!provider || !imagePath) return null;
+      const result = await provider.openFile(imagePath);
+      if (result.status !== 'ready') return null;
+      return createMarkdownImageSource(imagePath, result.snapshot);
+    },
+    [path, provider]
+  );
 
   if (isSessionMarkdownPath(path)) {
     return (
@@ -779,7 +797,11 @@ function MobileTextPreview({
         onScroll={(event) => onScrollActivity?.(event.currentTarget.scrollTop)}
       >
         <div className="mx-auto w-full max-w-3xl px-3 py-3 sm:px-4 sm:py-4">
-          <MarkdownRenderer text={text} size={conversationFontSize} />
+          <MarkdownRenderer
+            text={text}
+            size={conversationFontSize}
+            resolveImageSource={resolveImageSource}
+          />
         </div>
       </div>
     );

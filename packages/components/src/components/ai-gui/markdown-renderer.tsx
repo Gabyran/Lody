@@ -41,6 +41,9 @@ import {
 import { matchWholeFilePath, splitTextIntoFilePathSegments } from '@/lib/linkify-file-paths';
 import { normalizeTexMathDelimiters } from '@/lib/markdown-single-dollar-math';
 import { cn } from '@/lib/utils';
+import { isRelativeMarkdownImageSource } from '@/lib/markdown-image-path';
+import type { MarkdownImageSource } from '@/lib/markdown-image-source';
+export type { MarkdownImageSource } from '@/lib/markdown-image-source';
 import { usePrLinkInterceptor } from './pr-link-context';
 import {
   SEARCH_HIGHLIGHT_ACTIVE_MARK_CLASS_NAME,
@@ -93,6 +96,8 @@ type MarkdownPictureProps = ComponentPropsWithoutRef<'picture'> & {
 type MarkdownImageProps = ComponentPropsWithoutRef<'img'> & {
   node?: unknown;
 };
+
+export type MarkdownImageResolver = (source: string) => Promise<MarkdownImageSource | null>;
 
 type MdastNode = {
   type: string;
@@ -892,6 +897,7 @@ const createMarkdownComponents = ({
   openAgentFileLabel,
   onAgentFileLinkClick,
   getAgentFileLinkContextMenuItems,
+  resolveImageSource,
   readonly,
   theme,
 }: {
@@ -899,6 +905,7 @@ const createMarkdownComponents = ({
   openAgentFileLabel: string;
   onAgentFileLinkClick?: (href: string) => void;
   getAgentFileLinkContextMenuItems?: (href: string) => readonly MarkdownAgentFileLinkMenuItem[];
+  resolveImageSource?: MarkdownImageResolver;
   readonly: boolean;
   theme: ResolvedTheme;
 }): Components => ({
@@ -966,14 +973,19 @@ const createMarkdownComponents = ({
       </MarkdownExternalLink>
     );
   },
-  img: ConversationMarkdownImage,
+  img: (props) => <ConversationMarkdownImage {...props} resolveImageSource={resolveImageSource} />,
   // <picture> just passes through its children (the <img> fallback);
   // <source> is suppressed since it's only meaningful inside a real browser <picture>.
   source: () => null,
   picture: (props: MarkdownPictureProps) => <>{props.children}</>,
 });
 
-function ConversationMarkdownImage(props: MarkdownImageProps) {
+function ConversationMarkdownImage({
+  resolveImageSource,
+  ...props
+}: MarkdownImageProps & {
+  resolveImageSource?: MarkdownImageResolver;
+}) {
   const readonly = useContext(SessionReadonlyContext);
   // No workspace URI fetch is mounted for an anonymous publication.
   // Typed share images are handled separately through the manifest attachment reader.
@@ -997,7 +1009,83 @@ function ConversationMarkdownImage(props: MarkdownImageProps) {
       </span>
     );
   }
-  return <SizedMarkdownImage {...props} />;
+  return resolveImageSource ? (
+    <ResolvedMarkdownImage {...props} resolveImageSource={resolveImageSource} />
+  ) : (
+    <SizedMarkdownImage {...props} />
+  );
+}
+
+function MarkdownImageFallback({ alt, loading = false }: { alt?: string; loading?: boolean }) {
+  return (
+    <span
+      role="img"
+      aria-label={alt || 'Image'}
+      aria-busy={loading || undefined}
+      className="my-2 block text-sm text-muted-foreground"
+    >
+      {alt || 'Image'}
+    </span>
+  );
+}
+
+function ResolvedMarkdownImage({
+  resolveImageSource,
+  ...props
+}: MarkdownImageProps & { resolveImageSource: MarkdownImageResolver }) {
+  const source = typeof props.src === 'string' ? props.src : undefined;
+  const shouldResolve = source !== undefined && isRelativeMarkdownImageSource(source);
+  const [state, setState] = useState<
+    | { readonly status: 'direct'; readonly source?: string }
+    | { readonly status: 'loading' }
+    | { readonly status: 'resolved'; readonly source: MarkdownImageSource }
+    | { readonly status: 'failed' }
+  >(() =>
+    shouldResolve
+      ? { status: 'loading' }
+      : { status: 'direct', ...(source === undefined ? {} : { source }) }
+  );
+
+  useEffect(() => {
+    if (!shouldResolve || source === undefined) {
+      setState({ status: 'direct', ...(source === undefined ? {} : { source }) });
+      return undefined;
+    }
+
+    let disposed = false;
+    let resolvedSource: MarkdownImageSource | undefined;
+    setState({ status: 'loading' });
+    void resolveImageSource(source)
+      .then((nextSource) => {
+        if (disposed) {
+          nextSource?.revoke?.();
+          return;
+        }
+        if (!nextSource) {
+          setState({ status: 'failed' });
+          return;
+        }
+        resolvedSource = nextSource;
+        setState({ status: 'resolved', source: nextSource });
+      })
+      .catch(() => {
+        if (!disposed) setState({ status: 'failed' });
+      });
+
+    return () => {
+      disposed = true;
+      resolvedSource?.revoke?.();
+    };
+  }, [resolveImageSource, shouldResolve, source]);
+
+  if (state.status === 'loading') return <MarkdownImageFallback alt={props.alt} loading />;
+  if (state.status === 'failed') return <MarkdownImageFallback alt={props.alt} />;
+  return (
+    <SizedMarkdownImage
+      {...props}
+      src={state.status === 'resolved' ? state.source.src : state.source}
+    />
+  );
 }
 
 type ImageOutcome = { width: number; height: number } | 'failed';
@@ -1087,6 +1175,7 @@ export const MarkdownRenderer = memo(function MarkdownRenderer({
   allowHtml = false,
   isStreaming = false,
   onAgentFileLinkClick,
+  resolveImageSource,
   searchBlockId,
 }: {
   text: string;
@@ -1097,6 +1186,7 @@ export const MarkdownRenderer = memo(function MarkdownRenderer({
   /** Renders through the smoothing, fading stream engine while a turn is still streaming. */
   isStreaming?: boolean;
   onAgentFileLinkClick?: (href: string) => void;
+  resolveImageSource?: MarkdownImageResolver;
   searchBlockId?: string;
 }) {
   ({ text, size, allowHtml, isStreaming, searchBlockId } = useSelectionStableValue({
@@ -1147,6 +1237,7 @@ export const MarkdownRenderer = memo(function MarkdownRenderer({
         openAgentFileLabel,
         onAgentFileLinkClick,
         getAgentFileLinkContextMenuItems,
+        resolveImageSource,
         readonly: readonly !== null,
         theme: resolvedTheme,
       }),
@@ -1156,6 +1247,7 @@ export const MarkdownRenderer = memo(function MarkdownRenderer({
       onAgentFileLinkClick,
       openAgentFileLabel,
       readonly,
+      resolveImageSource,
       resolvedTheme,
     ]
   );
