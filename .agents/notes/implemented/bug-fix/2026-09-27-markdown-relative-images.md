@@ -41,3 +41,5 @@ provider-backed image rendering and prevents an escaping reference from being
 opened. Oxfmt passes, the two focused suites pass (39 tests), and the components
 package typecheck passes after building the isolated ACP submodules required by
 the workspace.
+
+- Pull request: [#1033](https://github.com/LodyAI/Lody/pull/1033).

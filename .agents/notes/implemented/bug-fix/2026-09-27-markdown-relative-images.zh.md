@@ -32,3 +32,5 @@ Translation: current
 `session-file-content-view.test.tsx` 覆盖 provider 图片渲染，并确保越界引用不会被打开。
 Oxfmt 已通过，两个针对性测试套件通过（39 项）；构建工作区所需的隔离 ACP 子模块后，components
 包级类型检查也已通过。
+
+- Pull request: [#1033](https://github.com/LodyAI/Lody/pull/1033)。
