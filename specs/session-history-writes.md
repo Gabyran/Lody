@@ -61,6 +61,15 @@ That tolerance must not authorize creating new malformed items locally.
   last copy. Full history export preserves every stored row; this is not deduplication.
   If an attempted terminal repair leaves that identity dispatchable, the current check
   stops without replaying it or repeatedly materializing history.
+- A user-status write applies to every stored copy of that user turn. The last copy
+  decides whether a guarded write is accepted; earlier copies follow it without a settled
+  copy regressing. A steer verdict moves only copies still in steer states. Requeueing an
+  undelivered steer is refused when any copy has started or settled.
+- Before appending a queued turn that history does not contain, queue promotion rereads
+  session meta inside its lease. A refused steer for that turn holds the queued row until
+  the steer's own history arrives or missing-history recovery settles it. An applied or
+  settled steer, an active or handled turn, a settled activation, a missing-history
+  tombstone or completed assistant output removes the row without appending history.
 - Composer steering requires authoritative ACP support for acknowledged steering,
   a live prompt, and a known unfinished assistant turn. During activity, a guide
   preference or inverted queue submission without that support appends to the

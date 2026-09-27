@@ -987,6 +987,103 @@ describe('SessionDispatchWatcher', () => {
     }
   );
 
+  it.each([
+    ['an applied steer', { steerTurnStatuses: { steered: 'processing' } }, 'drop'],
+    ['a refused steer', { steerTurnStatuses: { steered: 'pending' } }, 'hold'],
+    ['a missing-history tombstone', { lastMissingHistoryUserMsgId: 'steered' }, 'drop'],
+    ['no execution evidence', {}, 'promote'],
+  ] as const)(
+    'classifies a queued turn by fresh execution state before promotion: %s',
+    async (_name, patch, outcome) => {
+      const id = 'queued-steer-race' as SessionId;
+      const staleMeta = {
+        id,
+        machineId: 'machine-1',
+        userId: 'user-1',
+        createdAt: '2026-09-27T00:00:00Z',
+        cliType: 'builtin',
+        agentType: 'codex',
+        status: { type: 'idle' },
+      } as SessionMeta;
+      let meta = staleMeta;
+      const repo = {
+        getDocMeta: async () => ({ meta }),
+        upsertDocMeta: async (_room: string, next: Partial<SessionMeta>) => {
+          meta = { ...meta, ...next };
+        },
+      };
+      const doc = new SessionDocument(repo as never, id, async () => {}, createSilentLogger());
+      const loro = new LoroDoc();
+      loro.setPeerId('1');
+      composeTestSessionDoc(doc, { doc: loro });
+      const watcher = createWatcher({
+        logger: createSilentLogger(),
+        machineId: 'machine-1',
+        workspaceId: 'workspace-1' as WorkspaceId,
+        workspaceDocument: { repo } as never,
+        executionService: { reconcileSteerHistory: async () => {} } as SessionExecutionService,
+        canUseMachine: createAllowMachineAccess(),
+      });
+      const internal = watcher as unknown as {
+        promoteNextQueuedMessage: (
+          doc: SessionDocument,
+          meta: SessionMeta,
+          history: SessionHistoryInput[]
+        ) => Promise<SessionHistoryInput | null>;
+        checkHistoryAndQueue: (
+          doc: SessionDocument,
+          meta: SessionMeta
+        ) => Promise<{ turn: SessionHistoryInput | null; history: SessionHistoryInput[] }>;
+      };
+      let rendererData: ReturnType<typeof createLoroSessionData> | undefined;
+      const copies = () =>
+        (loro.getList('history').toJSON() as SessionHistoryInput[]).filter(
+          (entry) => entry.id === 'steered'
+        );
+      try {
+        await doc.pushMessageQueue({
+          userTurnId: 'steered',
+          task: 'synthetic steered input',
+          userId: 'user-1',
+          timestamp: '2026-09-27T00:00:00Z',
+          acpSessionConfig: {
+            prompt: 'synthetic steered input',
+            cliType: 'builtin',
+            agentType: 'codex',
+          },
+        } as never);
+        const renderer = LoroDoc.fromSnapshot(loro.export({ mode: 'snapshot' }));
+        renderer.setPeerId('2');
+        rendererData = createLoroSessionData({ sessionId: id, doc: renderer });
+        // Execution records the steer verdict before the renderer's own history
+        // row and queue removal reach this replica. The caller's meta is stale.
+        meta = { ...meta, ...patch };
+
+        const promoted = await internal.promoteNextQueuedMessage(doc, staleMeta, []);
+        expect(promoted?.id ?? null).toBe(outcome === 'promote' ? 'steered' : null);
+        expect(loro.getMovableList('mq').length).toBe(outcome === 'hold' ? 1 : 0);
+        expect(copies()).toHaveLength(outcome === 'promote' ? 1 : 0);
+        if (outcome === 'promote') return;
+
+        await rendererData.commands.appendTurn({
+          ...createPendingUserTurn('steered', 'synthetic steered input'),
+          status: 'pending_apply',
+        });
+        renderer.getMovableList('mq').delete(0, 1);
+        renderer.commit();
+        loro.import(renderer.export({ mode: 'snapshot' }));
+        const result = await internal.checkHistoryAndQueue(doc, meta);
+        // Only a refused steer runs, once, through the renderer's own row.
+        expect(result.turn?.id ?? null).toBe(outcome === 'hold' ? 'steered' : null);
+        expect(copies()).toHaveLength(1);
+        expect(loro.getMovableList('mq').length).toBe(0);
+      } finally {
+        rendererData?.dispose();
+        doc.mirror.dispose();
+      }
+    }
+  );
+
   it('repairs a late-arriving entry for an already-handled fast-path turn instead of re-dispatching', async () => {
     const continueSession = vi.fn(async () => {});
     const startSession = vi.fn(async () => {});
@@ -1800,6 +1897,7 @@ describe('SessionDispatchWatcher', () => {
             updateHistory: typeof updateHistory;
             removeMessageQueueItem: (cid: string) => Promise<void>;
             appendUserTurn?: (entry: SessionHistoryInput) => Promise<void>;
+            getMetaState?: () => Promise<SessionMeta | undefined>;
           },
           meta: SessionMeta,
           history: SessionHistoryInput[]
@@ -1829,7 +1927,17 @@ describe('SessionDispatchWatcher', () => {
     expect(peekReadyMessageQueue).toHaveBeenCalledTimes(1);
     expect(updateHistory).not.toHaveBeenCalled();
     const remainingQueue = [await peekReadyMessageQueue()];
+    const failingMeta: SessionMeta = {
+      id: sessionId,
+      machineId: 'machine-1',
+      userId: 'user-1',
+      createdAt: '2026-09-09T00:00:00Z',
+      cliType: 'builtin',
+      agentType: 'codex',
+      status: { type: 'idle' },
+    };
     const failingDoc = withHistoryPort({
+      getMetaState: async () => failingMeta,
       peekReadyMessageQueue: async () => remainingQueue[0] ?? null,
       removeMessageQueueItem: async () => {
         remainingQueue.shift();
@@ -1840,19 +1948,7 @@ describe('SessionDispatchWatcher', () => {
       updateHistory,
     });
     await expect(
-      promoteNextQueuedMessage(
-        failingDoc,
-        {
-          id: sessionId,
-          machineId: 'machine-1',
-          userId: 'user-1',
-          createdAt: '2026-09-09T00:00:00Z',
-          cliType: 'builtin',
-          agentType: 'codex',
-          status: { type: 'idle' },
-        },
-        []
-      )
+      promoteNextQueuedMessage(failingDoc, failingMeta, [])
     ).rejects.toThrow('synthetic-write-rejected');
     expect(remainingQueue).toHaveLength(1);
     expect(remainingQueue[0]?.userTurnId).toBe(turnId);
@@ -1897,6 +1993,7 @@ describe('SessionDispatchWatcher', () => {
     // `appendUserTurn` binding rather than a fake that could drift from it.
     const realDoc = new SessionDocument(
       {
+        getDocMeta: async () => ({ meta }),
         upsertDocMeta,
         flush: async () => {},
       } as unknown as ConstructorParameters<typeof SessionDocument>[0],

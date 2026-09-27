@@ -43,6 +43,13 @@ Translation: current
 - 调度和激活检查遇到重复 turn ID 时，采用最后一条已存记录，与定点历史读写一致。
   前面的副本不能复活已进入终态的最后一条。完整历史导出保留所有已存记录，不执行去重。
   尝试修复终态后，若该身份仍可被调度，当前检查必须结束，不重放该消息或反复物化历史。
+- 用户状态写入作用于该用户 turn 的所有已存副本。是否接受带条件的写入由最后一条副本决定；
+  前面的副本随之更新，但已进入终态的副本不得回退。steer 结果只迁移仍处于 steer 状态的副本。
+  任一副本已开始或已结束时，拒绝把未送达的 steer 重新排队。
+- 追加一条历史中尚不存在的排队 turn 之前，队列提升在其租约内重新读取会话 meta。若该 turn 的
+  steer 已被拒绝，保留队列行，直到该 steer 自己的历史到达，或 missing-history 恢复将其结束。
+  若 steer 已被接收或已结束、turn 正在执行或已处理、激活已结算、存在 missing-history
+  tombstone 或已完成的 assistant 输出，则删除队列行且不追加历史。
 - 输入框 steering 必须同时具备权威 ACP acknowledged steering 能力、活跃 prompt 和已知未结束
   assistant turn。忙碌期间，Guide 偏好或反转 Queue 的发送若不具备该能力，直接追加到正规 Queue；
   能力信息不可用或仅为 provisional 时也如此。消息保留队列顺序及正常提升前的编辑/删除能力，

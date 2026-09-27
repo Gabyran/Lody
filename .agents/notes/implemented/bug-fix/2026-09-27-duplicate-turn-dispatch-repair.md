@@ -1,6 +1,6 @@
 # Stop dispatch repair loops for duplicate turn IDs
 
-Status: proposed
+Status: implemented
 Translation: current
 
 [中文](2026-09-27-duplicate-turn-dispatch-repair.zh.md)
@@ -30,6 +30,8 @@ already repaired; seeing one again logs a warning and returns no turn. Normal
 session notifications and recovery remain responsible for subsequent checks.
 Changing every duplicate or deleting rows was rejected because it would introduce
 new write/merge semantics and mutate historical data merely to select work.
+A later decision [keeps status copies in step](../../proposed/bug-fix/2026-09-27-duplicate-turn-copy-writes-and-queue-guard.md)
+without deleting rows.
 
 The producer race remains: renderer native queue steering appends history before
 removing its queue row, while CLI promotion independently reads and consumes that
