@@ -618,6 +618,12 @@ export async function createWorkspaceRuntime(deps: RuntimeDeps): Promise<Workspa
   let reconnectingStatusVisible = false;
   let localReconnectLoop: LocalReconnectLoop | null = null;
   let cloudReconnectLoop: LocalReconnectLoop | null = null;
+  // Web only: retries a durable transport attach that failed while a token is
+  // held (see attachWebDurableTransport). Room trackers cannot see this state:
+  // no room exists before the transport attaches.
+  let webAttachReconnectLoop: LocalReconnectLoop | null = null;
+  let webTransportAttachPending: { startPresence: boolean } | null = null;
+  let webTransportAttachPromise: Promise<void> | null = null;
   let reconnectBackstopTimer: ReturnType<typeof setInterval> | null = null;
   let releaseIdleDocumentStoresBeforeReconnect: () => Promise<void> = async () => {};
   // Background eager-sync coordinator. Assigned once all of its port
@@ -2738,6 +2744,8 @@ export async function createWorkspaceRuntime(deps: RuntimeDeps): Promise<Workspa
     reconnectingStatusVisible = false;
     localReconnectLoop?.stop();
     cloudReconnectLoop?.stop();
+    webAttachReconnectLoop?.stop();
+    webTransportAttachPending = null;
 
     // Unsubscribe from meta room
     if (metaSub) {
@@ -2969,6 +2977,40 @@ export async function createWorkspaceRuntime(deps: RuntimeDeps): Promise<Workspa
       elapsedMs: Date.now() - startedAt,
     });
     emitControlConnectionState();
+  };
+
+  // Web attaches the durable transport only from setAuthToken and meta-sync
+  // recovery. A failure there (for example, the suspect Meta checkpoint cannot
+  // be deleted yet) leaves a held token with no transport, and neither the
+  // local reconnect loop (requires an attached transport) nor an unchanged
+  // token would retry it. Record the failure so webAttachReconnectLoop retries
+  // under the shared backoff. Single-flight: concurrent callers share one attach.
+  const attachWebDurableTransport = async (options: { startPresence: boolean }): Promise<void> => {
+    if (webTransportAttachPromise) {
+      await webTransportAttachPromise;
+      return;
+    }
+    const pending = (async () => {
+      try {
+        await attachTransportAdapter({ startPresence: options.startPresence });
+        webTransportAttachPending = null;
+      } catch (error) {
+        webTransportAttachPending =
+          isDestroyedError(error) || disposePromise !== null
+            ? null
+            : { startPresence: options.startPresence };
+        throw error;
+      }
+    })();
+    webTransportAttachPromise = pending;
+    try {
+      await pending;
+    } finally {
+      if (webTransportAttachPromise === pending) {
+        webTransportAttachPromise = null;
+      }
+      webAttachReconnectLoop?.update();
+    }
   };
 
   const attachCloudPlaneTransport = async (): Promise<void> => {
@@ -3322,7 +3364,7 @@ export async function createWorkspaceRuntime(deps: RuntimeDeps): Promise<Workspa
       return;
     }
 
-    await attachTransportAdapter({ startPresence: false });
+    await attachWebDurableTransport({ startPresence: false });
     if (disposePromise) {
       return;
     }
@@ -3354,6 +3396,13 @@ export async function createWorkspaceRuntime(deps: RuntimeDeps): Promise<Workspa
         } finally {
           cloudReconnectLoop?.update();
         }
+      } else if (
+        !electronLocalDataPlane &&
+        nextAuthToken !== null &&
+        webTransportAttachPending !== null
+      ) {
+        // The same token re-announced after a failed attach is a retry signal.
+        webAttachReconnectLoop?.trigger('token-refresh');
       }
       return;
     }
@@ -3423,7 +3472,7 @@ export async function createWorkspaceRuntime(deps: RuntimeDeps): Promise<Workspa
     }
 
     deps.onControlConnectionStateChange?.('connecting');
-    await attachTransportAdapter();
+    await attachWebDurableTransport({ startPresence: true });
     if (disposePromise) {
       return;
     }
@@ -3465,6 +3514,34 @@ export async function createWorkspaceRuntime(deps: RuntimeDeps): Promise<Workspa
     subscribeSyncState: (listener) => machineMonitorTransport.subscribeSyncState(listener),
     needsReconnect: () => machineMonitorTransport.needsReconnect(),
   });
+
+  if (cloudPlaneEnabled && !electronLocalDataPlane) {
+    webAttachReconnectLoop = createLocalReconnectLoop({
+      canRun: () =>
+        disposePromise === null && authToken !== null && !transportAttached && isBrowserOnline(),
+      hasProblem: () => webTransportAttachPending !== null,
+      reconnect: async () => {
+        const pending = webTransportAttachPending;
+        // canRun() already excludes a disposed runtime.
+        if (pending === null || transportAttached) {
+          return;
+        }
+        deps.onControlConnectionStateChange?.('connecting');
+        await attachWebDurableTransport(pending);
+        if (disposePromise) {
+          return;
+        }
+        await ensureMetaRoomSynced('recovery');
+      },
+      onStateChange: () => {},
+      onError: (error) => {
+        console.warn('createWorkspaceRuntime: durable transport attach retry failed', {
+          workspaceId,
+          error,
+        });
+      },
+    });
+  }
 
   localReconnectLoop = createLocalReconnectLoop({
     canRun: canRunLocalReconnect,
@@ -4457,6 +4534,7 @@ export async function createWorkspaceRuntime(deps: RuntimeDeps): Promise<Workspa
       eagerSyncWorkerClient = null;
       localReconnectLoop?.stop();
       cloudReconnectLoop?.stop();
+      webAttachReconnectLoop?.stop();
       if (reconnectBackstopTimer) {
         clearInterval(reconnectBackstopTimer);
         reconnectBackstopTimer = null;
@@ -4566,6 +4644,10 @@ export async function createWorkspaceRuntime(deps: RuntimeDeps): Promise<Workspa
   // are disconnected, so we call reconnect() unconditionally. loro-repo handles rooms
   // that were previously live as well as rooms whose initial Streams join did not complete.
   const triggerReconnect = (reason: LocalReconnectTriggerReason) => {
+    if (!transportAttached && disposePromise === null && webTransportAttachPending !== null) {
+      webAttachReconnectLoop?.trigger(reason);
+      return;
+    }
     if (transportAttached && !disposePromise) {
       console.info('createWorkspaceRuntime: external reconnect trigger', {
         workspaceId,
@@ -4606,6 +4688,7 @@ export async function createWorkspaceRuntime(deps: RuntimeDeps): Promise<Workspa
       cloudReconnectLoop?.stop();
     } else {
       localReconnectLoop?.stop();
+      webAttachReconnectLoop?.stop();
     }
     emitControlConnectionState();
   };
@@ -4620,6 +4703,7 @@ export async function createWorkspaceRuntime(deps: RuntimeDeps): Promise<Workspa
   reconnectBackstopTimer = setInterval(() => {
     localReconnectLoop?.update();
     cloudReconnectLoop?.update();
+    webAttachReconnectLoop?.update();
   }, RECONNECT_BACKSTOP_INTERVAL_MS);
 
   window.repo = repo;

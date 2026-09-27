@@ -197,6 +197,10 @@ Separately, a real full disk makes the CLI daemon exit through an uncaught log-t
   - Runtime invalidation latches its one-shot flag only after a successful delete.
   - The marker is cleared only once this page lifetime has actually deleted the checkpoint.
   - Regressions: for both web and dual, a rejected delete means no `addTransport('cloud')` and the marker survives; the next attach deletes first, then attaches. Both fail against the reviewed head.
+- **Review fix (P1, web retry).** Web attaches only from `setAuthToken` and meta recovery, so a failed first attach under an unchanged token had no reachable retry. The local reconnect loop requires an attached transport, and no room tracker exists yet.
+  - A web attach failure is now recorded explicitly, and `webAttachReconnectLoop` retries it under the shared backoff. That covers the token-change path and the meta-recovery restart path.
+  - A same-token `setAuthToken`, network/visibility wake and the backstop also trigger the retry. Token change, offline and dispose stop it.
+  - Regressions: same-token retry, backoff-only retry (delete strictly before attach, marker cleared after Meta sync), and no pending retry timer after dispose. Each fails when its mechanism is removed.
 - **Merge gate for the web.** Mixed-version tabs need loro-dev/loro-repo#138. Electron runs one bundle for all windows, so it is exposed only on rollback.
 
 ### Phase 2: real CLI barriers (independent of upstream)

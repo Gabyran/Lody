@@ -508,7 +508,7 @@ describe('createWorkspaceRuntime meta recovery lifecycle', () => {
   const cloudAttachCalls = () =>
     mocks.addTransport.mock.calls.filter(([transportId]) => transportId === 'cloud');
 
-  it('does not attach Streams on the web until a suspect Meta checkpoint is really deleted', async () => {
+  const createWebRuntimeWithSuspectMetaCheckpoint = async () => {
     mocks.joinMetaRoom.mockResolvedValue(createMetaSub(Promise.resolve()));
     markSuspectMetaCheckpoint();
     mocks.metaCheckpointDelete.mockRejectedValueOnce(
@@ -519,24 +519,59 @@ describe('createWorkspaceRuntime meta recovery lifecycle', () => {
       workspaceId: 'workspace-1' as WorkspaceId,
       apiBaseUrl: 'https://api.example.test',
     });
-
     // Resuming from the undeleted checkpoint could skip Meta history for good.
     await expect(runtime.setAuthToken('auth-token-1')).rejects.toThrow('connection is closing');
     expect(cloudAttachCalls()).toEqual([]);
     expect(window.localStorage.getItem(markerKey)).not.toBeNull();
+    return runtime;
+  };
 
-    // The next attach retries the delete and only then starts a Meta session.
-    await runtime.setAuthToken('auth-token-2');
+  const expectDeleteThenAttach = () => {
     expect(mocks.metaCheckpointDelete).toHaveBeenCalledTimes(2);
     expect(mocks.metaCheckpointDelete.mock.calls[1]?.[0]).toMatch(/\/workspace-1%3Ameta$/);
     expect(cloudAttachCalls()).toHaveLength(1);
     expect(mocks.metaCheckpointDelete.mock.invocationCallOrder[1]).toBeLessThan(
       mocks.addTransport.mock.invocationCallOrder.at(-1) ?? 0
     );
+  };
+
+  it('retries a web attach blocked by a suspect Meta checkpoint when the same token is announced again', async () => {
+    const runtime = await createWebRuntimeWithSuspectMetaCheckpoint();
+
+    // No token rotation: the unchanged token alone must retry delete-then-attach.
+    await runtime.setAuthToken('auth-token-1');
+    await flushPromises();
+    await flushPromises();
+    expectDeleteThenAttach();
     await flushPromises();
     expect(window.localStorage.getItem(markerKey)).toBeNull();
 
     await runtime.dispose();
+  });
+
+  it('retries a web attach blocked by a suspect Meta checkpoint on its own backoff', async () => {
+    const runtime = await createWebRuntimeWithSuspectMetaCheckpoint();
+
+    // No further setAuthToken call at all: only the retry loop's backoff runs.
+    await vi.advanceTimersByTimeAsync(5_000);
+    await flushPromises();
+    expectDeleteThenAttach();
+    expect(window.localStorage.getItem(markerKey)).toBeNull();
+
+    await runtime.dispose();
+  });
+
+  it('stops a pending web attach retry when the runtime is disposed', async () => {
+    const runtime = await createWebRuntimeWithSuspectMetaCheckpoint();
+
+    // The failed attach armed a retry wait; dispose must cancel it, not leave a
+    // timer that later wakes a torn-down runtime.
+    expect(vi.getTimerCount()).toBeGreaterThan(0);
+    await runtime.dispose();
+    expect(vi.getTimerCount()).toBe(0);
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(mocks.metaCheckpointDelete).toHaveBeenCalledTimes(1);
+    expect(cloudAttachCalls()).toEqual([]);
   });
 
   it('does not attach the cloud plane in dual mode until a suspect Meta checkpoint is really deleted', async () => {
@@ -632,8 +667,7 @@ describe('createWorkspaceRuntime meta recovery lifecycle', () => {
     });
 
     const initialAttach = runtime.setAuthToken('auth-token-1');
-    await flushPromises();
-    expect(mocks.joinMetaRoom).toHaveBeenCalledTimes(1);
+    await vi.waitFor(() => expect(mocks.joinMetaRoom).toHaveBeenCalledTimes(1));
 
     const overlappingRotation = runtime.setAuthToken('auth-token-2');
     await flushPromises();

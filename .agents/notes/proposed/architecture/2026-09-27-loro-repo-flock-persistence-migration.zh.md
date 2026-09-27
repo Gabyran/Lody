@@ -196,6 +196,10 @@ Lody 目前运行 0.20.0，外加一个上游已经吸收的补丁。因此 Lody
   - 运行期失效只在删除成功后才设置一次性标志。
   - 只有本页面生命周期确实删除过 checkpoint，才会清除标记。
   - 回归测试：Web 与 dual 下，删除失败时都不会调用 `addTransport('cloud')`，标记保留；下一次接入先删除再接入。两个测试在被评审的 head 上都会失败。
+- **评审修复（P1，Web 重试）。** Web 只在 `setAuthToken` 和 Meta 恢复时接入 transport，所以 token 不变时，首次接入失败后没有任何可达的重试路径：本地重连循环要求 transport 已接入，而此时还没有任何房间跟踪器。
+  - 现在会显式记录 Web 接入失败，由 `webAttachReconnectLoop` 按共享的退避策略重试。token 变化路径和 Meta 恢复的重启路径都已覆盖。
+  - 相同 token 的 `setAuthToken`、网络恢复/页面唤醒以及兜底定时器也会触发重试；token 变化、离线和 dispose 会停止它。
+  - 回归测试：相同 token 重试、只靠退避的重试（删除严格先于接入，Meta 同步后标记被清除），以及 dispose 后不留下待执行的重试计时器。去掉各自的机制后，对应测试都会失败。
 - **Web 端的合并条件。** 新旧版本标签页混用需要 loro-dev/loro-repo#138。Electron 所有窗口运行同一个包，只有回滚时才会受影响。
 
 ### 阶段 2：CLI 使用真正的屏障（不依赖上游）
