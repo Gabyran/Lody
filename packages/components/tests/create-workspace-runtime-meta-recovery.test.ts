@@ -639,6 +639,45 @@ describe('createWorkspaceRuntime meta recovery lifecycle', () => {
     }
   );
 
+  it.each(['dispose', 'sign-out'] as const)(
+    'rolls back a web attach torn down (%s) while addTransport is in flight',
+    async (teardown) => {
+      mocks.joinMetaRoom.mockResolvedValue(createMetaSub(Promise.resolve()));
+      markSuspectMetaCheckpoint();
+      const blockedAdd = Promise.withResolvers<void>();
+      mocks.addTransport.mockImplementationOnce(async () => await blockedAdd.promise);
+      const runtime = await createWorkspaceRuntime({
+        workspaceSlug: 'workspace',
+        workspaceId: 'workspace-1' as WorkspaceId,
+        apiBaseUrl: 'https://api.example.test',
+      });
+
+      const attach = runtime.setAuthToken('auth-token-1');
+      await vi.waitFor(() => expect(cloudAttachCalls()).toHaveLength(1));
+      if (teardown === 'dispose') {
+        await runtime.dispose();
+      } else {
+        await runtime.setAuthToken(null);
+      }
+      const removalsBeforeRelease = mocks.removeTransport.mock.calls.length;
+      blockedAdd.resolve();
+      await attach;
+      await flushPromises();
+      await vi.advanceTimersByTimeAsync(120_000);
+
+      // The late transport is removed again, never joined, and never retried;
+      // the suspect-checkpoint marker is not cleared by it either.
+      expect(mocks.removeTransport.mock.calls.length).toBeGreaterThan(removalsBeforeRelease);
+      expect(mocks.removeTransport.mock.calls.at(-1)?.[0]).toBe('cloud');
+      expect(mocks.joinMetaRoom).not.toHaveBeenCalled();
+      expect(cloudAttachCalls()).toHaveLength(1);
+      expect(window.localStorage.getItem(markerKey)).not.toBeNull();
+      if (teardown === 'sign-out') {
+        await runtime.dispose();
+      }
+    }
+  );
+
   it('stops a pending web attach retry when the runtime is disposed', async () => {
     const runtime = await createWebRuntimeWithSuspectMetaCheckpoint();
 
