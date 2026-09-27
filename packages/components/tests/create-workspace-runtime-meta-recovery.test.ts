@@ -714,6 +714,88 @@ describe('createWorkspaceRuntime meta recovery lifecycle', () => {
     await runtime.dispose();
   });
 
+  it('still removes a later in-flight add after an older superseded add finishes first', async () => {
+    mocks.joinMetaRoom.mockResolvedValue(createMetaSub(Promise.resolve()));
+    markSuspectMetaCheckpoint();
+    const firstAdd = Promise.withResolvers<void>();
+    const secondAdd = Promise.withResolvers<void>();
+    mocks.addTransport
+      .mockImplementationOnce(async () => await firstAdd.promise)
+      .mockImplementationOnce(async () => await secondAdd.promise);
+    const runtime = await createWorkspaceRuntime({
+      workspaceSlug: 'workspace',
+      workspaceId: 'workspace-1' as WorkspaceId,
+      apiBaseUrl: 'https://api.example.test',
+    });
+
+    const firstToken = runtime.setAuthToken('auth-token-1');
+    await vi.waitFor(() => expect(cloudAttachCalls()).toHaveLength(1));
+    const secondToken = runtime.setAuthToken('auth-token-2');
+    await vi.waitFor(() => expect(cloudAttachCalls()).toHaveLength(2));
+    expect(cloudRemovals()).toHaveLength(1);
+
+    // The older add finishing must not hide that token-2's add is still live.
+    firstAdd.resolve();
+    await firstToken;
+    await runtime.setAuthToken(null);
+    expect(cloudRemovals()).toHaveLength(2);
+
+    secondAdd.resolve();
+    await secondToken;
+    await flushPromises();
+    await vi.advanceTimersByTimeAsync(120_000);
+    expect(cloudRemovals()).toHaveLength(2);
+    expect(cloudAttachCalls()).toHaveLength(2);
+    expect(mocks.joinMetaRoom).not.toHaveBeenCalled();
+    expect(window.localStorage.getItem(markerKey)).not.toBeNull();
+
+    await runtime.dispose();
+  });
+
+  it.each(['delete', 'add'] as const)(
+    'ignores a superseded attach whose %s fails after the next token attached',
+    async (stage) => {
+      mocks.joinMetaRoom.mockResolvedValue(createMetaSub(Promise.resolve()));
+      markSuspectMetaCheckpoint();
+      const blocked = Promise.withResolvers<void>();
+      if (stage === 'delete') {
+        mocks.metaCheckpointDelete.mockImplementationOnce(async () => await blocked.promise);
+      } else {
+        mocks.addTransport.mockImplementationOnce(async () => await blocked.promise);
+      }
+      const runtime = await createWorkspaceRuntime({
+        workspaceSlug: 'workspace',
+        workspaceId: 'workspace-1' as WorkspaceId,
+        apiBaseUrl: 'https://api.example.test',
+      });
+
+      const firstToken = runtime.setAuthToken('auth-token-1');
+      await vi.waitFor(() =>
+        expect(
+          stage === 'delete' ? mocks.metaCheckpointDelete.mock.calls : cloudAttachCalls()
+        ).toHaveLength(1)
+      );
+      await runtime.setAuthToken('auth-token-2');
+      const attachedCloudCalls = cloudAttachCalls().length;
+      const presenceStops = mocks.presenceStop.mock.calls.length;
+      const deletes = mocks.metaCheckpointDelete.mock.calls.length;
+
+      // Token-1's stuck step now fails with an ordinary error.
+      blocked.reject(new Error('The database connection is closing.'));
+      await firstToken;
+      await flushPromises();
+      await vi.advanceTimersByTimeAsync(120_000);
+
+      // It must not stop token-2's presence, nor schedule a retry for itself.
+      expect(mocks.presenceStop.mock.calls.length).toBe(presenceStops);
+      expect(mocks.metaCheckpointDelete.mock.calls.length).toBe(deletes);
+      expect(cloudAttachCalls()).toHaveLength(attachedCloudCalls);
+      await expect(runtime.ensureDocStream('session-after-rotation')).resolves.toBeUndefined();
+
+      await runtime.dispose();
+    }
+  );
+
   it('stops a pending web attach retry when the runtime is disposed', async () => {
     const runtime = await createWebRuntimeWithSuspectMetaCheckpoint();
 

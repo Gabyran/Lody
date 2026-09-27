@@ -643,7 +643,9 @@ export async function createWorkspaceRuntime(deps: RuntimeDeps): Promise<Workspa
   let webAttachGeneration = 0;
   // loro-repo registers a transport synchronously when addTransport starts and
   // only resolves after routing live rooms, so an in-flight add is already live.
-  let webCloudAddInFlight = false;
+  // Generations do not wait for each other, so adds of several generations can
+  // be in flight at once; each clears only its own entry.
+  const webCloudAddsInFlight = new Set<number>();
   let reconnectBackstopTimer: ReturnType<typeof setInterval> | null = null;
   let releaseIdleDocumentStoresBeforeReconnect: () => Promise<void> = async () => {};
   // Background eager-sync coordinator. Assigned once all of its port
@@ -2727,7 +2729,7 @@ export async function createWorkspaceRuntime(deps: RuntimeDeps): Promise<Workspa
     webAttachGeneration += 1;
     // Captured with the generation bump: the attach runs synchronously from its
     // last generation check into addTransport, so no add can start unseen.
-    const cloudAddWasInFlight = webCloudAddInFlight;
+    const cloudAddWasInFlight = webCloudAddsInFlight.size > 0;
 
     // A runtime-wide teardown owns the mux lifecycle. Let an in-flight cloud
     // member attachment observe dispose/auth state and roll itself back before
@@ -2997,11 +2999,11 @@ export async function createWorkspaceRuntime(deps: RuntimeDeps): Promise<Workspa
 
       // Web routes every room to ['cloud'] (router non-localFirst path), so
       // the single transport must be registered under that id.
-      webCloudAddInFlight = true;
+      webCloudAddsInFlight.add(options.generation);
       try {
         await repo.addTransport('cloud', transportAdapter, { ephemeral: true });
       } finally {
-        webCloudAddInFlight = false;
+        webCloudAddsInFlight.delete(options.generation);
       }
       if (options.generation !== webAttachGeneration) {
         // Torn down while addTransport ran: that teardown already removed this
@@ -3010,9 +3012,11 @@ export async function createWorkspaceRuntime(deps: RuntimeDeps): Promise<Workspa
         throw new SupersededAttachError();
       }
     } catch (error) {
-      if (error instanceof SupersededAttachError) {
-        // teardownTransport already stopped everything this attach started.
-        throw error;
+      if (error instanceof SupersededAttachError || options.generation !== webAttachGeneration) {
+        // A superseded attach, succeeding or failing, never touches state: its
+        // teardown already stopped what it started, and presence, analytics and
+        // retry bookkeeping now belong to the next generation.
+        throw new SupersededAttachError();
       }
       // runtime_init_failed (spec §5.2, P0): durable transport attach is the
       // gate for all remote sync; surfacing its failure with a reason_code is a

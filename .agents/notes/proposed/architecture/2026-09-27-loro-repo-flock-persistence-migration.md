@@ -205,12 +205,16 @@ Separately, a real full disk makes the CLI daemon exit through an uncaught log-t
   - Every `teardownTransport` now bumps a web attach generation synchronously; it does not await the attach, which may be blocked on the delete.
   - An attach re-checks its generation after `prepareStreamsAccess`, after the checkpoint delete and after `addTransport` (removing the transport it just added). A superseded attach publishes nothing and records no retry.
   - Sharing is limited to one generation. A newer generation never waits for an older attach, which may be stuck on the delete or on room routing; it builds its own provider and transport at once.
-  - loro-repo registers a transport as soon as `addTransport` starts. Teardown therefore records, together with the generation bump, whether a web cloud add is in flight, and removes that transport before sign-out or dispose returns. The superseded add does not remove `cloud` again when it finally resolves, so it cannot hit the next generation's transport of the same id.
+  - loro-repo registers a transport as soon as `addTransport` starts. Teardown therefore records, together with the generation bump, whether any web cloud add is in flight, and removes that transport before sign-out or dispose returns.
+  - Because generations do not wait for each other, adds of several generations can overlap. In-flight adds are therefore tracked per generation, and each clears only its own entry; with a single flag, an older add finishing would hide a newer in-flight add from the next sign-out.
+  - The attach's error path is fenced as well: a superseded attach that later fails with an ordinary error is converted to a supersession. It must not emit analytics, stop the next generation's presence, or record a retry. The superseded add does not remove `cloud` again when it finally resolves, so it cannot hit the next generation's transport of the same id.
   - Regressions:
     - Rotating t1→t2 while the delete is blocked attaches t2 before the old delete is released, exactly once, and `ensureDocStream` works.
     - Dispose or sign-out during a blocked delete never attaches, joins or retries.
     - With `addTransport` held, sign-out and dispose have already removed the cloud transport when they return.
     - A superseded add that resolves after the next token attached does not remove that token's transport.
+    - With two adds in flight, the older finishing first still leaves the next sign-out to remove the newer one before returning.
+    - A superseded attach whose delete or add later fails with an ordinary error leaves presence and retries alone, and the next token's `ensureDocStream` still works.
     - Each of these fails when its mechanism is removed.
 - **Review fix (P1, dual marker).** The dual runtime watches its local Meta binding, which usually synced before the cloud plane attached, so the marker was never cleared. Every later cloud attach deleted a valid cloud checkpoint and bootstrapped again.
   - In dual mode the marker is now cleared only by the cloud Meta binding's first sync, and only while that tracker is still current and the same cloud attach deleted the checkpoint.
