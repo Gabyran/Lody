@@ -75,11 +75,10 @@ turn-finalization side effects. Intent and the reader contract:
 
 A workspace has ONE serial presence queue and the machine heartbeat shares it. Trigger
 a presence write ONLY from a timer, a lifecycle transition, or a user navigation,
-NEVER from a stream/progress/chunk callback however small one payload is, and bound
-every field in `packages/shared/src/presence.ts`. A burst delays the heartbeat past
-its 90s freshness window while the room still reports `joined`, so the machine reads
-offline with no error raised anywhere. The `(phase, detail)` dedupe is NOT a rate
-limit: a detail that changes per emit (percentage, counter, label) defeats it.
+NEVER from a stream/progress/chunk callback, and bound
+every field in `packages/shared/src/presence.ts` (why: the spec). The `(phase, detail)`
+dedupe is NOT a rate limit: a detail that changes per emit (percentage, counter, label)
+defeats it.
 
 INVARIANT: `initializing` is bounded per stage from the last phase/detail change; on
 expiry the heartbeat stops and `notifyInitializationStalled` fails the turn. Spec:
@@ -91,8 +90,8 @@ Loro flush; meta timestamps are written only at status transitions. Durable
 checks read presence only, and `getOnlineMachineIds()` returning null means the
 presence room is not joined — status unknown, not offline.
 
-Repo storage stays wrapped by `observeStorageAdapterWrites`, feeding `StorageHealthMonitor`;
-teardown unregisters only after its own flush succeeds ([spec](../../../../../specs/local-storage-health.md)).
+Wrap repo storage in `observeStorageAdapterWrites`; teardown unregisters its recovery
+target only after its final flush ([spec](../../../../../specs/local-storage-health.md)).
 
 ## Device resources use `machine-monitor.ts`
 

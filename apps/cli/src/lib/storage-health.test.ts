@@ -427,4 +427,76 @@ describe('StorageHealthMonitor', () => {
     monitor.stop();
     database.close();
   });
+
+  it('catches a metadata write refused through the atomic saveMany path, then saves it', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'lody-storage-save-many-'));
+    createdDirs.push(dir);
+    const dbPath = path.join(dir, 'repo.sqlite3');
+    const database = new Database(dbPath);
+    const sqliteStore = new SqliteRepoStore({ database });
+    // Count what reaches the real adapter through each entry point.
+    const inner = sqliteStore.storage;
+    const innerSaveMany = inner.saveMany?.bind(inner);
+    const calls = { save: 0, saveMany: 0 };
+    const counted: typeof inner = {
+      ...inner,
+      save: (payload) => {
+        calls.save += 1;
+        return inner.save(payload);
+      },
+      ...(innerSaveMany
+        ? {
+            saveMany: (payloads: Parameters<typeof innerSaveMany>[0]) => {
+              calls.saveMany += 1;
+              return innerSaveMany(payloads);
+            },
+          }
+        : {}),
+      loadDoc: (docId) => inner.loadDoc(docId),
+      loadMeta: () => inner.loadMeta(),
+    };
+    expect(inner.saveMany).toBeTypeOf('function');
+
+    const space = { current: { availableBytes: 50 * GIB, totalBytes: TOTAL } };
+    const { monitor, scheduler } = createMonitor(space);
+    await monitor.start();
+    const observed = observeStorageAdapterWrites(counted, {
+      onWriteFailed: (error, operation) => monitor.reportWriteFailure(error, operation),
+      onWriteSucceeded: () => monitor.reportWriteSuccess(),
+    });
+    expect(observed.saveMany).toBeTypeOf('function');
+    const repo = await LoroRepo.create({ storageAdapter: observed, metaDebounceCommitMs: 0 });
+    monitor.registerFlushTarget('workspace-1', () => repo.flush());
+
+    const pages = database.pragma('page_count', { simple: true }) as number;
+    database.pragma(`max_page_count = ${pages}`);
+    space.current = { availableBytes: 0, totalBytes: TOTAL };
+    for (let i = 0; i < 50; i += 1) {
+      await repo.upsertDocMeta(`meta-only-${i}`, { title: `meta-only-${i} `.repeat(200) });
+    }
+    const beforeMetaFlush = { ...calls };
+    await expect(repo.persistMetaNow()).rejects.toThrow();
+    // The refused metadata commit went through saveMany, and the observer saw it.
+    expect(calls.saveMany).toBeGreaterThan(beforeMetaFlush.saveMany);
+    expect(monitor.getSnapshot()).toMatchObject({ level: 'critical', reason: 'write-failed' });
+
+    database.pragma('max_page_count = 1073741823');
+    space.current = { availableBytes: 20 * GIB, totalBytes: TOTAL };
+    scheduler.advance(10_000);
+    await monitor.settled();
+    expect(monitor.getSnapshot()).toMatchObject({ level: 'ok', unsavedSince: null });
+
+    const reopenedStore = new SqliteRepoStore({ path: dbPath });
+    const reopened = await LoroRepo.create({ storageAdapter: reopenedStore.storage });
+    for (let i = 0; i < 50; i += 1) {
+      expect((await reopened.getDocMeta(`meta-only-${i}`))?.meta).toMatchObject({
+        title: `meta-only-${i} `.repeat(200),
+      });
+    }
+    await reopened.destroy();
+    reopenedStore.close();
+    monitor.stop();
+    await repo.destroy();
+    database.close();
+  });
 });

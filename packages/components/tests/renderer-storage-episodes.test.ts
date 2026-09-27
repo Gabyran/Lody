@@ -1,4 +1,4 @@
-import { LoroRepo, type StorageAdapter } from 'loro-repo';
+import { LoroRepo, type StorageAdapter, type StorageSavePayload } from 'loro-repo';
 import { describe, expect, it } from 'vitest';
 import { RepoStorageGuard } from '@lody/shared';
 import { RendererStorageEpisodes } from '../src/lib/renderer-storage-episodes';
@@ -6,10 +6,17 @@ import { RendererStorageEpisodes } from '../src/lib/renderer-storage-episodes';
 /** Refuses every write while `full`, like an IndexedDB origin out of quota. */
 const createQuotaStore = () => {
   const state = { full: false, saved: [] as string[] };
+  const target = (payload: StorageSavePayload) =>
+    'docId' in payload ? `${payload.type}:${payload.docId}` : payload.type;
+  // Both entry points, like IndexedDBStorageAdaptor: metadata goes through `saveMany`.
   const adapter: StorageAdapter = {
     save: async (payload) => {
       if (state.full) throw new DOMException('quota', 'QuotaExceededError');
-      state.saved.push('docId' in payload ? `${payload.type}:${payload.docId}` : payload.type);
+      state.saved.push(target(payload));
+    },
+    saveMany: async (payloads) => {
+      if (state.full) throw new DOMException('quota', 'QuotaExceededError');
+      state.saved.push(...payloads.map(target));
     },
     loadDoc: async () => undefined,
     loadMeta: async () => undefined,

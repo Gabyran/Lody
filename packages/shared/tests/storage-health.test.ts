@@ -1,4 +1,4 @@
-import { LoroRepo, type StorageAdapter } from 'loro-repo';
+import { LoroRepo, type StorageAdapter, type StorageSavePayload } from 'loro-repo';
 import { describe, expect, it } from 'vitest';
 import {
   RepoStorageGuard,
@@ -74,6 +74,38 @@ describe('observeStorageAdapterWrites', () => {
     // loro-repo feature-detects optional methods, so the wrapper must not invent them.
     expect('deleteDoc' in adapter).toBe(false);
     expect('loadMetaReplica' in adapter).toBe(false);
+    expect('saveMany' in adapter).toBe(false);
+  });
+
+  it('forwards the atomic saveMany and reports its outcome as one write', async () => {
+    let fail = false;
+    const committed: unknown[][] = [];
+    const inner: StorageAdapter = {
+      save: async () => {
+        throw new Error('the batch must not fall back to save');
+      },
+      saveMany: async (payloads) => {
+        if (fail) throw withCode('SQLITE_FULL');
+        committed.push([...payloads]);
+      },
+      loadDoc: async () => undefined,
+      loadMeta: async () => undefined,
+    };
+    const outcomes: string[] = [];
+    const adapter = observeStorageAdapterWrites(inner, {
+      onWriteFailed: (error, operation) =>
+        outcomes.push(`failed:${operation}:${classifyStorageFullError(error)}`),
+      onWriteSucceeded: () => outcomes.push('ok'),
+    });
+    const batch = [
+      { type: 'meta-update', update: new Uint8Array([1]) },
+      { type: 'meta-update', update: new Uint8Array([2]) },
+    ] as never;
+    await adapter.saveMany?.(batch);
+    fail = true;
+    await expect(adapter.saveMany?.(batch)).rejects.toMatchObject({ code: 'SQLITE_FULL' });
+    expect(committed).toEqual([batch]);
+    expect(outcomes).toEqual(['ok', 'failed:saveMany:SQLITE_FULL']);
   });
 });
 
@@ -116,13 +148,20 @@ describe('StorageFullRecovery over a real LoroRepo', () => {
    */
   const createStore = () => {
     const state = { metaFull: false, saved: [] as string[] };
+    const refused = (payload: StorageSavePayload) =>
+      state.metaFull && payload.type.startsWith('meta-');
+    const target = (payload: StorageSavePayload) =>
+      'docId' in payload ? `${payload.type}:${payload.docId}` : payload.type;
+    // Both entry points, like the real adapters: loro-repo commits metadata through
+    // the atomic `saveMany` when it exists, so a fault only in `save` would be bypassed.
     const adapter: StorageAdapter = {
       save: async (payload) => {
-        const target = 'docId' in payload ? `${payload.type}:${payload.docId}` : payload.type;
-        if (state.metaFull && payload.type.startsWith('meta-')) {
-          throw new DOMException('quota', 'QuotaExceededError');
-        }
-        state.saved.push(target);
+        if (refused(payload)) throw new DOMException('quota', 'QuotaExceededError');
+        state.saved.push(target(payload));
+      },
+      saveMany: async (payloads) => {
+        if (payloads.some(refused)) throw new DOMException('quota', 'QuotaExceededError');
+        state.saved.push(...payloads.map(target));
       },
       loadDoc: async () => undefined,
       loadMeta: async () => undefined,
@@ -227,10 +266,16 @@ describe('RepoStorageGuard over a real LoroRepo', () => {
   /** Refuses every write while `full`, like an IndexedDB origin out of quota. */
   const createQuotaStore = () => {
     const state = { full: false, saved: [] as string[] };
+    const target = (payload: StorageSavePayload) =>
+      'docId' in payload ? `${payload.type}:${payload.docId}` : payload.type;
     const adapter: StorageAdapter = {
       save: async (payload) => {
         if (state.full) throw new DOMException('quota', 'QuotaExceededError');
-        state.saved.push('docId' in payload ? `${payload.type}:${payload.docId}` : payload.type);
+        state.saved.push(target(payload));
+      },
+      saveMany: async (payloads) => {
+        if (state.full) throw new DOMException('quota', 'QuotaExceededError');
+        state.saved.push(...payloads.map(target));
       },
       loadDoc: async () => undefined,
       loadMeta: async () => undefined,

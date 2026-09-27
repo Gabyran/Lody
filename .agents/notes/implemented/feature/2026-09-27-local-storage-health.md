@@ -33,13 +33,20 @@ separate; this change neither depends on it nor conflicts with it.
 
 ## Decisions
 
-**Observe writes at the storage adapter.** loro-repo 0.20.3 persists local edits in
-the background and hands a failed save to `logAsyncError`, which only prints. It
-exposes no error hook. Every repo write goes through the `StorageAdapter`, so
+**Observe writes at the storage adapter.** loro-repo persists local edits in the
+background and hands a failed save to `logAsyncError`, which only prints. It exposes
+no error hook. Every repo write goes through the `StorageAdapter`, so
 `observeStorageAdapterWrites` (shared) wraps it and reports each outcome. It keeps
 optional methods absent, because loro-repo feature-detects them, and rethrows errors
 unchanged, so a failed save stays dirty and is retried by the next flush. The CLI
 wraps its SQLite adapter and the renderer wraps IndexedDB with the same helper.
+
+Since loro-repo 0.21.0 (#1066), metadata and named Flock payloads are committed
+through the adapter's optional atomic `saveMany`, which both real adapters implement.
+The wrapper forwards it and observes it as one write. Leaving it out would not fail;
+it would silently fall back to one commit per payload and undo loro-repo#141's single
+strict transaction. A refused `saveMany` rolls back every payload and the repo
+retries them all, so it is one classified failure like any other.
 
 **Classify by code, never by message.** `classifyStorageFullError` walks `cause` and
 `AggregateError.errors` (loro-repo wraps a failed snapshot fallback that way). It
@@ -55,8 +62,9 @@ generation counter stops a recovery that raced a new failure from clearing it.
 Free space alone never clears it.
 
 Stopping a workspace (list reconcile, revocation, shutdown) must not drop a repo that
-holds unsaved changes. `cleanUp` flushes explicitly, instead of through the coalescer,
-which swallows failures, and unregisters only after that flush succeeds. If the flush
+holds unsaved changes. `cleanUp` flushes explicitly, instead of leaving it to
+`repo.destroy()`, whose failure would drop the repo with the changes, and unregisters
+only after that flush succeeds. If the flush
 is refused as storage-full, the manager keeps its repo open and registered; the
 monitor's recovery flushes it and then destroys it. Unregistering with `saved: false`
 during an open episode marks it lost, and the episode then never clears in that
@@ -149,8 +157,12 @@ forgotten, since its memory went with it. If asking fails, the answer counts as
 yes, so a broken dialog never traps the user. The first revision checked only the
 agent; review caught that too.
 
-**Coalesced flush failures** now log a warning naming when the run of failures began,
-at most every 5 minutes, and an info line when a flush succeeds again.
+**Remote-sync persistence failures** are reported like every other write. The first
+revision also raised the Streams persist coalescer's failures from debug to a
+rate-limited warning. #1066 removed that coalescer: each cursor save now waits on a
+real per-resource barrier, whose writes pass through the observed adapter. The
+monitor's own warnings (once per episode, then at most every 5 minutes, naming when
+it began) cover them.
 
 ## Ballast file (layer 4): not implemented
 
@@ -194,6 +206,12 @@ Automated, with injected clocks, manual timers and fault injection, no real slee
     a second connection reads the session doc. Rethrowing the unload failure
     reproduces the reported early exit (`database or disk is full`). Skipping the
     unregister leaves the workspace held; both fail the test.
+  - metadata refused through `saveMany` (real `SqliteRepoStore` capped with
+    `max_page_count`, metadata-only writes): the refused commit reaches the adapter's
+    `saveMany`, the observer turns it critical, recovery saves it, and a second
+    connection reads all fifty entries. Without the forwarding the wrapper has no
+    `saveMany` and the test fails. The in-memory fakes in the shared and renderer
+    suites inject faults into both `save` and `saveMany`, as the real adapters do.
   - `tests/lody-fleet-local-catalog.test.ts`: restarting a workspace whose stopped
     repo is still retained does not call `Lody.create` until the repo is released.
     Removing the wait fails it.

@@ -31,6 +31,7 @@ export const observeStorageAdapterWrites = (
     return result;
   };
   const { loadMetaReplica, loadFlockDocReplica, init, close, compactMeta, compactFlockDoc } = inner;
+  const { saveMany } = inner;
   const { loadFlockDoc, deleteDoc, deleteFlockDoc } = inner;
   return {
     ...(loadMetaReplica ? { loadMetaReplica: () => loadMetaReplica.call(inner) } : {}),
@@ -40,6 +41,16 @@ export const observeStorageAdapterWrites = (
     ...(init ? { init: () => init.call(inner) } : {}),
     ...(close ? { close: () => close.call(inner) } : {}),
     save: (payload) => observe('save', () => inner.save(payload)),
+    // loro-repo commits metadata and named Flock payloads through `saveMany`
+    // when the adapter has it; dropping it would fall back to one commit per
+    // payload. It is atomic, so a failure is one refused write that the repo
+    // retries in full.
+    ...(saveMany
+      ? {
+          saveMany: (payloads: Parameters<typeof saveMany>[0]) =>
+            observe('saveMany', () => saveMany.call(inner, payloads)),
+        }
+      : {}),
     ...(compactMeta
       ? { compactMeta: () => observe('compactMeta', () => compactMeta.call(inner)) }
       : {}),
