@@ -74,6 +74,7 @@ import {
   type SessionMeta,
   type SessionOperation,
   type WorkspaceId,
+  deriveDraftSessionTitle,
 } from '@lody/shared';
 import type { SessionTurn } from '@lody/shared/session-data';
 import { prepareCliStreamsGatewayBaseUrl } from '@/lib/loro/streams-access';
@@ -3062,6 +3063,9 @@ export async function prepareSessionInput(
   const repoFullName = resolveProjectGitHubRepo(project);
   const baseBranch = project?.kind === 'local' ? undefined : project?.branch?.trim();
   const title = normalizeCliValue(options.title);
+  // Without an explicit title the sidebar would stay blank until the agent's
+  // title lands, which for ACP-owned titles is after the first turn ends.
+  const draftTitle = title ? undefined : deriveDraftSessionTitle(prompt);
   const meta = {
     id: sessionId,
     machineId: targetMachine.id,
@@ -3073,6 +3077,7 @@ export async function prepareSessionInput(
     agentType: agentConfig.agentType,
     agentConfigId: agentConfig.id,
     ...(title ? { title } : {}),
+    ...(draftTitle ? { title: draftTitle, titleSource: 'draft' as const } : {}),
     ...(project ? { project } : {}),
     ...(repoFullName ? { repoFullName } : {}),
     ...(baseBranch ? { baseBranch } : {}),
