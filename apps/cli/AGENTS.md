@@ -55,6 +55,7 @@ Root `AGENTS.md` applies; this file adds CLI context. Build, PR-poller, and adap
   rotation window. Move it to `logger.trace` (`LODY_LOG_TRACE=1`) only if its subsystem's failures
   stay diagnosable without it; keep failing/slow branches at `debug`
   ([note](../../.agents/notes/implemented/architecture/2026-09-16-daemon-log-volume.md)).
+- File logs use `createFileTransport`; a raw `DailyRotateFile` makes a full disk crash the daemon.
 - Read context/local-agent-ownership.md before changing local ports/sockets, daemon PID state,
   Electron/daemon startup, Supervisor retries, or Worker shutdown; health probes are observation
   only and never authorize PID killing.
