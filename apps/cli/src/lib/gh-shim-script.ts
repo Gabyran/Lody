@@ -845,10 +845,12 @@ const windowsLauncherSourceTemplate = `@echo off
 const resolveBrokerStatePath = (statePath?: string): string =>
   path.resolve(statePath ?? path.join(getLodyDataDir(), 'broker.json'));
 
+// Parent of every per-broker shim dir; agent PATH merges pin any child of it first.
+export const getGhShimSessionBinRoot = (): string => path.join(getLodyDataDir(), 'gh-session-bin');
+
 export const getGhShimHostBinDir = (brokerStateFilePath?: string): string =>
   path.join(
-    getLodyDataDir(),
-    'gh-session-bin',
+    getGhShimSessionBinRoot(),
     createHash('sha256')
       .update(resolveBrokerStatePath(brokerStateFilePath))
       .digest('hex')
