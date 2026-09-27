@@ -26,10 +26,7 @@ describe('file sink level', () => {
   const opened: Array<ReturnType<typeof createFileTransport>> = [];
   const logRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'lody-log-level-'));
 
-  /**
-   * Resolves once the rotator has opened its file, so teardown never races the
-   * stream it is about to remove.
-   */
+  /** Resolves once the rotator has chosen its file; `new` precedes the async open. */
   const openFileTransport = async (): Promise<ReturnType<typeof createFileTransport>> => {
     const dirname = fs.mkdtempSync(path.join(logRoot, 'sink-'));
     const transport = createFileTransport({ file: { dirname } });
@@ -38,11 +35,19 @@ describe('file sink level', () => {
     return transport;
   };
 
-  afterEach(() => {
+  afterEach(async () => {
     delete process.env.LODY_LOG_TRACE;
-    while (opened.length > 0) {
-      opened.pop()?.close();
-    }
+    // `finish` waits for the pending open, so removing the directory cannot
+    // fail that open with an uncaught ENOENT.
+    await Promise.all(
+      opened.splice(0).map(
+        (transport) =>
+          new Promise<void>((resolve) => {
+            transport.once('finish', () => resolve());
+            transport.close();
+          })
+      )
+    );
   });
 
   afterAll(() => {
