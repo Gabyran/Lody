@@ -43,7 +43,9 @@ append the same input again and run it as a new turn.
   `pending` steer status holds the row: that input still runs, once, through the
   steer's own history. Applied or settled steer status, an active turn, or the
   existing settled evidence (`lastHandled`, settled activation, missing-history
-  tombstone, completed assistant) removes the row without appending.
+  tombstone, completed assistant) removes the row without appending. That evidence
+is checked first: recovery writes its tombstone before clearing the steer status,
+so a crash between the two must not leave a permanent hold at the queue head.
 
 A refused steer whose history never arrives ends through missing-history recovery,
 and the tombstone then drops the held row. The user resends explicitly. Promoting
@@ -75,7 +77,9 @@ second replacement leaves the document version unchanged, projections skip ordin
 and settled copies, and a started or settled copy vetoes both requeue flags. A CLI
 test forks a queued document into two replicas, records the execution state on fresh
 meta while passing stale meta, and covers applied, refused, tombstoned and ordinary
-turns through the renderer's later merge. Removing each mechanism made its tests
-fail: last-copy-only writes (4), settled regression (1), requeue veto (2), projection
-filter (1), the queue guard (3), fresh meta (3), and holding refused steers (1).
+turns, plus a refused steer whose tombstone is already written, through the
+renderer's later merge. Removing each mechanism made its tests fail: last-copy-only
+writes (4), settled regression (1), requeue veto (2), projection filter (1), the
+queue guard (3), fresh meta (3), holding refused steers (1), and checking settled
+evidence before the hold (1).
 Design reviewed with the Reviewer Agent Role; no live provider or UI run.

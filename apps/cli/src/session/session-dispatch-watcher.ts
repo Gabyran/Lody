@@ -2149,21 +2149,23 @@ export class SessionDispatchWatcher {
       const currentMeta = await sessionDoc.getMetaState();
       if (!currentMeta) return null;
       const steerStatus = currentMeta.steerTurnStatuses?.[queuedTurnId];
-      if (steerStatus === 'pending') {
-        // A refused steer still owes an ordinary run through its own history row.
-        this.deps.logger.debug(
-          `[${meta.id}] Holding queued message ${queuedItem.$cid} for refused steer history`
-        );
-        return null;
-      }
+      // Settled evidence outranks a refused steer: recovery writes its tombstone
+      // before clearing the steer status, and a hold would then never end.
       if (
-        steerStatus !== undefined ||
+        (steerStatus !== undefined && steerStatus !== 'pending') ||
         this.deps.executionService.getActiveUserTurnId?.(meta.id) === queuedTurnId ||
         this.hasQueuedTurnSettled(currentMeta, queuedTurnId, history)
       ) {
         await sessionDoc.removeMessageQueueItem(queuedItem.$cid);
         this.deps.logger.debug(
           `[${meta.id}] Dropping queued message ${queuedItem.$cid} already owned by execution`
+        );
+        return null;
+      }
+      if (steerStatus === 'pending') {
+        // A refused steer still owes an ordinary run through its own history row.
+        this.deps.logger.debug(
+          `[${meta.id}] Holding queued message ${queuedItem.$cid} for refused steer history`
         );
         return null;
       }

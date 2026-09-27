@@ -991,6 +991,11 @@ describe('SessionDispatchWatcher', () => {
     ['an applied steer', { steerTurnStatuses: { steered: 'processing' } }, 'drop'],
     ['a refused steer', { steerTurnStatuses: { steered: 'pending' } }, 'hold'],
     ['a missing-history tombstone', { lastMissingHistoryUserMsgId: 'steered' }, 'drop'],
+    [
+      'a refused steer whose recovery wrote its tombstone',
+      { steerTurnStatuses: { steered: 'pending' }, lastMissingHistoryUserMsgId: 'steered' },
+      'drop',
+    ],
     ['no execution evidence', {}, 'promote'],
   ] as const)(
     'classifies a queued turn by fresh execution state before promotion: %s',

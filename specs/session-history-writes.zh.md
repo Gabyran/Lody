@@ -49,7 +49,8 @@ Translation: current
 - 追加一条历史中尚不存在的排队 turn 之前，队列提升在其租约内重新读取会话 meta。若该 turn 的
   steer 已被拒绝，保留队列行，直到该 steer 自己的历史到达，或 missing-history 恢复将其结束。
   若 steer 已被接收或已结束、turn 正在执行或已处理、激活已结算、存在 missing-history
-  tombstone 或已完成的 assistant 输出，则删除队列行且不追加历史。
+  tombstone 或已完成的 assistant 输出，则删除队列行且不追加历史；这些证据优先于被拒绝的
+  steer 状态。
 - 输入框 steering 必须同时具备权威 ACP acknowledged steering 能力、活跃 prompt 和已知未结束
   assistant turn。忙碌期间，Guide 偏好或反转 Queue 的发送若不具备该能力，直接追加到正规 Queue；
   能力信息不可用或仅为 provisional 时也如此。消息保留队列顺序及正常提升前的编辑/删除能力，

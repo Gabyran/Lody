@@ -69,7 +69,8 @@ That tolerance must not authorize creating new malformed items locally.
   session meta inside its lease. A refused steer for that turn holds the queued row until
   the steer's own history arrives or missing-history recovery settles it. An applied or
   settled steer, an active or handled turn, a settled activation, a missing-history
-  tombstone or completed assistant output removes the row without appending history.
+  tombstone or completed assistant output removes the row without appending history;
+  that evidence takes precedence over a refused steer status.
 - Composer steering requires authoritative ACP support for acknowledged steering,
   a live prompt, and a known unfinished assistant turn. During activity, a guide
   preference or inverted queue submission without that support appends to the
