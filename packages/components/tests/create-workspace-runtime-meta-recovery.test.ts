@@ -226,7 +226,10 @@ vi.mock('loro-repo/transport/streams', () => ({
 }));
 
 vi.mock('@loro-dev/streams-crdt/loro', () => ({
-  StreamsCrdt: class StreamsCrdt {},
+  StreamsCrdt: class StreamsCrdt {
+    createStream = vi.fn(async () => ({ ok: true }));
+    close = vi.fn(async () => {});
+  },
   createLoroDocAdapter: vi.fn(() => ({})),
 }));
 
@@ -572,6 +575,64 @@ describe('createWorkspaceRuntime meta recovery lifecycle', () => {
 
     await runtime.dispose();
   });
+
+  it('attaches the new token, not the superseded one, when the token rotates during a blocked delete', async () => {
+    mocks.joinMetaRoom.mockResolvedValue(createMetaSub(Promise.resolve()));
+    markSuspectMetaCheckpoint();
+    const blockedDelete = Promise.withResolvers<void>();
+    mocks.metaCheckpointDelete.mockImplementationOnce(async () => await blockedDelete.promise);
+    const runtime = await createWorkspaceRuntime({
+      workspaceSlug: 'workspace',
+      workspaceId: 'workspace-1' as WorkspaceId,
+      apiBaseUrl: 'https://api.example.test',
+    });
+
+    const firstToken = runtime.setAuthToken('auth-token-1');
+    await vi.waitFor(() => expect(mocks.metaCheckpointDelete).toHaveBeenCalledTimes(1));
+    const secondToken = runtime.setAuthToken('auth-token-2');
+    // The rotation tears down token-1's provider while its attach is blocked.
+    await vi.waitFor(() => expect(mocks.tokenProviderInvalidate).toHaveBeenCalled());
+    blockedDelete.resolve();
+    await Promise.all([firstToken, secondToken]);
+
+    // Only token-2's attach publishes a transport, after its own delete.
+    expect(cloudAttachCalls()).toHaveLength(1);
+    expect(mocks.metaCheckpointDelete).toHaveBeenCalledTimes(2);
+    await expect(runtime.ensureDocStream('session-after-rotation')).resolves.toBeUndefined();
+
+    await runtime.dispose();
+  });
+
+  it.each(['dispose', 'sign-out'] as const)(
+    'does not attach once the runtime is torn down (%s) during a blocked delete',
+    async (teardown) => {
+      mocks.joinMetaRoom.mockResolvedValue(createMetaSub(Promise.resolve()));
+      markSuspectMetaCheckpoint();
+      const blockedDelete = Promise.withResolvers<void>();
+      mocks.metaCheckpointDelete.mockImplementationOnce(async () => await blockedDelete.promise);
+      const runtime = await createWorkspaceRuntime({
+        workspaceSlug: 'workspace',
+        workspaceId: 'workspace-1' as WorkspaceId,
+        apiBaseUrl: 'https://api.example.test',
+      });
+
+      const attach = runtime.setAuthToken('auth-token-1');
+      await vi.waitFor(() => expect(mocks.metaCheckpointDelete).toHaveBeenCalledTimes(1));
+      if (teardown === 'dispose') {
+        await runtime.dispose();
+      } else {
+        await runtime.setAuthToken(null);
+      }
+      blockedDelete.resolve();
+      await attach;
+      await flushPromises();
+
+      expect(cloudAttachCalls()).toEqual([]);
+      if (teardown === 'sign-out') {
+        await runtime.dispose();
+      }
+    }
+  );
 
   it('stops a pending web attach retry when the runtime is disposed', async () => {
     const runtime = await createWebRuntimeWithSuspectMetaCheckpoint();

@@ -234,6 +234,14 @@ const isDestroyedError = (error: unknown): boolean => {
   return error instanceof Error && error.message === 'Destroyed';
 };
 
+/** A web attach whose token generation was torn down while it was in flight. */
+class SupersededAttachError extends Error {
+  constructor() {
+    super('Superseded Loro Streams attach');
+    this.name = 'SupersededAttachError';
+  }
+}
+
 const formatTransportError = (error: unknown): string => {
   if (typeof error !== 'object' || error === null) {
     return String(error);
@@ -628,7 +636,11 @@ export async function createWorkspaceRuntime(deps: RuntimeDeps): Promise<Workspa
   // no room exists before the transport attaches.
   let webAttachReconnectLoop: LocalReconnectLoop | null = null;
   let webTransportAttachPending: { startPresence: boolean } | null = null;
-  let webTransportAttachPromise: Promise<void> | null = null;
+  let webTransportAttach: { generation: number; promise: Promise<void> } | null = null;
+  // Bumped by every teardownTransport (token change, sign-out, dispose, meta
+  // recovery). An attach belongs to the generation it started in; once that
+  // generation is torn down it must not publish provider, transport or state.
+  let webAttachGeneration = 0;
   let reconnectBackstopTimer: ReturnType<typeof setInterval> | null = null;
   let releaseIdleDocumentStoresBeforeReconnect: () => Promise<void> = async () => {};
   // Background eager-sync coordinator. Assigned once all of its port
@@ -2706,6 +2718,10 @@ export async function createWorkspaceRuntime(deps: RuntimeDeps): Promise<Workspa
     const stopRpcClients = options.stopRpcClients ?? true;
     const resetStreamsClient = options.resetStreamsClient ?? true;
     const invalidateTokenProvider = options.invalidateTokenProvider ?? true;
+    // Supersede any in-flight web attach synchronously: it may be blocked (for
+    // example on the suspect Meta checkpoint delete), so it is not awaited here;
+    // it checks the generation after every await and publishes nothing.
+    webAttachGeneration += 1;
 
     // A runtime-wide teardown owns the mux lifecycle. Let an in-flight cloud
     // member attachment observe dispose/auth state and roll itself back before
@@ -2930,8 +2946,16 @@ export async function createWorkspaceRuntime(deps: RuntimeDeps): Promise<Workspa
       });
   };
 
-  const attachTransportAdapter = async (options: { startPresence?: boolean } = {}) => {
-    const shouldStartPresence = options.startPresence ?? true;
+  const attachTransportAdapter = async (options: {
+    startPresence: boolean;
+    generation: number;
+  }) => {
+    const shouldStartPresence = options.startPresence;
+    const assertCurrentGeneration = () => {
+      if (options.generation !== webAttachGeneration) {
+        throw new SupersededAttachError();
+      }
+    };
     const startedAt = Date.now();
     console.info('createWorkspaceRuntime: attaching Loro Streams transport', {
       workspaceId,
@@ -2940,6 +2964,7 @@ export async function createWorkspaceRuntime(deps: RuntimeDeps): Promise<Workspa
     try {
       console.debug('createWorkspaceRuntime: prefetching Loro Streams token', { workspaceId });
       const { provider: activeStreamsTokenProvider, streamsBaseUrl } = await prepareStreamsAccess();
+      assertCurrentGeneration();
       console.info('createWorkspaceRuntime: Loro Streams token ready', {
         workspaceId,
         streamsBaseUrl,
@@ -2953,6 +2978,7 @@ export async function createWorkspaceRuntime(deps: RuntimeDeps): Promise<Workspa
 
       if (isMetaRemoteCursorBypassActive()) {
         await dropSuspectMetaCheckpointBeforeAttach(streamsBaseUrl);
+        assertCurrentGeneration();
       }
       const transportAdapter = createStreamsDurableTransport(
         activeStreamsTokenProvider,
@@ -2962,7 +2988,17 @@ export async function createWorkspaceRuntime(deps: RuntimeDeps): Promise<Workspa
       // Web routes every room to ['cloud'] (router non-localFirst path), so
       // the single transport must be registered under that id.
       await repo.addTransport('cloud', transportAdapter, { ephemeral: true });
+      if (options.generation !== webAttachGeneration) {
+        // Torn down while addTransport ran: the transport belongs to a dead
+        // provider, and the next generation attaches its own.
+        await repo.removeTransport('cloud', { close: true }).catch(() => undefined);
+        throw new SupersededAttachError();
+      }
     } catch (error) {
+      if (error instanceof SupersededAttachError) {
+        // teardownTransport already stopped everything this attach started.
+        throw error;
+      }
       // runtime_init_failed (spec §5.2, P0): durable transport attach is the
       // gate for all remote sync; surfacing its failure with a reason_code is a
       // churn-attribution signal. Re-thrown so existing error flow is unchanged;
@@ -2999,30 +3035,58 @@ export async function createWorkspaceRuntime(deps: RuntimeDeps): Promise<Workspa
   // token would retry it. Record the failure so webAttachReconnectLoop retries
   // under the shared backoff. Single-flight: concurrent callers share one attach.
   const attachWebDurableTransport = async (options: { startPresence: boolean }): Promise<void> => {
-    if (webTransportAttachPromise) {
-      await webTransportAttachPromise;
-      return;
+    const generation = webAttachGeneration;
+    // Share an attach only within one token generation. An older in-flight
+    // attach is left to notice its supersession and unwind first, so the new
+    // generation always builds its own provider and transport.
+    for (let inFlight = webTransportAttach; inFlight; inFlight = webTransportAttach) {
+      if (inFlight.generation === generation) {
+        await inFlight.promise;
+        return;
+      }
+      await inFlight.promise.catch(() => undefined);
+      if (generation !== webAttachGeneration) {
+        throw new SupersededAttachError();
+      }
     }
     const pending = (async () => {
       try {
-        await attachTransportAdapter({ startPresence: options.startPresence });
+        await attachTransportAdapter({ startPresence: options.startPresence, generation });
         webTransportAttachPending = null;
       } catch (error) {
-        webTransportAttachPending =
-          isDestroyedError(error) || disposePromise !== null
-            ? null
-            : { startPresence: options.startPresence };
+        if (!(error instanceof SupersededAttachError)) {
+          webTransportAttachPending =
+            isDestroyedError(error) || disposePromise !== null
+              ? null
+              : { startPresence: options.startPresence };
+        }
         throw error;
       }
     })();
-    webTransportAttachPromise = pending;
+    const current = { generation, promise: pending };
+    webTransportAttach = current;
     try {
       await pending;
     } finally {
-      if (webTransportAttachPromise === pending) {
-        webTransportAttachPromise = null;
+      if (webTransportAttach === current) {
+        webTransportAttach = null;
       }
       webAttachReconnectLoop?.update();
+    }
+  };
+
+  /** False when a later token generation took over; that caller owns the attach. */
+  const attachWebDurableTransportUnlessSuperseded = async (options: {
+    startPresence: boolean;
+  }): Promise<boolean> => {
+    try {
+      await attachWebDurableTransport(options);
+      return true;
+    } catch (error) {
+      if (error instanceof SupersededAttachError) {
+        return false;
+      }
+      throw error;
     }
   };
 
@@ -3382,7 +3446,9 @@ export async function createWorkspaceRuntime(deps: RuntimeDeps): Promise<Workspa
       return;
     }
 
-    await attachWebDurableTransport({ startPresence: false });
+    if (!(await attachWebDurableTransportUnlessSuperseded({ startPresence: false }))) {
+      return;
+    }
     if (disposePromise) {
       return;
     }
@@ -3490,7 +3556,9 @@ export async function createWorkspaceRuntime(deps: RuntimeDeps): Promise<Workspa
     }
 
     deps.onControlConnectionStateChange?.('connecting');
-    await attachWebDurableTransport({ startPresence: true });
+    if (!(await attachWebDurableTransportUnlessSuperseded({ startPresence: true }))) {
+      return;
+    }
     if (disposePromise) {
       return;
     }
@@ -3545,7 +3613,9 @@ export async function createWorkspaceRuntime(deps: RuntimeDeps): Promise<Workspa
           return;
         }
         deps.onControlConnectionStateChange?.('connecting');
-        await attachWebDurableTransport(pending);
+        if (!(await attachWebDurableTransportUnlessSuperseded(pending))) {
+          return;
+        }
         if (disposePromise) {
           return;
         }
