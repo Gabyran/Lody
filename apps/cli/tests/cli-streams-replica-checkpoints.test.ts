@@ -219,10 +219,18 @@ describe('CLI Streams checkpoints are bound to the replica that loaded them', ()
     const server = createStreamsServer(metaSnapshotWithA());
     const daemon = await openCliProcess();
     const storage = daemon.store.storageAdapter;
+    const diskFull = () => new Error('SQLITE_FULL: database or disk is full');
     const save = storage.save.bind(storage);
     storage.save = async (payload) => {
-      if (payload.type === 'meta-update') throw new Error('SQLITE_FULL: database or disk is full');
+      if (payload.type === 'meta-update') throw diskFull();
       await save(payload);
+    };
+    // loro-repo commits metadata through the atomic `saveMany` when the adapter has it.
+    const saveMany = storage.saveMany?.bind(storage);
+    expect(saveMany).toBeDefined();
+    storage.saveMany = async (payloads) => {
+      if (payloads.some((payload) => payload.type === 'meta-update')) throw diskFull();
+      await saveMany?.(payloads);
     };
 
     const result = await syncMeta(daemon).catch((error: unknown) => ({ ok: false, error }));

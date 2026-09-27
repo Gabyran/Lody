@@ -252,13 +252,13 @@ Lody 目前运行 0.20.0，外加一个上游已经吸收的补丁。因此 Lody
 
   上游设计必须堵住这一点。例如让 checkpoint 记录捕获时 base/日志的指纹，指纹不匹配就丢弃 checkpoint。IndexedDB 也有同样的缺口，但渲染端目前没有删除命名 Flock 的代码。
 
-- **上游进展：** [loro-dev/loro-repo#137](https://github.com/loro-dev/loro-repo/pull/137) 实现了这项能力，尚未合并，本文也还未评审。
+- **上游进展：** [loro-dev/loro-repo#137](https://github.com/loro-dev/loro-repo/pull/137) 实现了这项能力，经评审后已合并，并与 #138（IndexedDB lineage marker）、#141（每次 flush 一个 strict 事务）一起在 loro-repo 0.21.0 发布。
   - 它没有用指纹，而是用写在数据库 schema 里的删除触发器来堵回滚缺口：删除 base 行，或在没有 base 行时删除 update 行，都会一并删掉 checkpoint。
   - 这之所以成立，是因为自 #99 以来所有 SQLite 版本删除 Flock 数据只有两条路径：`deleteFlockDoc`，以及先写 base 再删 update 的压实。所以旧版本执行删除时触发器同样生效，也不会把压实误判为删除。
   - base 行写入从 `INSERT OR REPLACE` 改为 UPSERT，开启 `recursive_triggers` 时也不会误触发。
 - **IndexedDB：** 同类问题记录在 [loro-dev/loro-repo#136](https://github.com/loro-dev/loro-repo/issues/136)，也涵盖不同版本的标签页同时打开的情况，它是 Web 端推进阶段 1 的前置条件。
 
-**阶段 3 的实际实现（分支 `feat/cli-sqlite-replica-checkpoints`；等待包含 #137 的 loro-repo 发版）。**
+**阶段 3 的实际实现（分支 `feat/cli-sqlite-replica-checkpoints`，基于 loro-repo 0.21.0）。**
 
 - **跳过了阶段 2。** #137 在阶段 2 开始前已经合并，而 replica-bound 持久化在每次保存游标前本来就会等待真正的按资源屏障。单独做阶段 2 只会被重写。
 - **接线。** `createCliStreamsTransport` 现在接收 repo 和 LoroDoc 游标库，并传入 `createRepoStreamsPersistence(repo, { documentRemoteCursorStore })`。
@@ -287,6 +287,7 @@ Lody 目前运行 0.20.0，外加一个上游已经吸收的补丁。因此 Lody
   - 这样共享游标只会描述 daemon 自己的副本。一次性命令写入的数据可能领先于它，这只会导致重放。
   - 回归测试：新增双进程 `syncDoc` 测试（一次性命令先加载空文档，daemon bootstrap 到 A 并推进共享游标，然后一次性命令同步，必须通过第二次 bootstrap 拿到 A）。若 LoroDoc 游标共享，一次性命令最终仍是空的。manager-create 测试断言一次性调用方默认得到内存游标库。
   - 上游如果提供 LoroDoc 的 replica-bound checkpoint，可以省掉每条命令的 bootstrap，但这不是正确性所必需的。
+- **0.21.0 通过 `saveMany` 写入。** SQLite 和 IndexedDB 适配器都新增了可选的原子 `saveMany`，loro-repo 写元数据和命名 Flock 时优先用它而不是 `save`。因此崩溃测试同时在两个入口注入磁盘满错误，并断言 `saveMany` 存在。显式列举适配器方法的包装层（如 #1060 的写入观察器）必须转发 `saveMany`：漏掉它仍然正确，但会静默退回每个 payload 一次提交，抵消 #141 的收益。
 - **限制。** 升级后第一次打开会写入 checkpoint 表和触发器。如果那一刻磁盘恰好已满，工作区会打不开（loro-dev/loro-repo#139）。
 
 ## 备选方案

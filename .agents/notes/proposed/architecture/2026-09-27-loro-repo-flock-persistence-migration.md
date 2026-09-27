@@ -253,13 +253,13 @@ Separately, a real full disk makes the CLI daemon exit through an uncaught log-t
 
   The upstream design must close this. For example, each checkpoint could record a fingerprint of the base/log it was captured with, so a mismatch discards the checkpoint. The same gap exists for IndexedDB, but no renderer code deletes named Flocks.
 
-- **Upstream status:** [loro-dev/loro-repo#137](https://github.com/loro-dev/loro-repo/pull/137) implements this capability. It is open and not yet reviewed here.
+- **Upstream status:** [loro-dev/loro-repo#137](https://github.com/loro-dev/loro-repo/pull/137) implements this capability. It merged after review and shipped in loro-repo 0.21.0 together with #138 (IndexedDB lineage marker) and #141 (one strict transaction per flush).
   - It closes the rollback gap with delete triggers stored in the database schema rather than fingerprints. Deleting a base row, or deleting update rows while no base row exists, drops the checkpoint.
   - This works because every SQLite writer since #99 removes Flock data only through `deleteFlockDoc` or through compaction, and compaction writes the base before deleting updates. The triggers therefore also fire for older binaries without mistaking compaction for deletion.
   - Base rows switch from `INSERT OR REPLACE` to UPSERT, so `recursive_triggers` cannot misfire either.
 - **IndexedDB:** the equivalent gap is tracked in [loro-dev/loro-repo#136](https://github.com/loro-dev/loro-repo/issues/136). It also covers concurrent tabs from different releases, and it gates Phase 1 on the web.
 
-**Phase 3 as implemented (branch `feat/cli-sqlite-replica-checkpoints`; waits for the loro-repo release that contains #137).**
+**Phase 3 as implemented (branch `feat/cli-sqlite-replica-checkpoints`, on loro-repo 0.21.0).**
 
 - **Phase 2 was skipped.** #137 merged before Phase 2 started, and replica-bound persistence already awaits a real per-resource barrier before every cursor save. A separate Phase 2 would only have been rewritten.
 - **Wiring.** `createCliStreamsTransport` now takes the repo and the LoroDoc cursor store and passes `createRepoStreamsPersistence(repo, { documentRemoteCursorStore })`.
@@ -288,6 +288,7 @@ Separately, a real full disk makes the CLI daemon exit through an uncaught log-t
   - The shared cursors therefore only ever describe the daemon's own replica. Data written by one-shot commands can run ahead of them, which only replays.
   - Regression: a two-process `syncDoc` test (one-shot hydrates an empty doc, the daemon bootstraps A and advances the shared cursor, then the one-shot syncs and must receive A through a second bootstrap). With shared LoroDoc cursors the one-shot ends empty. The manager-create test asserts one-shot callers get an in-memory store by default.
   - A LoroDoc replica-bound checkpoint upstream would remove the per-command bootstrap; it is not required for correctness.
+- **0.21.0 writes through `saveMany`.** The SQLite and IndexedDB adapters now expose the optional atomic `saveMany`, and loro-repo prefers it over `save` for metadata and named Flock payloads. The crash test therefore injects the disk-full failure into both entry points and asserts that `saveMany` exists. A wrapper that lists adapter methods explicitly (such as #1060's write observer) must forward `saveMany`: omitting it stays correct but silently falls back to one commit per payload, undoing #141.
 - **Limit.** The first open after this upgrade writes the checkpoint table and triggers. If the disk is already full at that moment, the workspace fails to open (loro-dev/loro-repo#139).
 
 ## Alternatives
