@@ -67,7 +67,9 @@ labelClassName`) so the stage diffstat never clips. Wired from
   attempt of each check (`selectLatestCheckRuns` keys by app + name, highest id
   wins), so a re-run that went green clears an earlier failure; cancelled/stale
   runs render as `cancelled` and never make CI "failed" nor enter the Fix CI
-  snapshot. Color budget: ambient
+  snapshot. The same shared summary feeds the PR tab: its verdict ignores
+  cancelled/stale runs unless nothing else ran, and PR-cache entries read back
+  from IndexedDB are re-derived with `normalizeCheckRunsSummary`. Color budget: ambient
   chips (status/goal/schedule) render NEUTRAL (goal state reads from its
   pulse + popover, not an inline tint); color is reserved for genuine
   status — the expanded PR status icon and the ±diff counts.

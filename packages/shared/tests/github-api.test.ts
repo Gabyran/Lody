@@ -12,6 +12,7 @@ import {
   githubFetchProjectSkillsAtCommit,
   githubFetchPullRequestDetails,
   githubFetchPullRequestReviews,
+  normalizeCheckRunsSummary,
 } from '../src/github-api';
 
 describe('GitHub PR live reads', () => {
@@ -118,6 +119,47 @@ describe('githubFetchCheckRuns', () => {
     const summary = await githubFetchCheckRuns('token', 'owner/repo', 'head-sha');
 
     expect(summary.total).toBe(1);
+    expect(summary.conclusion).toBe('success');
+  });
+
+  it('does not let a cancelled check turn an otherwise green commit into a failure', async () => {
+    const summarize = async (runs: ReturnType<typeof apiRun>[]) => {
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(async () => new Response(JSON.stringify({ check_runs: runs })))
+      );
+      return (await githubFetchCheckRuns('token', 'owner/repo', 'head-sha')).conclusion;
+    };
+
+    expect(await summarize([apiRun(1, 'test', 'success'), apiRun(2, 'deploy', 'cancelled')])).toBe(
+      'success'
+    );
+    expect(await summarize([apiRun(1, 'test', 'failure'), apiRun(2, 'deploy', 'cancelled')])).toBe(
+      'failure'
+    );
+    expect(await summarize([apiRun(2, 'deploy', 'cancelled')])).toBe('cancelled');
+  });
+
+  it('re-derives summaries persisted with superseded attempts', () => {
+    const run = (id: number, conclusion: 'success' | 'failure') => ({
+      id,
+      name: 'test',
+      status: 'completed' as const,
+      conclusion,
+      htmlUrl: null,
+      startedAt: null,
+      completedAt: null,
+      appName: 'GitHub Actions',
+    });
+
+    const summary = normalizeCheckRunsSummary({
+      status: 'completed',
+      conclusion: 'failure',
+      total: 2,
+      runs: [run(10, 'failure'), run(12, 'success')],
+    });
+
+    expect(summary.runs.map((item) => item.id)).toEqual([12]);
     expect(summary.conclusion).toBe('success');
   });
 });
