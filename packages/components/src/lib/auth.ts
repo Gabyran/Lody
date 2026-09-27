@@ -80,9 +80,11 @@ export type SignOutOutcome = { ok: true } | { ok: false; error: AuthResponseErro
 export const signOutWithoutRedirect = async (
   authClient: LodyAuthClient
 ): Promise<SignOutOutcome> => {
-  // Desktop: a window whose own repo holds changes its storage refused must flush,
-  // or the user must agree to drop them, before any local auth state is cleared.
-  // Declining leaves everything, including this session, exactly as it was.
+  // Desktop: the other windows are closed first, and one whose own repo holds
+  // changes its storage refused must flush, or the user must agree to drop them.
+  // This is the only step that can be cancelled, so it finishes before any local
+  // auth state changes: declining leaves everything, including this session, as
+  // it was.
   const approved = (await getIpcServices()?.auth.prepareSignOut()) ?? true;
   if (!approved) {
     return {

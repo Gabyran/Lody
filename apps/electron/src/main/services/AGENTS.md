@@ -58,7 +58,8 @@ window's own repo (`@lody/shared/renderer-storage-barrier`); each such window ge
 `WindowStorageBarrier` (`will-prevent-unload`); never drop a window's report on
 destroy, and never reload with a built-in menu role or a raw `webContents.reload()`
 that skips recording the intent. A product window is `destroy()`ed only through
-`tearDownWindows` (sign-out, cache clear), which a Cancel aborts. An OS session end
+`tearDownWindows` (sign-out, cache clear), which a Cancel aborts, and never after the
+renderer changed auth state: `auth.prepareSignOut` is sign-out's only cancellable step. An OS session end
 (Windows `query-session-end`, which skips `before-quit`; `powerMonitor` `shutdown`)
 enters the same quit through `createSessionEndGuard`, and only when something is
 known unsaved. Spec: `specs/local-storage-health.md`.

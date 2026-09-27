@@ -228,6 +228,22 @@ removing the decline or the completion report, consuming on claim, skipping the
 disk re-arm or its retirement, dropping the release, or re-arming with a fresh time
 each fails one of them.
 
+Correction: that second approval could itself be cancelled, but it ran after the
+shared sign-out had already cleared the token, the auth bootstrap, the last route
+and the preferred workspace (that clear has to precede the network sign-out, to
+fence token requests). A window that became unsaved between the two checks, followed
+by Cancel, therefore left this window half signed out while the CLI and the session
+stayed. Review caught it. `auth.prepareSignOut` is now the only step that can
+cancel, and it is final: it runs `tearDownWindows`, so other windows are flushed,
+asked about in rounds, and destroyed before it returns, leaving none that could
+become unsaved afterwards. `auth.signOut` no longer cancels; it destroys only a
+window opened since that holds nothing unsaved, and the renderer adapter always
+stops the CLI after it. A test drives `signOutWithoutRedirect` against the real
+barrier over real `LoroRepo`s. Window B's write is refused while A is being flushed,
+and the user cancels. The token, bootstrap, route, workspace and intent fence are
+unchanged, the server sign-out is not called, B is kept, and B's repo later saves
+the change. Clearing before the barrier, or skipping the barrier, fails it.
+
 `approveTeardown` first flushed and asked about a snapshot taken on entry. A window
 that became unsaved while another was flushing, or while the user looked at the
 question, was then destroyed without a flush or a question. Review caught this TOCTOU

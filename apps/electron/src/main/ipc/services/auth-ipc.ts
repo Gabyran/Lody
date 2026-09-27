@@ -41,35 +41,37 @@ export class AuthIpc extends IpcService {
   }
 
   /**
-   * Before the renderer clears its own auth state: every window whose own repo
-   * holds unsaved changes flushes, and the user confirms dropping what is still
-   * unsaved. False means signing out was cancelled and nothing changed.
+   * The one step of signing out that can be cancelled, so the renderer runs it
+   * before it changes any auth state. Every other product window is closed here:
+   * `destroy()` runs no beforeunload, so the storage barrier flushes and asks
+   * first. False means the user kept unsaved changes and nothing changed. Closing
+   * them now, not in {@link signOut}, leaves no window that could become unsaved
+   * between this answer and the sign-out.
    */
   @IpcMethod()
   async prepareSignOut(): Promise<boolean> {
     assertAuthSender()
-    return await getIpcServiceDeps().windowStorageBarrier.approveTeardown(
-      liveProductWindowIds(),
-      'sign-out'
-    )
-  }
-
-  @IpcMethod()
-  async signOut(): Promise<{ signedOut: boolean }> {
-    assertAuthSender()
-    const sender = getIpcContext().event.sender
-    // `destroy()` runs no beforeunload, so the storage barrier approves first; a
-    // window that became unsaved since prepareSignOut is asked again.
-    const approved = await tearDownWindows({
+    return await tearDownWindows({
       barrier: getIpcServiceDeps().windowStorageBarrier,
       windowIds: liveProductWindowIds(),
-      keep: sender.id,
+      keep: getIpcContext().event.sender.id,
       kind: 'sign-out',
       destroy: destroyProductWindow
     })
-    if (!approved) return { signedOut: false }
+  }
+
+  /** Never cancels: the renderer has already cleared its auth state. */
+  @IpcMethod()
+  async signOut() {
+    assertAuthSender()
+    const sender = getIpcContext().event.sender
+    // A window opened since prepareSignOut; one that already holds unsaved
+    // changes stays open under its own unload guard rather than being destroyed.
+    const barrier = getIpcServiceDeps().windowStorageBarrier
+    for (const windowId of liveProductWindowIds()) {
+      if (windowId !== sender.id && barrier.mayTearDown(windowId)) destroyProductWindow(windowId)
+    }
     await getIpcServiceDeps().authService.signOut()
-    return { signedOut: true }
   }
 
   @IpcMethod()

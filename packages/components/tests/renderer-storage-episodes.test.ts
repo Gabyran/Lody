@@ -1,12 +1,22 @@
+// @vitest-environment jsdom
 import { LoroRepo, type StorageAdapter, type StorageSavePayload } from 'loro-repo';
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
 import { RepoStorageGuard } from '@lody/shared';
 import {
   RendererStorageState,
   WindowStorageBarrier,
+  SIGN_OUT_CANCELLED_CODE,
   tearDownWindows,
 } from '@lody/shared/renderer-storage-barrier';
 import { RendererStorageEpisodes } from '../src/lib/renderer-storage-episodes';
+import {
+  getAuthSessionIntentGeneration,
+  signOutWithoutRedirect,
+  type LodyAuthClient,
+} from '../src/lib/auth';
+import { readStoredAuthToken, writeStoredAuthToken } from '../src/lib/auth-bootstrap';
+import { readLastAppRoutePath, writeLastAppRoutePath } from '../src/lib/last-app-route';
+import { readPreferredWorkspaceSlug, writePreferredWorkspaceSlug } from '../src/lib/workspace';
 
 /** Refuses every write while `full`, like an IndexedDB origin out of quota. */
 const createQuotaStore = () => {
@@ -194,6 +204,110 @@ describe('sign-out across windows', () => {
     expect(destroyed).toEqual([2]);
     expect(storeB.state.saved.some((target) => target.startsWith('meta-'))).toBe(true);
     await b.guard.close();
+  });
+
+  describe('through the shared sign-out', () => {
+    afterEach(() => {
+      delete (window as { ipc?: unknown }).ipc;
+      localStorage.clear();
+    });
+
+    it('changes no auth state when a window becomes unsaved during the final check and the user cancels', async () => {
+      const state = new RendererStorageState();
+      const windowA = new RendererStorageEpisodes((since) => state.report(1, since));
+      const windowB = new RendererStorageEpisodes((since) => state.report(2, since));
+      const registries = new Map([
+        [1, windowA],
+        [2, windowB],
+      ]);
+      const storeA = createQuotaStore();
+      const storeB = createQuotaStore();
+      const a = await openRuntime(windowA, storeA.adapter, () => 500);
+      const b = await openRuntime(windowB, storeB.adapter, () => 1_000);
+      // B's refusal lands while A, the window signing out, is being flushed.
+      const refuseInB = async () => {
+        storeB.state.full = true;
+        await b.repo.upsertDocMeta('doc-b', { title: 'typed in window B while signing out' });
+        await expect(b.repo.persistMetaNow()).rejects.toThrow();
+      };
+      let injected = false;
+      const confirms: Array<[number, string]> = [];
+      const barrier = new WindowStorageBarrier({
+        state,
+        quitApproved: () => false,
+        reportLost: () => {},
+        confirmDiscard: async (since, kind) => {
+          confirms.push([since, kind]);
+          return false;
+        },
+        quitCheck: {
+          timeoutMs: 3_000,
+          setTimer: () => null,
+          clearTimer: () => {},
+          send: (windowId, requestId) => {
+            const registry = registries.get(windowId);
+            if (!registry) return false;
+            void (async () => {
+              if (!injected) {
+                injected = true;
+                await refuseInB();
+              }
+              state.handleQuitCheckResult(windowId, requestId, await registry.flushForQuit());
+            })();
+            return true;
+          },
+        },
+      });
+      storeA.state.full = true;
+      await a.repo.upsertDocMeta('doc-a', { title: 'typed in window A while full' });
+      await expect(a.repo.persistMetaNow()).rejects.toThrow();
+      storeA.state.full = false;
+
+      // The main process's `auth.prepareSignOut`, reached through the preload bridge.
+      const destroyed: number[] = [];
+      (window as unknown as { ipc: unknown }).ipc = {
+        invoke: async (channel: string) => {
+          if (channel !== 'auth.prepareSignOut') throw new Error(`unexpected ${channel}`);
+          return await tearDownWindows({
+            barrier,
+            windowIds: [1, 2],
+            keep: 1,
+            kind: 'sign-out',
+            destroy: (windowId) => destroyed.push(windowId),
+          });
+        },
+      };
+      writeStoredAuthToken('token');
+      localStorage.setItem('lody:auth-bootstrap', '{"user":"someone"}');
+      writeLastAppRoutePath('/acme/sessions/session-1');
+      writePreferredWorkspaceSlug('acme');
+      let serverSignOuts = 0;
+      const authClient = {
+        signOut: async () => {
+          serverSignOuts++;
+        },
+      } as unknown as LodyAuthClient;
+      const generation = getAuthSessionIntentGeneration(authClient);
+
+      const outcome = await signOutWithoutRedirect(authClient);
+
+      expect(outcome).toMatchObject({ ok: false, error: { code: SIGN_OUT_CANCELLED_CODE } });
+      expect(confirms).toEqual([[1_000, 'sign-out']]);
+      expect(readStoredAuthToken()).toBe('token');
+      expect(localStorage.getItem('lody:auth-bootstrap')).toBe('{"user":"someone"}');
+      expect(readLastAppRoutePath()).toBe('/acme/sessions/session-1');
+      expect(readPreferredWorkspaceSlug()).toBe('acme');
+      expect(getAuthSessionIntentGeneration(authClient)).toBe(generation);
+      expect(serverSignOuts).toBe(0);
+      expect(destroyed).toEqual([]);
+      expect(state.unsavedSince(2)).toBe(1_000);
+      // B's repo still holds the change: once space returns, its flush saves it.
+      storeB.state.full = false;
+      storeB.state.saved.length = 0;
+      await expect(windowB.flushForQuit()).resolves.toBeNull();
+      expect(storeB.state.saved.some((target) => target.startsWith('meta-'))).toBe(true);
+      await Promise.all([a.guard.close(), b.guard.close()]);
+    });
   });
 
   it('destroys window B only after the user explicitly discards', async () => {

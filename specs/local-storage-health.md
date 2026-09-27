@@ -133,7 +133,8 @@ them a chance to unload, so both ask first: every window holding unsaved changes
 flushes, and whatever is still unsaved gets one confirmation. A window that becomes
 unsaved while this is going on is flushed and included in a new question; an answer
 only covers what it was about. Cancel stops the sign-out or the clear, and nothing is
-closed or changed.
+closed or changed. For a sign-out, including this window's own sign-in state: the
+question is settled before anything about the session changes.
 
 Installing an update is a quit and asks the same question before anything starts
 quitting. Cancel keeps the app running, and every later close or reload is guarded
