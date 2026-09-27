@@ -5,14 +5,16 @@
 // `@lody/shared/node/desktop-local-reset`.
 import { session } from 'electron'
 import {
-  consumeDesktopLocalResetRequest,
+  consumeDesktopLocalResetRequestDetailed,
+  createDesktopLocalClearHandoff,
   type DesktopLocalResetMode
 } from '@lody/shared/node/desktop-local-reset'
 import { mainPlatformKind } from '../platform'
 
 /**
- * Set when a `cache` reset was armed, read exactly once by the renderer through
- * `app.consumePendingLocalClear`.
+ * Set when a `cache` reset was armed; a booting window claims it through
+ * `app.claimPendingLocalClear` and settles it once the clear ran (or declines it,
+ * which keeps it armed for the next load).
  *
  * A `cache` reset has to run in the renderer: it keeps the user signed in, keeps
  * their preferences, and keeps the Shortcut outbox (whose rows can be the only
@@ -20,10 +22,14 @@ import { mainPlatformKind } from '../platform'
  * individual IndexedDB databases or localStorage keys. So main only arms it, and
  * `clear-local-cache.ts` performs the same precise clear the settings action does.
  *
- * One-shot because a renderer reload re-runs that boot path: replaying the clear
- * on every reload would re-download the whole local replica each time.
+ * Settled once because a renderer reload re-runs that boot path: replaying the
+ * clear on every reload would re-download the whole local replica each time. A
+ * declined clear stays armed, in memory and back on disk (see the handoff).
  */
-let pendingRendererLocalClear: DesktopLocalResetMode | null = null
+const pendingRendererLocalClear = createDesktopLocalClearHandoff({
+  platform: mainPlatformKind,
+  log: (message, detail) => console.error(`[Electron] ${message}`, detail)
+})
 
 /**
  * Consume the armed request, if any, before any window exists.
@@ -37,9 +43,9 @@ let pendingRendererLocalClear: DesktopLocalResetMode | null = null
  * Never throws: a failed reset must still leave a usable app.
  */
 export async function applyPendingDesktopLocalReset(): Promise<void> {
-  let mode: DesktopLocalResetMode | null = null
+  let request: { mode: DesktopLocalResetMode; requestedAtMs: number } | null = null
   try {
-    mode = consumeDesktopLocalResetRequest({
+    request = consumeDesktopLocalResetRequestDetailed({
       platform: mainPlatformKind,
       log: (message, detail) => console.warn(`[Electron] ${message}`, detail)
     })
@@ -47,7 +53,8 @@ export async function applyPendingDesktopLocalReset(): Promise<void> {
     console.error('[Electron] Failed to consume the desktop reset request', error)
     return
   }
-  if (!mode) return
+  if (!request) return
+  const { mode } = request
 
   console.info('[Electron] Applying a desktop reset armed from the CLI', { mode })
   if (mode === 'hard') {
@@ -69,12 +76,21 @@ export async function applyPendingDesktopLocalReset(): Promise<void> {
     // The renderer clear below is the part that matters; arm it regardless.
     console.error('[Electron] Could not clear the HTTP cache for a desktop reset', error)
   }
-  pendingRendererLocalClear = mode
+  pendingRendererLocalClear.arm(request)
 }
 
-/** Hand the armed `cache` reset to the booting renderer, once. */
-export function takePendingRendererLocalClear(): DesktopLocalResetMode | null {
-  const mode = pendingRendererLocalClear
-  pendingRendererLocalClear = null
-  return mode
+/** Hands the armed `cache` reset to one booting window; see {@link createDesktopLocalClearHandoff}. */
+export function claimPendingRendererLocalClear(windowId: number): DesktopLocalResetMode | null {
+  return pendingRendererLocalClear.claim(windowId)
+}
+
+export function settlePendingRendererLocalClear(
+  windowId: number,
+  outcome: 'cleared' | 'declined'
+): void {
+  pendingRendererLocalClear.settle(windowId, outcome)
+}
+
+export function releasePendingRendererLocalClear(windowId: number): void {
+  pendingRendererLocalClear.release(windowId)
 }

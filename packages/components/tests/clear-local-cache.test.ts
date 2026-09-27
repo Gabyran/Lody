@@ -1,6 +1,14 @@
 /** @vitest-environment jsdom */
 
+import fs from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import {
+  consumeDesktopLocalResetRequestDetailed,
+  createDesktopLocalClearHandoff,
+  writeDesktopLocalResetRequest,
+} from '@lody/shared/node/desktop-local-reset';
 
 import {
   markCacheClearPending,
@@ -180,13 +188,15 @@ describe('a clear armed from the CLI', () => {
     delete (window as { ipc?: unknown }).ipc;
   });
 
+  type Invoke = (channel: string, ...args: unknown[]) => Promise<unknown>;
+
   /** Stands in for the Electron preload bridge; `getIpcServices` needs only `invoke`. */
-  function installFakeIpcBridge(invoke: (channel: string) => Promise<unknown>) {
+  function installFakeIpcBridge(invoke: Invoke) {
     const channels: string[] = [];
-    (window as unknown as { ipc: { invoke: (channel: string) => Promise<unknown> } }).ipc = {
-      invoke: (channel: string) => {
+    (window as unknown as { ipc: { invoke: Invoke } }).ipc = {
+      invoke: (channel, ...args) => {
         channels.push(channel);
-        return invoke(channel);
+        return invoke(channel, ...args);
       },
     };
     return channels;
@@ -196,17 +206,82 @@ describe('a clear armed from the CLI', () => {
     localStorage.setItem('lody_auth_token', 'token');
     localStorage.setItem('lody:githubReposCache', '{}');
     const channels = installFakeIpcBridge(async (channel) =>
-      channel === 'app.consumePendingLocalClear' ? 'cache' : undefined
+      channel === 'app.claimPendingLocalClear' ? 'cache' : undefined
     );
 
     await maybeClearLodyCacheOnBoot();
 
-    expect(channels).toContain('app.consumePendingLocalClear');
+    expect(channels).toContain('app.claimPendingLocalClear');
     expect(deletedDatabases).toContain('lody-loro-repo-db-ws1');
     expect(deletedDatabases).not.toContain('someone-elses-db');
     expect(localStorage.getItem('lody:githubReposCache')).toBeNull();
     // A cache reset keeps the session; only `--hard` signs the user out.
     expect(localStorage.getItem('lody_auth_token')).toBe('token');
+  });
+
+  describe('when the user declines the clear first', () => {
+    const NOW = 1_700_000_000_000;
+    const WINDOW_ID = 1;
+    let directory: string;
+    let filePath: string;
+
+    beforeEach(async () => {
+      directory = await fs.mkdtemp(path.join(os.tmpdir(), 'lody-renderer-clear-'));
+      filePath = path.join(directory, 'desktop-local-reset.json');
+      await writeDesktopLocalResetRequest({ mode: 'cache', filePath, nowMs: NOW });
+    });
+
+    afterEach(async () => {
+      await fs.rm(directory, { recursive: true, force: true });
+    });
+
+    /**
+     * One desktop launch: main consumes the CLI request and serves this window's
+     * `app.*` calls; `prepareCacheClear` answers with the user's choice per load.
+     */
+    function launchDesktop(answers: boolean[]) {
+      const handoff = createDesktopLocalClearHandoff({ filePath });
+      const request = consumeDesktopLocalResetRequestDetailed({ filePath, nowMs: NOW });
+      if (request) handoff.arm(request);
+      installFakeIpcBridge(async (channel, ...args) => {
+        if (channel === 'app.claimPendingLocalClear') return handoff.claim(WINDOW_ID);
+        if (channel === 'app.settlePendingLocalClear') {
+          handoff.settle(WINDOW_ID, args[0] as 'cleared' | 'declined');
+          return undefined;
+        }
+        if (channel === 'app.prepareCacheClear') return answers.shift() ?? true;
+        return undefined;
+      });
+      return handoff;
+    }
+
+    async function loadPage() {
+      resetBootClearMemoForTests();
+      deletedDatabases = [];
+      await maybeClearLodyCacheOnBoot();
+      return deletedDatabases.includes('lody-loro-repo-db-ws1');
+    }
+
+    it('still clears on the next load, and only once after it ran', async () => {
+      launchDesktop([false]);
+
+      expect(await loadPage()).toBe(false);
+      expect(await loadPage()).toBe(true);
+      expect(await loadPage()).toBe(false);
+    });
+
+    it('still clears after the desktop restarts, and not again after it ran', async () => {
+      const first = launchDesktop([false]);
+      expect(await loadPage()).toBe(false);
+      await first.whenPersisted();
+
+      const second = launchDesktop([]);
+      expect(await loadPage()).toBe(true);
+      await second.whenPersisted();
+
+      launchDesktop([]);
+      expect(await loadPage()).toBe(false);
+    });
   });
 
   it('does not ask the desktop when the in-app flag already answered', async () => {
@@ -215,7 +290,7 @@ describe('a clear armed from the CLI', () => {
 
     await maybeClearLodyCacheOnBoot();
 
-    expect(channels).not.toContain('app.consumePendingLocalClear');
+    expect(channels).not.toContain('app.claimPendingLocalClear');
     // The flag said `cache`, so the unrelated database survives.
     expect(deletedDatabases).not.toContain('someone-elses-db');
   });

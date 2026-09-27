@@ -6,6 +6,8 @@ import {
   DESKTOP_LOCAL_RESET_REQUEST_TTL_MS,
   clearDesktopLocalResetRequest,
   consumeDesktopLocalResetRequest,
+  consumeDesktopLocalResetRequestDetailed,
+  createDesktopLocalClearHandoff,
   getDesktopLocalResetRequestPath,
   writeDesktopLocalResetRequest,
 } from '../src/node/desktop-local-reset';
@@ -113,5 +115,94 @@ describe('arming and consuming a desktop local reset', () => {
         nowMs: NOW + DESKTOP_LOCAL_RESET_REQUEST_TTL_MS,
       })
     ).toBe('cache');
+  });
+});
+
+describe('handing a CLI-armed cache clear to booting windows', () => {
+  let directory: string;
+  let filePath: string;
+  const HOUR = 60 * 60 * 1000;
+
+  beforeEach(async () => {
+    directory = await fs.mkdtemp(path.join(os.tmpdir(), 'lody-desktop-clear-'));
+    filePath = path.join(directory, 'desktop-local-reset.json');
+  });
+
+  afterEach(async () => {
+    await fs.rm(directory, { recursive: true, force: true });
+  });
+
+  /** One desktop launch: consume the request from disk and arm what it found. */
+  function launch(nowMs: number) {
+    const handoff = createDesktopLocalClearHandoff({ filePath });
+    const request = consumeDesktopLocalResetRequestDetailed({ filePath, nowMs });
+    if (request) handoff.arm(request);
+    return handoff;
+  }
+
+  it('keeps a declined clear for a reload and for the next launch, then applies it once', async () => {
+    await writeDesktopLocalResetRequest({ mode: 'cache', filePath, nowMs: NOW });
+
+    const first = launch(NOW);
+    expect(first.claim(1)).toBe('cache');
+    first.settle(1, 'declined');
+    // The same window reloading, or another window booting, is asked again.
+    expect(first.claim(2)).toBe('cache');
+    first.release(2);
+    await first.whenPersisted();
+
+    // The user quit instead: the next launch still has it, with its original time.
+    expect(JSON.parse(await fs.readFile(filePath, 'utf8'))).toMatchObject({
+      mode: 'cache',
+      requestedAtMs: NOW,
+    });
+    const second = launch(NOW + HOUR);
+    expect(second.claim(7)).toBe('cache');
+    second.settle(7, 'cleared');
+    await second.whenPersisted();
+
+    expect(second.claim(7)).toBeNull();
+    expect(launch(NOW + 2 * HOUR).claim(1)).toBeNull();
+  });
+
+  it('retires the re-armed copy once a later load in the same run cleared', async () => {
+    await writeDesktopLocalResetRequest({ mode: 'cache', filePath, nowMs: NOW });
+
+    const handoff = launch(NOW);
+    expect(handoff.claim(1)).toBe('cache');
+    handoff.settle(1, 'declined');
+    expect(handoff.claim(1)).toBe('cache');
+    handoff.settle(1, 'cleared');
+    await handoff.whenPersisted();
+
+    expect(consumeDesktopLocalResetRequest({ filePath, nowMs: NOW })).toBeNull();
+  });
+
+  it('does not let declining extend the one-day bound', async () => {
+    await writeDesktopLocalResetRequest({ mode: 'cache', filePath, nowMs: NOW });
+
+    const handoff = launch(NOW + DESKTOP_LOCAL_RESET_REQUEST_TTL_MS - HOUR);
+    handoff.claim(1);
+    handoff.settle(1, 'declined');
+    await handoff.whenPersisted();
+
+    expect(
+      consumeDesktopLocalResetRequest({
+        filePath,
+        nowMs: NOW + DESKTOP_LOCAL_RESET_REQUEST_TTL_MS + 1,
+      })
+    ).toBeNull();
+  });
+
+  it('hands the clear to one window at a time until its claimant goes away', () => {
+    const handoff = createDesktopLocalClearHandoff({ filePath });
+    handoff.arm({ mode: 'cache', requestedAtMs: NOW });
+
+    expect(handoff.claim(1)).toBe('cache');
+    expect(handoff.claim(2)).toBeNull();
+    // A settle from a window that does not hold it changes nothing.
+    handoff.settle(2, 'cleared');
+    handoff.release(1);
+    expect(handoff.claim(2)).toBe('cache');
   });
 });

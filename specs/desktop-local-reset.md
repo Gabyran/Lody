@@ -52,6 +52,13 @@ A reset is applied **at most once**. The request is retired before it is acted o
 including when it is refused as unreadable or stale, so no failure can turn into a
 loop that wipes local state at every launch. A renderer reload does not repeat it.
 
+A `cache` reset the person **declines is kept, not lost**. Before the clear runs,
+other windows are closed; if one holds changes its storage refused, the person is
+asked, and choosing to keep those changes skips the clear. It then stays armed for
+the window's next load and, if they quit instead, for the next launch — still
+bounded by the day from when it was armed. It counts as applied only once a window
+has run it.
+
 A reset is applied **before the app reopens local storage**, which is why it can
 remove state that a running app holds open.
 

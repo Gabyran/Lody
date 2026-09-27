@@ -135,6 +135,18 @@ export type ConsumeDesktopLocalResetOptions = DesktopLocalResetTarget & {
 export function consumeDesktopLocalResetRequest(
   options: ConsumeDesktopLocalResetOptions = {}
 ): DesktopLocalResetMode | null {
+  return consumeDesktopLocalResetRequestDetailed(options)?.mode ?? null;
+}
+
+/**
+ * {@link consumeDesktopLocalResetRequest}, also returning when the request was
+ * armed. A `cache` clear the user declines at boot (another window still holds
+ * unsaved storage) is written back with that original time, so it is retried on a
+ * later launch without ever outliving {@link DESKTOP_LOCAL_RESET_REQUEST_TTL_MS}.
+ */
+export function consumeDesktopLocalResetRequestDetailed(
+  options: ConsumeDesktopLocalResetOptions = {}
+): { mode: DesktopLocalResetMode; requestedAtMs: number } | null {
   const filePath = resolveRequestPath(options);
   const log = options.log ?? (() => {});
 
@@ -177,5 +189,79 @@ export function consumeDesktopLocalResetRequest(
     });
     return null;
   }
-  return request.mode;
+  return { mode: request.mode, requestedAtMs: request.requestedAtMs };
+}
+
+/**
+ * The desktop side of a consumed `cache` request, handed to booting windows. It
+ * stays armed until a window that ran the clear settles it `cleared`.
+ *
+ * One claimant at a time, so two windows booting together do not both run it; the
+ * claimant may claim again after reloading, and a window that goes away releases
+ * its claim. A window that declines (another window still holds unsaved storage)
+ * leaves it armed in memory for the next load, and writes it back to disk with its
+ * original `requestedAtMs`, so a user who quits instead of reloading still gets it
+ * at the next launch and it never outlives {@link DESKTOP_LOCAL_RESET_REQUEST_TTL_MS}.
+ * Once a window ran it, that re-armed copy is retired again.
+ */
+export type DesktopLocalClearHandoff = {
+  arm: (request: { mode: DesktopLocalResetMode; requestedAtMs: number }) => void;
+  /** The armed clear for this window; null while none is armed or another window holds it. */
+  claim: (windowId: number) => DesktopLocalResetMode | null;
+  /** `cleared`: the clear ran (or was attempted), so it is done. `declined`: keep it armed. */
+  settle: (windowId: number, outcome: 'cleared' | 'declined') => void;
+  /** The claimant went away without settling: the clear stays armed. */
+  release: (windowId: number) => void;
+  /** Resolves once every re-arm and retire so far has reached the disk. */
+  whenPersisted: () => Promise<void>;
+};
+
+export function createDesktopLocalClearHandoff(
+  options: DesktopLocalResetTarget & { log?: (message: string, detail?: unknown) => void } = {}
+): DesktopLocalClearHandoff {
+  const { log, ...target } = options;
+  let armed: { mode: DesktopLocalResetMode; requestedAtMs: number } | null = null;
+  let claimedBy: number | null = null;
+  let rearmedOnDisk = false;
+  // Re-arming and retiring touch the same file, so they run in order: a clear that
+  // finished right after a decline must not leave the re-armed copy behind.
+  let writes: Promise<void> = Promise.resolve();
+  const queue = (label: string, write: () => Promise<unknown>) => {
+    writes = writes.then(write).then(
+      () => undefined,
+      (error: unknown) => log?.(`Could not ${label}`, error)
+    );
+  };
+  return {
+    arm: (request) => {
+      armed = { mode: request.mode, requestedAtMs: request.requestedAtMs };
+      claimedBy = null;
+    },
+    claim: (windowId) => {
+      if (!armed) return null;
+      if (claimedBy !== null && claimedBy !== windowId) return null;
+      claimedBy = windowId;
+      return armed.mode;
+    },
+    settle: (windowId, outcome) => {
+      if (!armed || claimedBy !== windowId) return;
+      claimedBy = null;
+      if (outcome === 'declined') {
+        const { mode, requestedAtMs } = armed;
+        rearmedOnDisk = true;
+        queue('re-arm a declined desktop reset', () =>
+          writeDesktopLocalResetRequest({ ...target, mode, nowMs: requestedAtMs })
+        );
+        return;
+      }
+      armed = null;
+      if (!rearmedOnDisk) return;
+      rearmedOnDisk = false;
+      queue('retire a re-armed desktop reset', () => clearDesktopLocalResetRequest(target));
+    },
+    release: (windowId) => {
+      if (claimedBy === windowId) claimedBy = null;
+    },
+    whenPersisted: () => writes,
+  };
 }

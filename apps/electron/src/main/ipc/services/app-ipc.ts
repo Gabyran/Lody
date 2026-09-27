@@ -30,7 +30,11 @@ import {
 import { setMenuLanguage } from '../../menu'
 import { localFileActionError } from '../../services/local-file-action-error'
 import { hasPathLauncher, launchLocalPath } from '../../services/local-path-launcher-service'
-import { takePendingRendererLocalClear } from '../../services/local-reset-service'
+import {
+  claimPendingRendererLocalClear,
+  releasePendingRendererLocalClear,
+  settlePendingRendererLocalClear
+} from '../../services/local-reset-service'
 import { parseWindowBadge } from '../../services/window-badge-service'
 import {
   findWindow,
@@ -165,15 +169,27 @@ export class AppIpc extends IpcService {
   }
 
   /**
-   * Reports a cache clear armed from the CLI (`lody app reset-cache`) to the
-   * booting renderer, which owns the precise clear. One-shot: a later reload of
-   * the same window must not repeat it.
+   * Hands a cache clear armed from the CLI (`lody app reset-cache`) to the booting
+   * renderer, which owns the precise clear. It stays armed until this window
+   * settles it: a later reload must not repeat a clear that ran, but a clear the
+   * user declined (unsaved storage elsewhere) must run on a later load.
    */
   @IpcMethod()
-  async consumePendingLocalClear() {
+  async claimPendingLocalClear() {
     const { event } = getIpcContext()
     assertProductWindowSender(event)
-    return takePendingRendererLocalClear()
+    const windowId = event.sender.id
+    const mode = claimPendingRendererLocalClear(windowId)
+    if (mode) event.sender.once('destroyed', () => releasePendingRendererLocalClear(windowId))
+    return mode
+  }
+
+  @IpcMethod()
+  async settlePendingLocalClear(outcome: unknown) {
+    const { event } = getIpcContext()
+    assertProductWindowSender(event)
+    if (outcome !== 'cleared' && outcome !== 'declined') throw new Error('Invalid clear outcome')
+    settlePendingRendererLocalClear(event.sender.id, outcome)
   }
 
   @IpcMethod()

@@ -60,8 +60,10 @@ native-dependency, and OSS-composition rules stay in `apps/electron/AGENTS.md`.
   Contract: [renderer recovery](../../../specs/renderer-fatal-recovery.md).
 - A CLI-armed reset (`lody app reset-cache`) is consumed once, before any window
   loads. `hard` is applied natively here because the renderer may not boot; `cache`
-  is handed to the renderer exactly once, because only it can spare the Shortcut
-  outbox and individual localStorage keys. Spec: `specs/desktop-local-reset.md`.
+  is handed to the renderer, because only it can spare the Shortcut outbox and
+  individual localStorage keys; it is consumed only when that window reports the
+  clear ran, and a declined clear is re-armed with its original time.
+  Spec: `specs/desktop-local-reset.md`.
 - Theme changes must also update the native window color in `window-theme.ts`.
   OS appearance changes while `themeSource` is `system` must retint chrome and
   notify the renderer (`app.nativeTheme`). On macOS also subscribe

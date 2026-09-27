@@ -106,18 +106,18 @@ read.
 
 **Gate at the start of work, next to the memory-pressure refusal.**
 
-- *Turn start (create and continue)* is the one entry that covers new sessions from
+- _Turn start (create and continue)_ is the one entry that covers new sessions from
   the UI, the CLI and MCP, and everything heavy that follows: worktree creation,
   dependency setup, agent start. It fails with the new `storage_critical` notice
   through the same helper memory pressure uses, so the pointer advances and the turn
   does not loop.
-- *Speculative worktree preparation* is refused, since only the first turn then
+- _Speculative worktree preparation_ is refused, since only the first turn then
   builds the worktree, and that turn is gated too.
-- *Attachment copies* into the local store are refused with `LODY_STORAGE_CRITICAL`;
+- _Attachment copies_ into the local store are refused with `LODY_STORAGE_CRITICAL`;
   the composer shows it instead of falling back to a cloud upload.
-- *Turn diffs are not gated*, because skipping them loses them for good while a failed
+- _Turn diffs are not gated_, because skipping them loses them for good while a failed
   write only waits.
-- *Image uploads are not gated*: they belong to a running turn.
+- _Image uploads are not gated_: they belong to a running turn.
 
 The gate re-samples `statfs` when the reading is older than 2 seconds, so the
 60-second poll does not delay it.
@@ -145,7 +145,7 @@ on dispose and destroyed the repo with its unsaved changes; review caught it.
 
 **Warn at exit.** `LodyFleet.shutdown` logs `unsavedSince` after every runtime's final
 flush was attempted. Electron's quit barrier gained an optional `confirmQuit` step.
-It asks when the local agent reports `local_storage_unsaved` *or* any window
+It asks when the local agent reports `local_storage_unsaved` _or_ any window
 reported unsaved renderer changes over `storage.rendererUnsaved`. The agent's disk
 and a window's IndexedDB are different stores, and a healthy agent proves nothing
 about the window.
@@ -166,6 +166,7 @@ Now the renderer registry cancels `beforeunload` while any of its repos holds
 unsaved changes. That covers close, reload, force reload, navigation and
 `location.reload()`. Electron reports each cancellation as `will-prevent-unload`, and
 `WindowStorageBarrier` (main) takes over:
+
 - It asks that window to flush (`storage.quitCheck`). If the answer is saved, it
   repeats the action.
 - If changes are still unsaved, it shows the quit dialog's per-window variant
@@ -185,6 +186,7 @@ The first version of this barrier kept an approval until the document was replac
 After "Reload Anyway" on a navigation the page had started itself, nothing was
 repeated. The user could keep editing, and the next close then dropped the new
 changes without asking. Review caught it. Now:
+
 - Main bumps a per-window generation on every unsaved report, and an approval is
   valid only for the generation it saw.
 - The renderer republishes on every newly refused write, even inside an episode whose
@@ -196,6 +198,7 @@ changes without asking. Review caught it. Now:
 call `destroy()`, which runs no `beforeunload`, so the unload guard never saw them;
 review caught that as well. Both now go through `tearDownWindows`, which calls
 `WindowStorageBarrier.approveTeardown` before destroying:
+
 - Every listed window holding unsaved changes flushes.
 - Whatever is still unsaved gets one confirmation ("Sign Out Anyway" / "Clear
   Anyway").
@@ -207,10 +210,29 @@ and leaves the session, the CLI and every window alone. `signOut` itself approve
 again, in case a window became unsaved in between. A declined cache clear leaves the
 clear armed for the next load.
 
+Correction: that held for the in-app flag, which stays in localStorage, but not for a
+clear armed by `lody app reset-cache`. Main handed that one to the first booting
+window and forgot it, having already deleted the request from disk. Cancel then lost
+it for good, with no way to see that the command had been swallowed. Review caught
+it. Main now hands the clear out as a claim (`app.claimPendingLocalClear`), one window
+at a time, and forgets it only when that window reports the clear ran
+(`app.settlePendingLocalClear('cleared')`). On `declined`, main keeps it armed for the
+next load and writes the request back to disk with its original time, so quitting
+instead of reloading keeps it for the next launch, within the same one-day bound. A
+window that goes away mid-way releases its claim. The disk request is still deleted
+before acting, so a clear that wedges the renderer cannot loop; only an explicit
+decline writes it back. Peeking the disk request and deleting it after completion
+was rejected for that reason. Tests drive the renderer boot clear through the real
+handoff across reloads and a simulated restart, and the handoff against the file;
+removing the decline or the completion report, consuming on claim, skipping the
+disk re-arm or its retirement, dropping the release, or re-arming with a fresh time
+each fails one of them.
+
 `approveTeardown` first flushed and asked about a snapshot taken on entry. A window
 that became unsaved while another was flushing, or while the user looked at the
 question, was then destroyed without a flush or a question. Review caught this TOCTOU
 as well. It now works in rounds over the full list:
+
 - A window that became unsaved during the flushes gets a flush of its own before
   anyone is asked.
 - Any generation that moves while the question is open starts another round.
@@ -226,6 +248,7 @@ close or reload skipped the flush and the question. Review caught that as well.
 
 `createQuitCoordinator` now approves every quit: menu, last window, and all three
 updater paths.
+
 - It flushes the agent and the windows, and confirms what is still unsaved.
 - A cancel, an install failure or a failed stop aborts: approval and the quitting
   flag are both cleared.
@@ -335,6 +358,7 @@ Automated, with injected clocks, manual timers and fault injection, no real slee
   republished `since`, one use or 10 s. The approved unload is not reported as a
   loss, while data that appears without approval is. Removing the generation check,
   single use or expiry each fails it.
+
 - `renderer-storage-episodes.test.ts` (refusal revision, real `LoroRepo`): a second
   refused meta write inside an open episode republishes with the same `since` and a
   higher revision. Dropping the guard's refusal hook fails it.
@@ -358,6 +382,7 @@ Automated, with injected clocks, manual timers and fault injection, no real slee
   - An explicit discard destroys B, and its destroy is not reported as a loss.
 
   Making `tearDownWindows` destroy without approval fails both.
+
 - `packages/components/tests/renderer-storage-episodes.test.ts` (unload guard, real
   `LoroRepo`): after a quota refusal the window's `beforeunload` is cancelled, and
   stays cancelled after a flush that is still refused. Once space returns the flush

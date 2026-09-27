@@ -407,8 +407,10 @@ const NATIVE_PENDING_CLEAR_TIMEOUT_MS = 2000;
  * Ask the desktop whether `lody app reset-cache` armed a clear for this launch.
  *
  * A user whose renderer is wedged cannot press Settings → Clear cache, so the CLI
- * arms it out of band and the Electron main process reports it here — once, so a
- * later reload of the same window does not repeat the clear. Bounded because this
+ * arms it out of band and the Electron main process hands it to this window. It
+ * stays armed until {@link settleNativePendingClear}: a reload after the clear ran
+ * must not repeat it, but a clear the user declined must run on a later load.
+ * Bounded because this
  * runs on every desktop boot: a main process that never answers must delay the
  * first render, not prevent it. Web and mobile have no bridge and skip it.
  */
@@ -417,7 +419,7 @@ async function readNativePendingClearMode(): Promise<PendingLocalClearMode | nul
   if (!services) return null;
   try {
     return await Promise.race([
-      services.app.consumePendingLocalClear(),
+      services.app.claimPendingLocalClear(),
       new Promise<null>((resolve) => {
         setTimeout(() => resolve(null), NATIVE_PENDING_CLEAR_TIMEOUT_MS);
       }),
@@ -428,6 +430,14 @@ async function readNativePendingClearMode(): Promise<PendingLocalClearMode | nul
   }
 }
 
+async function settleNativePendingClear(outcome: 'cleared' | 'declined'): Promise<void> {
+  try {
+    await getIpcServices()?.app.settlePendingLocalClear(outcome);
+  } catch (error) {
+    console.warn('[Lody] failed to settle a CLI-armed cache clear', error);
+  }
+}
+
 // One clear per page load, shared by every caller. `AppInitializer` kicks it off
 // so a user wedged before any workspace exists (e.g. stuck signing in) still
 // gets the wipe, while `RuntimeProvider` awaits the same promise so the repo DB
@@ -435,12 +445,18 @@ async function readNativePendingClearMode(): Promise<PendingLocalClearMode | nul
 let bootClearPromise: Promise<PendingLocalClearMode | null> | null = null;
 
 async function runPendingClearOnBoot(): Promise<PendingLocalClearMode | null> {
-  const mode = readPendingLocalClearMode() ?? (await readNativePendingClearMode());
+  const localMode = readPendingLocalClearMode();
+  const nativeMode = localMode ? null : await readNativePendingClearMode();
+  const mode = localMode ?? nativeMode;
   if (!mode) return null;
   // Other windows are closed first; one holding changes its storage refused must
   // flush or the user must agree to drop them. Declined: nothing is wiped and the
-  // clear stays armed for the next load.
-  if ((await getIpcServices()?.app.prepareCacheClear()) === false) return null;
+  // clear stays armed for the next load, whether it came from the in-app flag
+  // (still in localStorage) or from the CLI (handed back to main).
+  if ((await getIpcServices()?.app.prepareCacheClear()) === false) {
+    if (nativeMode) await settleNativePendingClear('declined');
+    return null;
+  }
 
   try {
     if (mode === 'hard') {
@@ -454,6 +470,7 @@ async function runPendingClearOnBoot(): Promise<PendingLocalClearMode | null> {
     } catch (error) {
       console.warn('[Lody] failed to clear cache-clear flag', error);
     }
+    if (nativeMode) await settleNativePendingClear('cleared');
   }
   return mode;
 }
