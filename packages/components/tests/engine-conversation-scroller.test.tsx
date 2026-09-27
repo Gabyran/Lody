@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { act, createRef, type ReactElement } from 'react';
+import { act, createRef, StrictMode, type ReactElement } from 'react';
 import { createRoot } from 'react-dom/client';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import type { SessionId } from '@lody/shared';
@@ -16,9 +16,9 @@ import { createFrameHarness, type FrameHarness } from './support/scroll-frame-ha
 /**
  * The engine's React adapter under browser-ordered scroll events and
  * ResizeObserver deliveries (see the frame harness), with real React commits.
- * The same scenario that leaves the Virtua path hidden for good
- * (`sticky-scroll-open-stall.test.tsx`) must leave this one covered, with the
- * reader's row where it was.
+ * The scenario that left the removed Virtua path hidden for good must leave
+ * this one covered, with the reader's row where it was. Reader input is
+ * dispatched as real events; tests assert the mode and the position.
  */
 
 const VIEWPORT = 400;
@@ -73,7 +73,12 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-function mount(sessionId: SessionId, initialKeys: string[], harnessToReuse?: FrameHarness): Ctx {
+function mount(
+  sessionId: SessionId,
+  initialKeys: string[],
+  harnessToReuse?: FrameHarness,
+  { strict = false, suppress }: { strict?: boolean; suppress?: { current: boolean } } = {}
+): Ctx {
   let keys = initialKeys;
   const px = (value: string | undefined) => parseFloat(value ?? '0') || 0;
   const harness =
@@ -117,8 +122,8 @@ function mount(sessionId: SessionId, initialKeys: string[], harnessToReuse?: Fra
       harness.attachViewport(next.scrollElement);
     }
   };
-  const render = () =>
-    root.render(
+  const render = () => {
+    const list = (
       <EngineConversationScroller
         sessionId={sessionId}
         rows={keys.map((key): ReactElement => (
@@ -129,12 +134,15 @@ function mount(sessionId: SessionId, initialKeys: string[], harnessToReuse?: Fra
         rowMeta={keys.map((key, index) => meta(key, index))}
         item={Row}
         initialWindowReady
+        suppressAutoScrollRef={suppress}
         onStateChange={onStateChange}
         layoutKey="14"
         bufferSize={800}
         handleRef={handle}
       />
     );
+    root.render(strict ? <StrictMode>{list}</StrictMode> : list);
+  };
   act(render);
   return {
     harness,
@@ -254,6 +262,182 @@ it('returns to following with the handle and keeps the latest row on screen as i
     await ctx.settle();
     expect(ctx.harness.scrollTop).toBe(42 * ROW - VIEWPORT);
     expect(mountedKeys(ctx)).toContain('r41');
+  } finally {
+    unmount(ctx);
+  }
+});
+
+// ---- Reader input -----------------------------------------------------------
+// Real events on the mounted DOM; the observable result is the mode (the
+// sticky state) and whether new rows at the end move the viewport.
+
+const BOTTOM = (count: number) => count * ROW - VIEWPORT;
+
+/** Append two rows; a following viewport moves to the new end, a reading one stays. */
+async function appendRows(ctx: Ctx, keys: string[]): Promise<string[]> {
+  const next = [...keys, `r${keys.length}`, `r${keys.length + 1}`];
+  ctx.setKeys(next);
+  await ctx.settle();
+  return next;
+}
+
+async function openFollowing(name: string, options?: Parameters<typeof mount>[3]) {
+  const keys = rowKeys(40);
+  const ctx = mount(name as SessionId, keys, undefined, options);
+  await ctx.settle();
+  expect(ctx.harness.scrollTop).toBe(BOTTOM(40));
+  expect(ctx.state.current?.isSticky).toBe(true);
+  return { ctx, keys };
+}
+
+function rowElement(ctx: Ctx, key: string): HTMLElement {
+  return ctx.viewport().querySelector<HTMLElement>(`[data-row-key="${key}"]`)!;
+}
+
+it('an upward wheel over the conversation stops following; the reader stays put as rows arrive', async () => {
+  const { ctx, keys } = await openFollowing('engine-wheel-up');
+  try {
+    await act(async () => {
+      rowElement(ctx, 'r38').dispatchEvent(
+        new WheelEvent('wheel', { deltaY: -120, bubbles: true })
+      );
+    });
+    ctx.harness.nativeScrollTo(BOTTOM(40) - 120);
+    await ctx.settle();
+    expect(ctx.state.current?.isSticky).toBe(false);
+    await appendRows(ctx, keys);
+    expect(ctx.harness.scrollTop).toBe(BOTTOM(40) - 120);
+  } finally {
+    unmount(ctx);
+  }
+});
+
+it('an upward wheel scrolling a nested code block or terminal keeps following', async () => {
+  const { ctx, keys } = await openFollowing('engine-wheel-nested');
+  try {
+    const nested = document.createElement('pre');
+    nested.style.overflowY = 'auto';
+    Object.defineProperty(nested, 'scrollTop', { configurable: true, value: 40 });
+    const line = document.createElement('span');
+    nested.append(line);
+    rowElement(ctx, 'r38').append(nested);
+    await act(async () => {
+      line.dispatchEvent(new WheelEvent('wheel', { deltaY: -120, bubbles: true }));
+    });
+    // A downward wheel and a pinch zoom are not the reader leaving the end either.
+    await act(async () => {
+      rowElement(ctx, 'r38').dispatchEvent(
+        new WheelEvent('wheel', { deltaY: 120, bubbles: true })
+      );
+      rowElement(ctx, 'r38').dispatchEvent(
+        new WheelEvent('wheel', { deltaY: -120, ctrlKey: true, bubbles: true })
+      );
+    });
+    expect(ctx.state.current?.isSticky).toBe(true);
+    await appendRows(ctx, keys);
+    expect(ctx.harness.scrollTop).toBe(BOTTOM(42));
+  } finally {
+    unmount(ctx);
+  }
+});
+
+it('an upward navigation key in the conversation stops following; typing and other controls do not', async () => {
+  const { ctx, keys } = await openFollowing('engine-keys');
+  // The composer and a menu outside the list, and an edit box inside a row.
+  const composer = document.createElement('textarea');
+  const menu = document.createElement('button');
+  document.body.append(composer, menu);
+  const editor = document.createElement('textarea');
+  rowElement(ctx, 'r38').append(editor);
+  try {
+    await act(async () => {
+      for (const target of [composer, menu, editor]) {
+        target.dispatchEvent(new KeyboardEvent('keydown', { key: 'PageUp', bubbles: true }));
+        target.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowUp', bubbles: true }));
+      }
+    });
+    expect(ctx.state.current?.isSticky).toBe(true);
+    const grown = await appendRows(ctx, keys);
+    expect(ctx.harness.scrollTop).toBe(BOTTOM(42));
+
+    await act(async () => {
+      document.body.dispatchEvent(new KeyboardEvent('keydown', { key: 'PageUp', bubbles: true }));
+    });
+    ctx.harness.nativeScrollTo(BOTTOM(42) - 400);
+    await ctx.settle();
+    expect(ctx.state.current?.isSticky).toBe(false);
+    await appendRows(ctx, grown);
+    expect(ctx.harness.scrollTop).toBe(BOTTOM(42) - 400);
+  } finally {
+    composer.remove();
+    menu.remove();
+    editor.remove();
+    unmount(ctx);
+  }
+});
+
+it('an upward move with no pointer or touch is corrected back to the end', async () => {
+  const { ctx } = await openFollowing('engine-unowned-move');
+  try {
+    ctx.harness.nativeScrollTo(BOTTOM(40) - 300);
+    await ctx.settle();
+    expect(ctx.harness.scrollTop).toBe(BOTTOM(40));
+    expect(ctx.state.current?.isSticky).toBe(true);
+  } finally {
+    unmount(ctx);
+  }
+});
+
+it.each([
+  [
+    'a held scrollbar thumb',
+    (viewport: HTMLElement) =>
+      viewport.dispatchEvent(new MouseEvent('pointerdown', { button: 0, bubbles: true })),
+    () => document.dispatchEvent(new MouseEvent('pointerup', { bubbles: true })),
+  ],
+  [
+    'a touch pan',
+    (viewport: HTMLElement) => viewport.dispatchEvent(new Event('touchstart', { bubbles: true })),
+    (viewport: HTMLElement) => viewport.dispatchEvent(new Event('touchend', { bubbles: true })),
+  ],
+])('an upward move under %s stops following', async (_name, press, lift) => {
+  const { ctx, keys } = await openFollowing(`engine-held-${_name}`);
+  try {
+    await act(async () => press(ctx.viewport()));
+    ctx.harness.nativeScrollTo(BOTTOM(40) - 300);
+    await ctx.settle();
+    await act(async () => lift(ctx.viewport()));
+    expect(ctx.state.current?.isSticky).toBe(false);
+    await appendRows(ctx, keys);
+    expect(ctx.harness.scrollTop).toBe(BOTTOM(40) - 300);
+  } finally {
+    unmount(ctx);
+  }
+});
+
+it('a suppression (selection, a jump, search) stops following at the next change', async () => {
+  const suppress = { current: false };
+  const { ctx, keys } = await openFollowing('engine-suppressed', { suppress });
+  try {
+    suppress.current = true;
+    await appendRows(ctx, keys);
+    expect(ctx.harness.scrollTop).toBe(BOTTOM(40));
+    expect(ctx.state.current?.isSticky).toBe(false);
+  } finally {
+    unmount(ctx);
+  }
+});
+
+it('keeps scrolling under StrictMode, whose development remount reruns effect cleanups', async () => {
+  const { ctx, keys } = await openFollowing('engine-strict', { strict: true });
+  try {
+    await appendRows(ctx, keys);
+    expect(ctx.harness.scrollTop).toBe(BOTTOM(42));
+    await act(async () => {
+      ctx.handle.current?.scrollRowToTop(10, { smooth: false, offset: 0 });
+    });
+    await ctx.settle();
+    expect(screenTopOf(ctx, 'r10')).toBe(0);
   } finally {
     unmount(ctx);
   }

@@ -244,6 +244,22 @@ export function EngineConversationScroller({
   controller.setMustMount(keepMounted ?? []);
   const plan = controller.plan();
 
+  // Persist on unmount: the next open of this session restores from it. The
+  // setup resumes the controller, so StrictMode's cleanup-then-setup on a live
+  // component does not leave it disposed. Declared first, so its setup
+  // runs before the commit effect below.
+  useLayoutEffect(() => {
+    controller.resume();
+    return () => {
+      saveScrollState(sessionId, {
+        formatVersion: 1,
+        intent: controller.savedIntent(),
+        sizes: controller.geometry.snapshot(),
+      });
+      controller.dispose();
+    };
+  }, [controller, sessionId]);
+
   // Continue the engine's transaction after every commit, before paint.
   useLayoutEffect(() => {
     inLayoutEffect.current = true;
@@ -281,19 +297,6 @@ export function EngineConversationScroller({
       handleRef.current = null;
     };
   }, [controller, handleRef]);
-
-  // Persist on unmount: the next open of this session restores from it.
-  useLayoutEffect(
-    () => () => {
-      saveScrollState(sessionId, {
-        formatVersion: 1,
-        intent: controller.savedIntent(),
-        sizes: controller.geometry.snapshot(),
-      });
-      controller.dispose();
-    },
-    [controller, sessionId]
-  );
 
   const registerRow = useCallback((element: HTMLElement | null, key: string) => {
     const previous = rowElements.current.get(key);

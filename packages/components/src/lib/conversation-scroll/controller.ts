@@ -449,9 +449,18 @@ export class ScrollController {
     }
   }
 
+  /** Stop acting on the host: the list unmounted. */
   dispose(): void {
     this.disposed = true;
     this.cancelGlide();
+  }
+
+  /**
+   * Undo `dispose`. React StrictMode's development remount runs an effect's
+   * cleanup and then its setup again on the same live component.
+   */
+  resume(): void {
+    this.disposed = false;
   }
 
   // ---- Reads for consumers (through the list handle) ----------------------

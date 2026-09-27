@@ -48,15 +48,17 @@ const clampOffset = (offsetPx: number, size: number) =>
 /**
  * Where a reading anchor is now. Rules, in order (the scroll-engine note):
  *
- * 1. the recorded row still exists in the same turn: that row, at `offsetPx`;
+ * 1. the recorded row still exists in the same turn: that row, at `offsetPx`
+ *    clamped to its size. This includes a placeholder: the reader may rest
+ *    inside one, and a turn hydrating under the same key (a user turn) gets
+ *    the recorded offset back;
  * 2. the recorded item is rendered as its own row (same index and identity):
  *    that row, at `offsetPx`;
  * 3. an item with the recorded identity elsewhere in the turn: that row;
  * 4. the item is folded into a group: the last row of the turn that starts at
  *    or before it (the group header), at 0;
- * 5. the turn exists (hydrated or as a placeholder): its first row, at 0 — a
- *    placeholder never replaces the anchor, which resolves again once the turn
- *    hydrates;
+ * 5. the turn exists (hydrated or as a placeholder): its first row, at 0 —
+ *    the anchor is kept, and resolves again once its row is back;
  * 6. the turn is gone: the next surviving turn in the old order, else the
  *    previous one, at 0.
  *
@@ -86,7 +88,7 @@ export function resolveAnchor(
   }
 
   const byKey = geometry.indexOfKey(anchor.rowKey);
-  if (byKey >= 0 && rows[byKey]?.turnId === anchor.turnId && !rows[byKey]?.placeholder) {
+  if (byKey >= 0 && rows[byKey]?.turnId === anchor.turnId) {
     return {
       index: byKey,
       offsetPx: clampOffset(anchor.offsetPx, geometry.size(byKey)),

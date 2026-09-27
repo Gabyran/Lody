@@ -290,7 +290,10 @@ changes whenever a turn's item array is replaced. Resolution rules:
    removal is known. Use the next surviving turn in the old order, then the previous one,
    with `offsetPx = 0`.
 5. **Turn exists but is not hydrated:** the anchor stays pending on the turn's
-   placeholder. The placeholder never replaces the anchor.
+   placeholder. The placeholder never replaces the anchor. A reader who rests inside a
+   placeholder anchors to that placeholder row, at their offset clamped to its height.
+   A turn that hydrates under the same key (a user turn) keeps that offset. A turn
+   that hydrates into rows with new keys lands on its first row.
 6. **`fixed-row`:** a reader resting at the top anchors to the leading row. An
    agent-activity anchor falls back to the last turn when the row disappears; the row
    only appears at the end, where the reader is normally following.
@@ -780,6 +783,38 @@ collected after release, through the diagnostics below.
   reading anchor keeps the jumped row at the top. It is now deleted, together with
   the follow suppression it carried. A Chromium spec clicks far, near and back and
   checks each round lands within 1px, with the outline highlighting it.
+- **Found in PR review (#1071, Claude session `dfd4a856`).**
+  - **A reader resting inside a placeholder was pulled to its turn's top.** Reader
+    movement anchors to whichever row is under the top line, placeholders included. The
+    resolver's same-key fast path skipped placeholders, though, so the anchor fell to
+    rule 5 at offset 0. The next transaction then wrote `scrollBy(-offsetPx)`, and every
+    wheel step that stopped on unread history jumped up by up to a placeholder's height.
+    A user row's anchor, once its turn was evicted, did the same, because the
+    placeholder shares the turn's key. The fast path now accepts a same-key placeholder
+    and clamps the offset to its height.
+    - Model tests cover resting in a placeholder with no write, same-key and new-key
+      hydration, eviction and rehydration, and a wheel walk through mixed turns. The walk
+      asserts that the row under the top line moves by exactly each step. Three of them
+      fail with the old fast path.
+    - The Chromium wheel test asserted blank frames only, so it could not see a position
+      error. It now also checks that the top row moves by exactly the wheel's distance at
+      each settled step. It still passes with the old fast path, because the story's
+      window hydrates rows before the wheel comes to rest. The model tests are the
+      regression guard for this bug.
+  - **Reader-input coverage was deleted with the old hook, not moved.** The adapter tests
+    now dispatch real events and assert the mode and the position:
+    - an upward wheel releases follow;
+    - a nested scroller, a downward wheel or a pinch zoom does not;
+    - upward keys release follow, except in editable fields or from controls outside the
+      list;
+    - an upward move with no pointer or touch returns to the end, while one under a held
+      thumb or a touch pan releases;
+    - a suppression releases follow at the next change.
+
+    Removing each listener behaviour makes its test fail.
+  - **StrictMode.** The unmount cleanup disposed the controller for good, but StrictMode's
+    development remount runs the cleanup and then the setup again on a live component.
+    The setup now calls `resume()`, and a StrictMode adapter test covers it.
 - **Tests that relied on the old path.**
   - The hydration e2e's cold-tail tests asserted that the viewport stays hidden until
     rows are measured. They now assert the tail, or the saved reading row, is in place
@@ -817,7 +852,8 @@ collected after release, through the diagnostics below.
   - a focus test in `conversation-view-hooks.test.tsx`.
 - Real Chromium, `tests/e2e/conversation-scroll-engine.spec.ts` (3 pass):
   - opening a 3,000-turn conversation;
-  - 30 upward wheel steps;
+  - 30 upward wheel steps (coverage only; the position check came after review, see
+    above);
   - switching between two warm 3,000-turn conversations and back.
 
   Every animation frame had a row under every sampled line, and the switch restored

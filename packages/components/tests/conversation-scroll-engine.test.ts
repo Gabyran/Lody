@@ -199,6 +199,116 @@ describe('reading', () => {
     expectHealthy(sim);
   });
 
+  // Ten 100px turns, the placeholder of turn t10 (60px, keyed by its turn id,
+  // like the product's), then ten more turns.
+  const aroundPlaceholder = (): SimRow[] => [
+    ...turnRows(10, () => 100, () => 100),
+    { key: 't10', turnId: 't10', turnIndex: 10, placeholder: true, height: 60, estimate: 60 },
+    ...turnRows(10, () => 100, () => 100).map((row, i) => ({
+      ...row,
+      key: `t${i + 11}`,
+      turnId: `t${i + 11}`,
+      turnIndex: i + 11,
+    })),
+  ];
+
+  it('lets the reader rest inside a placeholder, then keeps the offset when its turn hydrates under the same key', () => {
+    let rows = aroundPlaceholder();
+    const sim = new ScrollSim(rows, 300);
+    sim.render();
+    sim.settle();
+    sim.task(() => sim.controller.release('wheel-up'));
+    sim.writes = [];
+    // 30px into the placeholder (content top 24 + ten 100px rows).
+    sim.nativeScroll(1054);
+    sim.settle();
+    expect(sim.writes).toEqual([]);
+    expect(sim.readScrollTop()).toBe(1054);
+
+    // A user turn hydrates into one taller row with the same key.
+    rows = rows.map((row) =>
+      row.key === 't10' ? { ...row, placeholder: false, height: 200, estimate: 60 } : row
+    );
+    sim.render(rows);
+    sim.settle();
+    expect(sim.screenTop('t10')).toBe(-30);
+    expectHealthy(sim);
+  });
+
+  it('lands on the first row of a turn that hydrates into rows with new keys', () => {
+    const rows = aroundPlaceholder();
+    const sim = new ScrollSim(rows, 300);
+    sim.render();
+    sim.settle();
+    sim.task(() => sim.controller.release('wheel-up'));
+    sim.nativeScroll(1054);
+    sim.settle();
+
+    sim.render(expand(rows, 't10', 3, 100));
+    sim.settle();
+    expect(sim.screenTop('t10.0')).toBe(0);
+    expectHealthy(sim);
+  });
+
+  it('gets its offset back when the row it read is evicted to a placeholder and hydrates again', () => {
+    let rows = aroundPlaceholder().map((row) =>
+      row.key === 't10' ? { ...row, placeholder: false, height: 200, estimate: 60 } : row
+    );
+    const sim = new ScrollSim(rows, 300);
+    sim.render();
+    sim.settle();
+    sim.task(() => sim.controller.release('wheel-up'));
+    sim.nativeScroll(1024 + 150);
+    sim.settle();
+    expect(sim.screenTop('t10')).toBe(-150);
+
+    // Evicted: the placeholder is shorter than the offset, which clamps to it.
+    rows = rows.map((row) => (row.key === 't10' ? { ...row, placeholder: true, height: 60 } : row));
+    sim.render(rows);
+    sim.settle();
+    expect(sim.screenTop('t10')).toBe(-60);
+
+    rows = rows.map((row) =>
+      row.key === 't10' ? { ...row, placeholder: false, height: 200 } : row
+    );
+    sim.render(rows);
+    sim.settle();
+    expect(sim.screenTop('t10')).toBe(-150);
+    expectHealthy(sim);
+  });
+
+  it('moves the row under the reader by exactly each wheel step through mixed hydrated and placeholder turns', () => {
+    // Every third turn is a placeholder; hydrated rows are taller than their
+    // estimates, so rows are measured (and compensated) as they come into view.
+    const rows: SimRow[] = Array.from({ length: 120 }, (_, i) =>
+      i % 3 === 1
+        ? { key: `t${i}`, turnId: `t${i}`, turnIndex: i, placeholder: true, height: 88, estimate: 88 }
+        : {
+            key: `t${i}`,
+            turnId: `t${i}`,
+            turnIndex: i,
+            height: 120 + (i % 5) * 45,
+            estimate: 60,
+          }
+    );
+    const sim = new ScrollSim(rows, V);
+    sim.render();
+    sim.settle();
+    sim.task(() => sim.controller.release('wheel-up'));
+    const step = 173;
+    for (let i = 0; i < 60 && sim.readScrollTop() > step; i++) {
+      const y = sim.readScrollTop();
+      const [key, top] = [...sim.mounted].findLast(
+        ([, rowTop]) => rowTop <= y - sim.contentTop
+      )!;
+      const before = sim.contentTop + top - y;
+      sim.nativeScroll(y - step);
+      sim.settle();
+      expect(sim.screenTop(key)).toBe(before + step);
+      expectHealthy(sim);
+    }
+  });
+
   it('re-arms follow when the reader scrolls down to the real bottom', () => {
     const sim = new ScrollSim(
       turnRows(40, () => 100),

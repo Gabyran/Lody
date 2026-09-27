@@ -118,6 +118,20 @@ test('scrolls through history with the wheel and every frame stays covered', asy
   await settleFrames(page, 10);
   const frames = (await stopBlankSampler(page)).filter((blank) => blank >= 0);
   expect(frames.filter((blank) => blank > 0)).toEqual([]);
+
+  // Position, not only coverage: after each settled step, the row that was
+  // under the top line moved down by exactly the wheel's distance — rows
+  // hydrating or measured around it (placeholders included) never pull it.
+  for (let step = 0; step < 10; step++) {
+    const before = await topRow(page);
+    expect(before).not.toBeNull();
+    await page.mouse.wheel(0, -300);
+    await settleFrames(page, 10);
+    const top = await page
+      .locator(`[data-conversation-row-key="${before!.key}"]`)
+      .evaluate((row) => Math.round(row.getBoundingClientRect().top));
+    expect(top - before!.top, `step ${step}, row ${before!.key}`).toBe(300);
+  }
 });
 
 test('switching away and back restores the reading position with no blank frame', async ({
