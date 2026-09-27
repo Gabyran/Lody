@@ -65,6 +65,63 @@ describe('GitHub PR live reads', () => {
   });
 });
 
+describe('githubFetchCheckRuns', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  function apiRun(id: number, name: string, conclusion: string, appName = 'GitHub Actions') {
+    return { id, name, status: 'completed', conclusion, app: { name: appName } };
+  }
+
+  it('judges each check by its latest attempt only', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify({
+              check_runs: [
+                apiRun(12, 'test', 'success'),
+                apiRun(10, 'test', 'failure'),
+                apiRun(11, 'lint', 'success'),
+                apiRun(9, 'lint', 'failure', 'Other CI'),
+              ],
+            })
+          )
+      )
+    );
+
+    const summary = await githubFetchCheckRuns('token', 'owner/repo', 'head-sha');
+
+    expect(summary.runs.map((run) => [run.name, run.appName, run.conclusion])).toEqual([
+      ['lint', 'GitHub Actions', 'success'],
+      ['lint', 'Other CI', 'failure'],
+      ['test', 'GitHub Actions', 'success'],
+    ]);
+    expect(summary.conclusion).toBe('failure');
+  });
+
+  it('turns green once a failed check is re-run successfully', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify({
+              check_runs: [apiRun(10, 'test', 'failure'), apiRun(12, 'test', 'success')],
+            })
+          )
+      )
+    );
+
+    const summary = await githubFetchCheckRuns('token', 'owner/repo', 'head-sha');
+
+    expect(summary.total).toBe(1);
+    expect(summary.conclusion).toBe('success');
+  });
+});
+
 describe('githubCreatePRReviewComment', () => {
   afterEach(() => {
     vi.unstubAllGlobals();

@@ -2109,6 +2109,23 @@ export async function githubCreatePRIssueComment(
   );
 }
 
+/**
+ * Keep only the newest attempt of each check. A re-run (or a second trigger on
+ * the same SHA) adds another check run with the same app and name; the earlier
+ * attempt is history, so a failure that was later re-run green must not keep
+ * the commit red. Check run ids are allocated monotonically, so the highest id
+ * is the latest attempt.
+ */
+export function selectLatestCheckRuns(runs: readonly GitHubCheckRun[]): GitHubCheckRun[] {
+  const latest = new Map<string, GitHubCheckRun>();
+  for (const run of runs) {
+    const key = `${run.appName ?? ''}\u0000${run.name}`;
+    const current = latest.get(key);
+    if (!current || run.id > current.id) latest.set(key, run);
+  }
+  return [...latest.values()];
+}
+
 function summarizeCheckRuns(runs: GitHubCheckRun[]): GitHubCheckRunsSummary {
   if (runs.length === 0) {
     return { status: 'none', conclusion: null, total: 0, runs };
@@ -2349,6 +2366,8 @@ export async function githubFetchCheckRuns(
     throw new Error(`GitHub API error: ${res.status} ${text}`);
   }
   const payload = GithubCheckRunsResponseSchema.parse(JSON.parse(text) as unknown);
-  const runs = [...payload.check_runs].sort((a, b) => a.name.localeCompare(b.name));
+  const runs = selectLatestCheckRuns(payload.check_runs).sort((a, b) =>
+    a.name.localeCompare(b.name)
+  );
   return summarizeCheckRuns(runs);
 }
