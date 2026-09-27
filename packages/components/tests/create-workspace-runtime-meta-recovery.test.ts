@@ -626,8 +626,13 @@ describe('createWorkspaceRuntime meta recovery lifecycle', () => {
       blockedDelete.resolve();
       await attach;
       await flushPromises();
+      // Nothing built from the old credentials may reach the repo afterwards:
+      // no cloud transport, no Meta join, and no retry wakes up later.
+      await vi.advanceTimersByTimeAsync(120_000);
 
       expect(cloudAttachCalls()).toEqual([]);
+      expect(mocks.joinMetaRoom).not.toHaveBeenCalled();
+      expect(mocks.metaCheckpointDelete).toHaveBeenCalledTimes(1);
       if (teardown === 'sign-out') {
         await runtime.dispose();
       }
