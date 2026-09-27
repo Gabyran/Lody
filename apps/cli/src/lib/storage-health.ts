@@ -133,6 +133,8 @@ export class StorageHealthMonitor {
   private stopped = false;
   private published: string;
   private readonly inflight = new Set<Promise<unknown>>();
+  /** Targets unregistered without saving during an open episode; see registerFlushTarget. */
+  private readonly lostTargets = new Set<string>();
   private readonly targets = new Set<FlushTarget>();
   private readonly listeners = new Set<(snapshot: StorageHealthSnapshot) => void>();
 
@@ -206,11 +208,26 @@ export class StorageHealthMonitor {
   /**
    * Registers a repo whose pending changes must be flushed once storage
    * recovers. A write failure clears only when every target flushed.
+   *
+   * The returned function unregisters it. `saved: false` while changes are
+   * unsaved means that repo's changes left with it: flushing the remaining
+   * targets can no longer prove everything was saved, so the episode never
+   * clears on its own in this process.
    */
-  registerFlushTarget(name: string, flush: () => Promise<void>): () => void {
+  registerFlushTarget(
+    name: string,
+    flush: () => Promise<void>
+  ): (outcome: { saved: boolean }) => void {
     const target: FlushTarget = { name, flush };
     this.targets.add(target);
-    return () => this.targets.delete(target);
+    return ({ saved }) => {
+      if (!this.targets.delete(target) || saved || this.unsavedSince === null) return;
+      this.lostTargets.add(name);
+      this.options.logger.warn(
+        `[storage] ${name} closed with changes unsaved since ${new Date(this.unsavedSince).toISOString()}; ` +
+          'they cannot be saved by this process'
+      );
+    };
   }
 
   /**
@@ -370,7 +387,14 @@ export class StorageHealthMonitor {
           return;
         }
       }
-      if (this.stopped || unsavedSince === null || this.failureGeneration !== generation) return;
+      if (
+        this.stopped ||
+        unsavedSince === null ||
+        this.failureGeneration !== generation ||
+        this.lostTargets.size > 0
+      ) {
+        return;
+      }
       this.unsavedSince = null;
       this.lastFailureCode = null;
       this.options.logger.info(

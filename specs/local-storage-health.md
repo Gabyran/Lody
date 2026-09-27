@@ -49,6 +49,13 @@ Recovery needs no user action. Leaving `critical`, and any successful local writ
 while changes are unsaved, triggers a flush of every workspace repo, at most once
 every 5 seconds. Each poll while changes are unsaved retries too.
 
+Stopping a workspace does not end its part in recovery. Its teardown flushes first,
+and only a successful flush lets the repo close. If that flush is refused for lack
+of space, the repo stays open and registered, and recovery closes it after saving
+it. A repo that closes any other way while changes are unsaved leaves the episode
+open for the rest of the process: the remaining repos saving cannot prove its
+changes were saved.
+
 ## Degraded mode
 
 While `critical`, the daemon refuses, before it starts:

@@ -43,6 +43,13 @@ issue #1054 表明存储本身能撑过写满：SQLite 拒绝写入但不损坏�
 目标，并在销毁 repo 之前注销。只有所有目标都 flush 成功，未保存状态才会清除。一个代数计数器
 防止与新失败竞争的恢复把它清掉。单凭剩余空间永远不会清除它。
 
+停止 workspace（列表协调、撤权、退出）不能丢掉持有未保存更改的 repo。`cleanUp` 显式 flush，
+而不是经过会吞掉失败的合并器，并且只在 flush 成功后注销。如果这次 flush 因存储已满被拒绝，
+manager 保持 repo 打开并保留注册；监视器的恢复流程先 flush 再销毁它。在这一轮未结束时以
+`saved: false` 注销会被标记为丢失，此后本进程内这一轮不会再结束。第一版在最终 flush 之前就注销，
+导致写满时被停止的 workspace 丢失更改，而监视器随后在没有任何目标的情况下清除了
+`unsavedSince`；评审发现了这个问题。
+
 **阈值结合卷的比例与绝对上下限。** 严重阈值是卷的 1%，限定在 256 MiB 到 1 GiB 之间。256 MiB
 够一次 flush、SQLite 日志和一次 checkpoint 使用，但不够创建 worktree 或安装依赖。1 GiB 上限
 避免大磁盘在还剩几 GB 时就降级。警告阈值是 5%，限定在 1 到 5 GiB 之间，保证在拒绝工作之前很早
@@ -115,6 +122,10 @@ flush 再次成功时记录一条 info。
   - 可分类的失败立即变为严重，只有完整的 flush 能清除，且恢复有频率限制；
   - 用 `PRAGMA max_page_count` 限制真实的 `SqliteRepoStore`，产生真正的 `SQLITE_FULL`。
     写满时写入的二十个文档，在销毁第一个 repo 之前通过第二个连接读回。
+  - 写满时的清理：在真实的受限 SQLite repo 上调用 `LoroDocumentManager.cleanUp()` 会让它保持
+    打开，空间恢复后由恢复流程保存，第二个连接能读到全部十个文档。使用旧顺序（先注销、flush
+    失败被吞掉、再销毁）时，清理以 `database or disk is full` 失败。未保存就注销的目标会让这一轮
+    保持未结束；去掉这道栅栏会让对应测试失败。
   - 消融：去掉恢复 flush 后，两个行为测试都会失败。SQLite 测试的第一个版本在消融时仍然通过，
     因为 `repo.destroy()` 自己会 flush；改为通过第二个连接读取后修正了这一点。
 - `apps/cli/src/lib/loro/presence.test.ts`：级别变化会立即写出心跳，且字段能经受真实的
@@ -159,6 +170,8 @@ flush 再次成功时记录一条 info。
   打包桌面应用中验证。
 - loro-repo 仍会带堆栈打印每一次后台保存失败；schema 升级后的第一次打开仍需写盘
   （loro-dev/loro-repo#139）。
+- 若被清理的 repo 仍在等待空间时同一 workspace 又被启动，会在同一个 SQLite 文件上打开第二个
+  repo；两者都追加 CRDT 更新，加载时合并。
 - `unsavedSince` 只覆盖 repo 写入。其他存储（schedules、operation store、diff store）各自失败，
   未被跟踪。
 - 退出对话框读取 Electron 最近一次轮询到的运行时状态，最后几秒内发生的失败可能不会显示。

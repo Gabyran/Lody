@@ -292,7 +292,7 @@ import { readTimeoutEnv, withTimeout } from './timeout-utils';
 import { ConcurrentQueue } from '../concurrent-queue';
 import type { CliSqliteRepoStore } from './sqlite-repo-store';
 import type { StorageHealthMonitor } from '@/lib/storage-health';
-import { observeStorageAdapterWrites } from '@lody/shared';
+import { isStorageFullError, observeStorageAdapterWrites } from '@lody/shared';
 import type { CloudBillingPort, CloudStreamsTokenPort } from '@lody/platform';
 
 /**
@@ -339,6 +339,8 @@ export type LoroRepoPersistReason =
   | 'session-local-base-ref'
   /** Retrying writes that failed while the data disk was full. */
   | 'storage-recovered'
+  /** The explicit last flush before the repo is destroyed. */
+  | 'teardown'
   | 'session-fork-prepare'
   | 'session-fork-commit'
   | 'session-fork-rollback'
@@ -371,7 +373,9 @@ export class LoroDocumentManager {
   private remoteTransportOpQueue: Promise<unknown> = Promise.resolve();
   private readonly streamsTokens: CloudStreamsTokenPort | null;
   public readonly cloudBilling: CloudBillingPort | null;
-  private unregisterStorageFlushTarget: (() => void) | null;
+  private unregisterStorageFlushTarget: ((outcome: { saved: boolean }) => void) | null;
+  /** Set when teardown could not save: storage recovery destroys the repo after saving. */
+  private destroyAfterStorageRecovery = false;
 
   static async create(
     workspaceId: WorkspaceId,
@@ -561,7 +565,7 @@ export class LoroDocumentManager {
     this.machineMonitorRuntime = options.machineMonitorRuntime ?? null;
     this.unregisterStorageFlushTarget =
       options.storageHealth?.registerFlushTarget(this.workspaceId, () =>
-        this.persistPendingChanges('storage-recovered')
+        this.flushForStorageRecovery()
       ) ?? null;
     const initialTransportStatus = options.initialTransportStatus ?? 'disconnected';
     const initialMetaSyncPromise = options.initialMetaSyncPromise ?? Promise.resolve(false);
@@ -1673,10 +1677,53 @@ export class LoroDocumentManager {
     this.machineExistenceWatcher = null;
     this.remoteStreamsStatusUnsubscribe?.();
     this.remoteStreamsStatusUnsubscribe = null;
-    // The repo is about to be destroyed; storage recovery must not flush it.
-    this.unregisterStorageFlushTarget?.();
+    // The final flush is explicit because its outcome decides what happens to
+    // the repo: `repo.destroy()` would flush too, but a storage-full failure
+    // there drops the unsaved changes along with the repo.
+    let finalFlushError: unknown = null;
+    try {
+      await this.persistPendingChanges('teardown');
+    } catch (error) {
+      finalFlushError = error;
+    }
+    if (
+      finalFlushError !== null &&
+      this.unregisterStorageFlushTarget &&
+      isStorageFullError(finalFlushError)
+    ) {
+      // The disk is full: keep the repo and its recovery target alive. Storage
+      // recovery becomes the owner that flushes it and only then destroys it,
+      // so a workspace stopped mid-episode loses nothing once space returns.
+      this.destroyAfterStorageRecovery = true;
+      this.logger.warn(
+        `[${this.workspaceId}] Final flush failed because storage is full; keeping the repo open until its changes are saved: ${formatErrorMessage(finalFlushError)}`
+      );
+      return;
+    }
+    this.unregisterStorageFlushTarget?.({ saved: finalFlushError === null });
     this.unregisterStorageFlushTarget = null;
     await this.destroyRepo({ fast: options.fast });
+  }
+
+  /**
+   * Storage recovery's flush for this repo. After a teardown that could not
+   * save, a successful flush also finishes that teardown.
+   */
+  private async flushForStorageRecovery(): Promise<void> {
+    await this.persistPendingChanges('storage-recovered');
+    if (!this.destroyAfterStorageRecovery) return;
+    this.destroyAfterStorageRecovery = false;
+    const unregister = this.unregisterStorageFlushTarget;
+    this.unregisterStorageFlushTarget = null;
+    unregister?.({ saved: true });
+    this.logger.info(
+      `[${this.workspaceId}] Saved changes kept open after teardown; closing the repo`
+    );
+    await this.destroyRepo({ fast: false }).catch((error: unknown) => {
+      this.logger.warn(
+        `[${this.workspaceId}] Failed to close the repo after storage recovery: ${formatErrorMessage(error)}`
+      );
+    });
   }
 
   configureMachineMonitor(

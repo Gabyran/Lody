@@ -5,7 +5,13 @@ import Database from 'better-sqlite3';
 import { LoroRepo } from 'loro-repo';
 import { SqliteRepoStore } from 'loro-repo/storage/sqlite';
 import { afterEach, describe, expect, it } from 'vitest';
-import { isStorageCriticalError, observeStorageAdapterWrites } from '@lody/shared';
+import {
+  isStorageCriticalError,
+  observeStorageAdapterWrites,
+  type WorkspaceId,
+} from '@lody/shared';
+import type { Logger } from '@/utils/logger';
+import { LoroDocumentManager } from './loro/doc';
 import {
   StorageHealthMonitor,
   computeStorageThresholds,
@@ -51,6 +57,18 @@ class ManualScheduler {
 }
 
 const silentLogger = { warn: () => {}, info: () => {}, debug: () => {} };
+
+const createSilentLogger = (): Logger => ({
+  info: () => {},
+  warn: () => {},
+  error: () => {},
+  success: () => {},
+  debug: () => {},
+  trace: () => {},
+  setLevel: () => {},
+  child: () => createSilentLogger(),
+  close: async () => {},
+});
 
 const createMonitor = (space: { current: StorageSpace }) => {
   const scheduler = new ManualScheduler();
@@ -256,6 +274,87 @@ describe('StorageHealthMonitor', () => {
     reopenedStore.close();
     monitor.stop();
     await repo.destroy();
+    database.close();
+  });
+
+  it('never clears unsaved changes whose target left without saving them', async () => {
+    const space = { current: { availableBytes: 0, totalBytes: TOTAL } };
+    const { monitor, scheduler } = createMonitor(space);
+    await monitor.start();
+    const unregister = monitor.registerFlushTarget('workspace-1', async () => {});
+    monitor.reportWriteFailure(sqliteFull(), 'loro-repo save');
+    unregister({ saved: false });
+
+    // Space returns and every remaining target (none) flushes fine.
+    space.current = { availableBytes: 20 * GIB, totalBytes: TOTAL };
+    scheduler.advance(10_000);
+    await monitor.settled();
+    expect(monitor.hasUnsavedChanges()).toBe(true);
+    expect(monitor.getSnapshot()).toMatchObject({ level: 'critical', reason: 'write-failed' });
+    monitor.stop();
+  });
+
+  it('keeps a workspace torn down on a full disk alive until its changes are saved', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'lody-storage-teardown-'));
+    createdDirs.push(dir);
+    const dbPath = path.join(dir, 'repo.sqlite3');
+    const database = new Database(dbPath);
+    const sqliteStore = new SqliteRepoStore({ database });
+    const space = { current: { availableBytes: 50 * GIB, totalBytes: TOTAL } };
+    const { monitor, scheduler } = createMonitor(space);
+    await monitor.start();
+    const repo = await LoroRepo.create({
+      storageAdapter: observeStorageAdapterWrites(sqliteStore.storage, {
+        onWriteFailed: (error, operation) => monitor.reportWriteFailure(error, operation),
+        onWriteSucceeded: () => monitor.reportWriteSuccess(),
+      }),
+      metaDebounceCommitMs: 0,
+    });
+    const manager = new LoroDocumentManager({
+      repo,
+      workspaceId: 'workspace-teardown' as WorkspaceId,
+      userId: 'user-1',
+      metaSub: null,
+      logger: createSilentLogger(),
+      initialTransportStatus: 'connected',
+      initialMetaSyncPromise: Promise.resolve(false),
+      initialMetaSyncCompleted: false,
+      storageHealth: monitor,
+    });
+
+    const docIds = Array.from({ length: 10 }, (_, i) => `written-while-full-${i}`);
+    const pages = database.pragma('page_count', { simple: true }) as number;
+    database.pragma(`max_page_count = ${pages}`);
+    space.current = { availableBytes: 0, totalBytes: TOTAL };
+    for (const docId of docIds) {
+      const handle = await repo.openPersistedDoc(docId);
+      handle.doc.getText('body').insert(0, `${docId} `.repeat(2_000));
+      handle.doc.commit();
+      await repo.upsertDocMeta(docId, { title: docId });
+    }
+    await expect(repo.flush()).rejects.toThrow();
+    expect(monitor.hasUnsavedChanges()).toBe(true);
+
+    // The workspace is stopped (list reconcile, revocation) while the disk is still full.
+    await manager.cleanUp();
+    expect(monitor.hasUnsavedChanges()).toBe(true);
+
+    // Space returns: recovery still owns the torn-down repo, saves it, then closes it.
+    database.pragma('max_page_count = 1073741823');
+    space.current = { availableBytes: 20 * GIB, totalBytes: TOTAL };
+    scheduler.advance(10_000);
+    await monitor.settled();
+    expect(monitor.getSnapshot()).toMatchObject({ level: 'ok', unsavedSince: null });
+
+    const reopenedStore = new SqliteRepoStore({ path: dbPath });
+    const reopened = await LoroRepo.create({ storageAdapter: reopenedStore.storage });
+    for (const docId of docIds) {
+      expect((await reopened.getDocMeta(docId))?.meta).toMatchObject({ title: docId });
+      expect((await reopened.openDetachedDoc(docId)).getText('body').toString()).toContain(docId);
+    }
+    await reopened.destroy();
+    reopenedStore.close();
+    monitor.stop();
     database.close();
   });
 });

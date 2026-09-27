@@ -54,6 +54,16 @@ before destroying the repo. Unsaved state clears only when every target flushed.
 generation counter stops a recovery that raced a new failure from clearing it.
 Free space alone never clears it.
 
+Stopping a workspace (list reconcile, revocation, shutdown) must not drop a repo that
+holds unsaved changes. `cleanUp` flushes explicitly, instead of through the coalescer,
+which swallows failures, and unregisters only after that flush succeeds. If the flush
+is refused as storage-full, the manager keeps its repo open and registered; the
+monitor's recovery flushes it and then destroys it. Unregistering with `saved: false`
+during an open episode marks it lost, and the episode then never clears in that
+process. The first revision unregistered before the final flush, so a workspace
+stopped on a full disk lost its changes and the monitor then cleared `unsavedSince`
+with no targets left; review caught it.
+
 **Thresholds combine a share of the volume with absolute bounds.** Critical is 1% of
 the volume, clamped to 256 MiB–1 GiB. 256 MiB leaves room for a flush, SQLite's
 journal and a checkpoint, but not for a worktree or an install. The 1 GiB cap keeps a
@@ -144,6 +154,11 @@ Automated, with injected clocks, manual timers and fault injection, no real slee
   - a real `SqliteRepoStore` capped with `PRAGMA max_page_count` raises a genuine
     `SQLITE_FULL`. Twenty documents written while full are read back through a
     second connection before the first repo is destroyed.
+  - teardown on a full disk: `LoroDocumentManager.cleanUp()` on a real capped SQLite
+    repo keeps it open, recovery saves it once space returns, and a second
+    connection reads all ten documents. With the old order (unregister, swallowed
+    flush, destroy) cleanup failed with `database or disk is full`. A target
+    unregistered unsaved keeps the episode open; removing that fence fails its test.
   - Ablation: with the recovery flush removed, both behavioral tests fail. The first
     version of the SQLite test passed anyway, because `repo.destroy()` flushes;
     reading through a second connection fixed that.
@@ -196,6 +211,8 @@ eye. They exposed a stray space between Chinese sentences, now a localized join 
   tests and Storybook, not in a packaged desktop on a full disk.
 - loro-repo still prints each failed background save with a stack. A first open after
   a schema upgrade still needs to write (loro-dev/loro-repo#139).
+- A workspace restarted while its torn-down repo is still waiting for space opens a
+  second repo on the same SQLite file; both append CRDT updates and merge on load.
 - `unsavedSince` covers repo writes only. Other stores (schedules, operation stores,
   the diff store) fail independently and are not tracked.
 - The quit dialog reads the runtime state Electron last polled, so a failure in the

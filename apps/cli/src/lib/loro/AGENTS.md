@@ -91,8 +91,8 @@ Loro flush; meta timestamps are written only at status transitions. Durable
 checks read presence only, and `getOnlineMachineIds()` returning null means the
 presence room is not joined — status unknown, not offline.
 
-Repo storage stays wrapped by `observeStorageAdapterWrites`, feeding
-`StorageHealthMonitor` ([spec](../../../../../specs/local-storage-health.md)).
+Repo storage stays wrapped by `observeStorageAdapterWrites`, feeding `StorageHealthMonitor`;
+teardown unregisters only after its own flush succeeds ([spec](../../../../../specs/local-storage-health.md)).
 
 ## Device resources use `machine-monitor.ts`
 
