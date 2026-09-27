@@ -8,15 +8,17 @@ import { colors, shadow } from '@lody/ui/tokens/colors.stylex';
 import { corner, radius, space, text } from '@lody/ui/tokens/scales.stylex';
 import {
   canStartIosSimulatorPreview,
+  getIosSimulatorAspectRatio,
   getIosSimulatorDeviceAction,
   getIosSimulatorStatusUdid,
+  type IosSimulatorCatalog,
 } from '@/lib/ios-simulator/ios-simulator-model';
 import type {
-  IosSimulatorDevice,
+  IosSimulatorDeviceEntry,
   IosSimulatorError,
+  IosSimulatorPanelStatus,
   IosSimulatorPreparingStage,
-  IosSimulatorPreviewStatus,
-  IosSimulatorRuntime,
+  IosSimulatorViewerState,
 } from '@/lib/ios-simulator/ios-simulator-types';
 import {
   IosSimulatorConnectionStatus,
@@ -29,21 +31,19 @@ import {
   useIosSimulatorStageLabel,
 } from './ios-simulator-copy';
 import { IosSimulatorDevicePicker } from './ios-simulator-device-picker';
-import { getIosSimulatorAspectRatio, IosSimulatorViewer } from './ios-simulator-viewer';
+import { IosSimulatorViewer } from './ios-simulator-viewer';
 
 export type IosSimulatorCatalogState =
   | { phase: 'loading' }
   | { phase: 'error'; error: IosSimulatorError }
-  | { phase: 'ready'; runtimes: IosSimulatorRuntime[]; devices: IosSimulatorDevice[] };
+  | ({ phase: 'ready' } & IosSimulatorCatalog);
 
 /** Why the panel cannot talk to the machine at all. Checked before anything else. */
 export type IosSimulatorPanelBlocker =
   /** The Mac's Lody predates the simulator protocol. */
   | 'upgrade-required'
   /** The Mac is offline and is not this machine. */
-  | 'offline'
-  /** This app build has no simulator client. */
-  | 'client-unavailable';
+  | 'offline';
 
 export type IosSimulatorPanelViewProps = {
   machineName: string;
@@ -51,22 +51,27 @@ export type IosSimulatorPanelViewProps = {
   catalog: IosSimulatorCatalogState;
   refreshing?: boolean;
   selectedUdid: string | null;
-  status: IosSimulatorPreviewStatus;
+  status: IosSimulatorPanelStatus;
+  /** What the viewer page last reported for the ready preview. */
+  viewerState?: IosSimulatorViewerState | null;
+  /** Bumped to reload the viewer page after its stream dropped. */
+  viewerReloadKey?: number;
   pendingAction?: IosSimulatorPendingAction;
-  /** Whether the preparing sequence includes booting the device. */
-  bootRequested?: boolean;
-  /** The viewer is mounted only while the panel is on screen. */
+  /** Whether this start has to boot the device, so the steps list it. */
+  bootExpected?: boolean;
+  /** The panel is on screen; the viewer is told when it is not. */
   active?: boolean;
   leadingSlot?: ReactNode;
   onSelectDevice: (udid: string) => void;
   onPickerOpenChange?: (open: boolean) => void;
   onRefresh: () => void;
-  onStart: (device: IosSimulatorDevice) => void;
+  onStart: (device: IosSimulatorDeviceEntry) => void;
   onCancel: () => void;
   onStop: () => void;
   onRestore: () => void;
   onRetry: () => void;
   onCopyDiagnostics: () => void;
+  onViewerStateChange?: (state: IosSimulatorViewerState) => void;
 };
 
 const styles = stylex.create({
@@ -233,6 +238,21 @@ const styles = stylex.create({
     cornerShape: corner.round,
     backgroundColor: colors.tertiaryLabel,
   },
+  /** A strip over the live screen when its stream drops; the frame stays put. */
+  notice: {
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    flexWrap: 'wrap',
+    gap: space[2],
+    paddingInline: space[4],
+    paddingTop: space[3],
+    fontSize: text.footnoteSize,
+    lineHeight: text.footnoteLeading,
+    color: colors.secondaryLabel,
+    textAlign: 'center',
+  },
+  viewerColumn: { display: 'flex', flexDirection: 'column', flexGrow: 1, minHeight: 0 },
 });
 
 function Message({
@@ -262,10 +282,10 @@ function DeviceSlot({
   device,
   children,
 }: {
-  device: IosSimulatorDevice | null;
+  device: IosSimulatorDeviceEntry | null;
   children: ReactNode;
 }) {
-  const aspect = { '--ios-simulator-aspect': String(getIosSimulatorAspectRatio(device?.screen)) };
+  const aspect = { '--ios-simulator-aspect': String(getIosSimulatorAspectRatio(device?.family)) };
   return (
     <div {...stylex.props(styles.deviceStage)}>
       <div
@@ -279,24 +299,18 @@ function DeviceSlot({
   );
 }
 
-function PreparingSteps({ stage, includeBoot }: { stage: string; includeBoot: boolean }) {
+function PreparingSteps({
+  stage,
+  includeBoot,
+}: {
+  stage: IosSimulatorPreparingStage;
+  includeBoot: boolean;
+}) {
   const stageLabel = useIosSimulatorStageLabel();
   const steps = IOS_SIMULATOR_PREPARING_STAGES.filter(
-    (step) => includeBoot || step !== 'booting-device' || stage === 'booting-device'
+    (step) => includeBoot || step !== 'booting' || stage === 'booting'
   );
-  const currentIndex = steps.indexOf(stage as IosSimulatorPreparingStage);
-  if (currentIndex === -1) {
-    return (
-      <ol {...stylex.props(styles.stages)}>
-        <li {...stylex.props(styles.stageRow, styles.stageCurrent)} aria-current="step">
-          <span {...stylex.props(styles.stageMark)}>
-            <Spinner size="small" label={null} />
-          </span>
-          {stageLabel(stage)}
-        </li>
-      </ol>
-    );
-  }
+  const currentIndex = steps.indexOf(stage);
   return (
     <ol {...stylex.props(styles.stages)}>
       {steps.map((step, index) => {
@@ -340,8 +354,10 @@ export function IosSimulatorPanelView({
   refreshing = false,
   selectedUdid,
   status,
+  viewerState = null,
+  viewerReloadKey = 0,
   pendingAction = null,
-  bootRequested = false,
+  bootExpected = false,
   active = true,
   leadingSlot,
   onSelectDevice,
@@ -353,6 +369,7 @@ export function IosSimulatorPanelView({
   onRestore,
   onRetry,
   onCopyDiagnostics,
+  onViewerStateChange = () => {},
 }: IosSimulatorPanelViewProps) {
   const { t } = useTranslation();
   const stateLabel = useIosSimulatorDeviceStateLabel();
@@ -360,7 +377,7 @@ export function IosSimulatorPanelView({
   const runtimes = catalog.phase === 'ready' ? catalog.runtimes : [];
   const devices = catalog.phase === 'ready' ? catalog.devices : [];
   const deviceByUdid = new Map(devices.map((device) => [device.udid, device]));
-  const runtimeById = new Map(runtimes.map((runtime) => [runtime.id, runtime]));
+  const runtimeByKey = new Map(runtimes.map((runtime) => [runtime.key, runtime]));
   const selected = selectedUdid ? (deviceByUdid.get(selectedUdid) ?? null) : null;
   const statusUdid = getIosSimulatorStatusUdid(status);
   const statusDevice = statusUdid ? (deviceByUdid.get(statusUdid) ?? null) : null;
@@ -372,29 +389,29 @@ export function IosSimulatorPanelView({
       {t('sessions.iosSimulator.connection.copyDiagnostics', 'Copy diagnostics')}
     </Button>
   );
+  const refreshButton = (
+    <Button
+      type="button"
+      variant="secondary"
+      size="small"
+      disabled={refreshing}
+      onClick={onRefresh}
+    >
+      {t('sessions.iosSimulator.action.refresh', 'Refresh')}
+    </Button>
+  );
 
   const renderStage = (): ReactNode => {
-    if (blocker === 'upgrade-required' || blocker === 'client-unavailable') {
+    if (blocker === 'upgrade-required') {
       return (
         <Message
-          title={
-            blocker === 'upgrade-required'
-              ? t('sessions.iosSimulator.blocker.upgradeTitle', 'Update Lody on {{machine}}', {
-                  machine: machineName,
-                })
-              : t('sessions.iosSimulator.blocker.clientTitle', 'Update this app')
-          }
-          detail={
-            blocker === 'upgrade-required'
-              ? t(
-                  'sessions.iosSimulator.blocker.upgradeDetail',
-                  'Previewing simulators needs a newer Lody on the Mac this session runs on. Update it there, then reopen this tab.'
-                )
-              : t(
-                  'sessions.iosSimulator.blocker.clientDetail',
-                  'This version of Lody can’t show simulators yet. Update the app, then reopen this tab.'
-                )
-          }
+          title={t('sessions.iosSimulator.blocker.upgradeTitle', 'Update Lody on {{machine}}', {
+            machine: machineName,
+          })}
+          detail={t(
+            'sessions.iosSimulator.blocker.upgradeDetail',
+            'Previewing simulators needs a newer Lody on the Mac this session runs on. Update it there, then reopen this tab.'
+          )}
         />
       );
     }
@@ -417,9 +434,7 @@ export function IosSimulatorPanelView({
           title={t(
             'sessions.iosSimulator.catalog.loading',
             'Looking for simulators on {{machine}}…',
-            {
-              machine: machineName,
-            }
+            { machine: machineName }
           )}
         >
           <Spinner size="small" label={null} />
@@ -430,15 +445,7 @@ export function IosSimulatorPanelView({
       const copy = errorCopy(catalog.error, machineName);
       return (
         <Message title={copy.title} detail={copy.detail} raw={catalog.error.message}>
-          <Button
-            type="button"
-            variant="secondary"
-            size="small"
-            disabled={refreshing}
-            onClick={onRefresh}
-          >
-            {t('sessions.iosSimulator.action.refresh', 'Refresh')}
-          </Button>
+          {refreshButton}
           {copyDiagnosticsButton}
         </Message>
       );
@@ -454,41 +461,52 @@ export function IosSimulatorPanelView({
             'Add one in Xcode under Window › Devices and Simulators, then refresh.'
           )}
         >
-          <Button
-            type="button"
-            variant="secondary"
-            size="small"
-            disabled={refreshing}
-            onClick={onRefresh}
-          >
-            {t('sessions.iosSimulator.action.refresh', 'Refresh')}
-          </Button>
+          {refreshButton}
         </Message>
       );
     }
 
     const showingStatusDevice = statusUdid !== null && statusUdid === selectedUdid;
     if (showingStatusDevice && status.phase === 'ready') {
-      return active ? (
-        <IosSimulatorViewer
-          viewerUrl={status.viewerUrl}
-          title={t('sessions.iosSimulator.viewerTitle', '{{device}} screen', {
-            device: statusDevice?.name ?? '',
-          })}
-          screen={statusDevice?.screen}
-        />
-      ) : null;
+      const dropped = viewerState === 'disconnected' || viewerState === 'error';
+      return (
+        <div {...stylex.props(styles.viewerColumn)}>
+          {dropped ? (
+            <div {...stylex.props(styles.notice)} role="status">
+              {viewerState === 'error'
+                ? t('sessions.iosSimulator.viewer.error', 'The viewer hit an error.')
+                : t('sessions.iosSimulator.viewer.disconnected', 'The viewer lost its connection.')}
+              <Button type="button" variant="secondary" size="mini" onClick={onRestore}>
+                {t('sessions.iosSimulator.action.restore', 'Restore')}
+              </Button>
+            </div>
+          ) : null}
+          <IosSimulatorViewer
+            key={`${status.operationId}:${viewerReloadKey}`}
+            viewerUrl={status.viewerUrl}
+            viewerOrigin={status.viewerOrigin}
+            operationId={status.operationId}
+            title={t('sessions.iosSimulator.viewerTitle', '{{device}} screen', {
+              device: statusDevice?.name ?? '',
+            })}
+            family={statusDevice?.family}
+            visible={active}
+            onStateChange={onViewerStateChange}
+          />
+        </div>
+      );
     }
     if (showingStatusDevice && status.phase === 'preparing') {
       return (
         <DeviceSlot device={statusDevice}>
           <p {...stylex.props(styles.deviceName)}>{statusDevice?.name}</p>
-          <PreparingSteps stage={status.stage} includeBoot={bootRequested} />
+          <PreparingSteps stage={status.stage} includeBoot={bootExpected} />
           <Button
             type="button"
             variant="secondary"
             size="small"
-            disabled={pendingAction === 'cancel'}
+            // Stop names the operation; until the machine answers there is none.
+            disabled={!status.operationId || pendingAction === 'cancel'}
             onClick={onCancel}
           >
             {t('sessions.iosSimulator.action.cancel', 'Cancel')}
@@ -496,33 +514,18 @@ export function IosSimulatorPanelView({
         </DeviceSlot>
       );
     }
-    if (showingStatusDevice && status.phase === 'interrupted') {
+    if (showingStatusDevice && status.phase === 'closed') {
       return (
         <DeviceSlot device={statusDevice}>
           <p {...stylex.props(styles.deviceName)}>{statusDevice?.name}</p>
           <p {...stylex.props(styles.detail)}>
-            {status.reason === 'expired'
-              ? t('sessions.iosSimulator.interrupted.expired', 'The preview expired.')
-              : t(
-                  'sessions.iosSimulator.interrupted.lost',
-                  'The connection to the preview was lost.'
-                )}{' '}
+            {t('sessions.iosSimulator.closed.detail', 'The preview ended.')}{' '}
             {t('sessions.iosSimulator.interrupted.stillRunning', 'The simulator is still running.')}
           </p>
-          <div {...stylex.props(styles.actions)}>
-            <Button
-              type="button"
-              variant="primary"
-              size="small"
-              disabled={busy}
-              onClick={onRestore}
-            >
-              {t('sessions.iosSimulator.action.restore', 'Restore')}
-            </Button>
-            <Button type="button" variant="ghost" size="small" disabled={busy} onClick={onStop}>
-              {t('sessions.iosSimulator.action.stop', 'Stop preview')}
-            </Button>
-          </div>
+          {status.message ? <p {...stylex.props(styles.raw)}>{status.message}</p> : null}
+          <Button type="button" variant="primary" size="small" disabled={busy} onClick={onRestore}>
+            {t('sessions.iosSimulator.action.restore', 'Restore')}
+          </Button>
         </DeviceSlot>
       );
     }
@@ -530,9 +533,14 @@ export function IosSimulatorPanelView({
       const copy = errorCopy(status.error, machineName);
       return (
         <Message title={copy.title} detail={copy.detail} raw={status.error.message}>
-          {status.error.retryable !== false ? (
+          {status.error.code !== 'denied' && status.error.code !== 'unsupported' ? (
             <Button type="button" variant="primary" size="small" disabled={busy} onClick={onRetry}>
               {t('sessions.iosSimulator.action.retry', 'Try again')}
+            </Button>
+          ) : null}
+          {status.error.code === 'timeout' && status.operationId ? (
+            <Button type="button" variant="secondary" size="small" disabled={busy} onClick={onStop}>
+              {t('sessions.iosSimulator.action.stop', 'Stop preview')}
             </Button>
           ) : null}
           {copyDiagnosticsButton}
@@ -553,12 +561,12 @@ export function IosSimulatorPanelView({
     }
 
     const action = getIosSimulatorDeviceAction(selected, status);
-    const runtime = runtimeById.get(selected.runtimeId);
+    const runtime = runtimeByKey.get(selected.runtimeKey);
     const state = stateLabel(selected, status);
     const switching =
       statusDevice &&
       statusDevice.udid !== selected.udid &&
-      (status.phase === 'ready' || status.phase === 'preparing' || status.phase === 'interrupted');
+      (status.phase === 'ready' || status.phase === 'preparing');
     return (
       <DeviceSlot device={selected}>
         <div {...stylex.props(styles.message)}>
@@ -582,16 +590,10 @@ export function IosSimulatorPanelView({
         ) : null}
         {action.kind === 'occupied' ? (
           <p {...stylex.props(styles.detail)}>
-            {action.sessionTitle
-              ? t(
-                  'sessions.iosSimulator.occupied.named',
-                  '“{{session}}” is using this simulator. One session controls a simulator at a time.',
-                  { session: action.sessionTitle }
-                )
-              : t(
-                  'sessions.iosSimulator.occupied.anonymous',
-                  'Another session is using this simulator. One session controls a simulator at a time.'
-                )}
+            {t(
+              'sessions.iosSimulator.occupied.anonymous',
+              'Another session is using this simulator. One session controls a simulator at a time.'
+            )}
           </p>
         ) : null}
         {action.kind === 'unavailable' ? (
@@ -658,6 +660,7 @@ export function IosSimulatorPanelView({
           <div {...stylex.props(styles.statusSlot)}>
             <IosSimulatorConnectionStatus
               status={status}
+              viewerState={viewerState}
               deviceName={statusDevice?.name}
               pendingAction={pendingAction}
               onRetry={onRetry}

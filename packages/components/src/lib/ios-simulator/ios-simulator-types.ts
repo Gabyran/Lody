@@ -1,31 +1,20 @@
-import type { MachineId, SessionId } from '@lody/shared';
+import type { IosSimulatorDevice, IosSimulatorResponse } from '@lody/shared';
 
 /**
- * Frontend port for the iOS Simulator side panel.
- *
- * These are VIEW types. The typed Machine RPC contract (`ios-simulator/list`,
- * `start-preview`, `status`, `cancel-start`, `stop-preview`) and its
- * authentication belong to the runtime that implements `IosSimulatorClient`;
- * that implementation maps its DTOs onto these shapes. The panel never sees a
- * credential: the only capability-bearing value it touches is the opaque
- * `viewerUrl` it loads into the viewer iframe, and it never displays it.
+ * View types for the iOS Simulator side panel. The wire contract
+ * (`ios-simulator/control` and its `@lody/shared` DTOs) belongs to the Machine
+ * RPC layer; `ios-simulator-model.ts` is the one place that maps it onto these.
  */
 
-export type IosSimulatorTarget = {
-  machineId: MachineId;
-  sessionId: SessionId;
-};
-
-export type IosSimulatorRuntime = {
-  /** Stable runtime identifier, e.g. `com.apple.CoreSimulator.SimRuntime.iOS-18-2`. */
-  id: string;
+/** A runtime as the picker groups by it, parsed from the device's `runtime` string. */
+export type IosSimulatorRuntimeEntry = {
+  /** The raw `runtime` value; devices group by exact equality. */
+  key: string;
   /** Display name, e.g. `iOS 18.2`. */
   name: string;
-  /** `iOS`, `watchOS`, `tvOS`, `visionOS`, … Unknown platforms still group by runtime. */
+  /** `iOS`, `watchOS`, …; empty when the runtime string is not recognisable. */
   platform: string;
   version: string;
-  available: boolean;
-  unavailableReason?: string;
 };
 
 export type IosSimulatorDeviceFamily = 'iphone' | 'ipad' | 'watch' | 'tv' | 'vision' | 'other';
@@ -37,103 +26,59 @@ export type IosSimulatorDeviceState =
   | 'shutting-down'
   | 'unknown';
 
-/**
- * Who controls a device. One Session controls a device across every machine
- * client and workspace; nobody may take it over. A holder in a Session the
- * requester cannot see arrives without a title.
- */
-export type IosSimulatorOccupancy =
-  | { kind: 'free' }
-  | { kind: 'this-session' }
-  | { kind: 'other-session'; sessionTitle?: string };
-
-export type IosSimulatorDevice = {
+export type IosSimulatorDeviceEntry = {
   udid: string;
   name: string;
-  runtimeId: string;
-  family?: IosSimulatorDeviceFamily;
+  runtimeKey: string;
+  family: IosSimulatorDeviceFamily;
   state: IosSimulatorDeviceState;
   available: boolean;
   unavailableReason?: string;
-  occupancy: IosSimulatorOccupancy;
-  /** Screen size in any unit; only its aspect ratio is used. */
-  screen?: { width: number; height: number };
+  /** One Session controls a device across every client; nobody takes it over. */
+  occupancy: IosSimulatorDevice['occupancy'];
 };
 
 export type IosSimulatorErrorCode =
-  | 'xcode-missing'
-  | 'device-occupied'
-  | 'device-unavailable'
-  | 'device-not-found'
-  | 'boot-failed'
-  | 'stream-failed'
-  | 'timeout'
-  | 'cancelled'
-  | 'unsupported'
-  | 'unauthorized'
-  | 'internal';
+  | NonNullable<IosSimulatorResponse['error']>
+  /** The panel stopped waiting for a preview that never became ready. */
+  | 'timeout';
 
 export type IosSimulatorError = {
-  /** A known code, or any string a newer machine reports. */
-  code: IosSimulatorErrorCode | (string & {});
+  code: IosSimulatorErrorCode;
   message?: string;
-  retryable?: boolean;
 };
 
-export type IosSimulatorListResult =
-  | { ok: true; runtimes: IosSimulatorRuntime[]; devices: IosSimulatorDevice[] }
-  | { ok: false; error: IosSimulatorError };
+export type IosSimulatorPreparingStage = 'preparing' | 'booting' | 'connecting';
 
-export type IosSimulatorPreparingStage = 'booting-device' | 'starting-stream' | 'connecting';
+/** `local`: served by this machine's daemon; keeps working while the cloud is unreachable. */
+export type IosSimulatorTransport = 'local' | 'remote';
 
-/**
- * `direct`: the viewer is served on this machine (same-machine Electron) and
- * keeps working while the cloud is unreachable. `remote`: it travels through a
- * tunnel whose address the UI never shows.
- */
-export type IosSimulatorConnectionKind = 'direct' | 'remote';
-
-export type IosSimulatorInterruptionReason = 'expired' | 'connection-lost' | 'viewer-closed';
-
-export type IosSimulatorPreviewStatus =
+export type IosSimulatorPanelStatus =
   | { phase: 'idle' }
   | {
       phase: 'preparing';
       udid: string;
-      stage: IosSimulatorPreparingStage | (string & {});
+      /** Unknown until the start request answers; Cancel needs it. */
+      operationId?: string;
+      stage: IosSimulatorPreparingStage;
     }
   | {
       phase: 'ready';
       udid: string;
+      operationId: string;
       viewerUrl: string;
-      connection: IosSimulatorConnectionKind;
+      /** Validated origin the viewer handshake is addressed to. */
+      viewerOrigin: string;
+      transport: IosSimulatorTransport;
     }
   | {
-      phase: 'interrupted';
+      phase: 'closed';
       udid: string;
-      connection: IosSimulatorConnectionKind;
-      reason: IosSimulatorInterruptionReason | (string & {});
+      operationId: string;
+      transport: IosSimulatorTransport;
+      message?: string;
     }
-  | { phase: 'failed'; udid?: string; error: IosSimulatorError };
+  | { phase: 'failed'; udid?: string; operationId?: string; error: IosSimulatorError };
 
-export type IosSimulatorStartRequest = {
-  udid: string;
-  /** Boot a shut-down device first ("Start and preview"). */
-  boot: boolean;
-};
-
-/**
- * Transport failures reject; domain outcomes resolve as values. `stopPreview`
- * ends this Session's preview and releases its hold on the device; it never
- * shuts the device down.
- */
-export interface IosSimulatorClient {
-  list(target: IosSimulatorTarget): Promise<IosSimulatorListResult>;
-  startPreview(
-    target: IosSimulatorTarget,
-    request: IosSimulatorStartRequest
-  ): Promise<IosSimulatorPreviewStatus>;
-  status(target: IosSimulatorTarget): Promise<IosSimulatorPreviewStatus>;
-  cancelStart(target: IosSimulatorTarget): Promise<IosSimulatorPreviewStatus>;
-  stopPreview(target: IosSimulatorTarget): Promise<IosSimulatorPreviewStatus>;
-}
+/** What the viewer page reports about its own stream, after the init handshake. */
+export type IosSimulatorViewerState = 'connecting' | 'ready' | 'disconnected' | 'error';

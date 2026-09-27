@@ -1,28 +1,31 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { useAtomValue } from 'jotai';
 import { useTranslation } from 'react-i18next';
-import type { SessionMeta } from '@lody/shared';
-import { activeWorkspaceRuntimeAtom } from '@/atoms';
+import type { IosSimulatorCommand, IosSimulatorResponse, SessionMeta } from '@lody/shared';
+import { activeWorkspaceRuntimeAtom, userAtom } from '@/atoms';
 import { localMachineIdAtom } from '@/atoms/local-probe';
 import { getMachineMetaByIdAtomFamily } from '@/atoms/machines';
 import { machineOnlineStatusAtomFamily } from '@/atoms/presence';
 import { writeTextToClipboard } from '@/lib/clipboard';
 import { toast } from '@/lib/toast';
 import {
+  IOS_SIMULATOR_PREPARING_MAX_POLLS,
+  IOS_SIMULATOR_PREPARING_POLL_MS,
   buildIosSimulatorDiagnostics,
+  getIosSimulatorOperationId,
   getIosSimulatorPanelAvailability,
-  getIosSimulatorStatusPollMs,
   getIosSimulatorStatusUdid,
   readIosSimulatorSelectedDevice,
   resolveIosSimulatorSelection,
+  toIosSimulatorCatalog,
+  toIosSimulatorPanelStatus,
   writeIosSimulatorSelectedDevice,
   type IosSimulatorPreferenceScope,
 } from '@/lib/ios-simulator/ios-simulator-model';
 import type {
-  IosSimulatorClient,
-  IosSimulatorDevice,
-  IosSimulatorPreviewStatus,
-  IosSimulatorTarget,
+  IosSimulatorDeviceEntry,
+  IosSimulatorPanelStatus,
+  IosSimulatorViewerState,
 } from '@/lib/ios-simulator/ios-simulator-types';
 import type { IosSimulatorPendingAction } from './ios-simulator-connection-status';
 import {
@@ -33,17 +36,14 @@ import {
 
 type SessionIosSimulatorPanelProps = {
   session: Pick<SessionMeta, 'id' | 'machineId'>;
-  /** On screen: the only state in which it polls or mounts the viewer. */
+  /** On screen: the only state in which it polls; the viewer is told otherwise. */
   active?: boolean;
   leadingSlot?: ReactNode;
-  /** Defaults to the active workspace runtime's client. */
-  client?: IosSimulatorClient | null;
 };
 
-const IDLE: IosSimulatorPreviewStatus = { phase: 'idle' };
+const IDLE: IosSimulatorPanelStatus = { phase: 'idle' };
 
-const errorMessage = (error: unknown): string =>
-  error instanceof Error ? error.message : String(error);
+const appOrigin = (): string => (typeof window === 'undefined' ? '' : window.location.origin);
 
 /**
  * The iOS Simulator side panel for one Session. Its state is its own — never
@@ -64,11 +64,10 @@ function SessionIosSimulatorPanelController({
   session,
   active = true,
   leadingSlot,
-  client: clientOverride,
 }: SessionIosSimulatorPanelProps) {
   const { t } = useTranslation();
   const runtime = useAtomValue(activeWorkspaceRuntimeAtom);
-  const client = clientOverride === undefined ? (runtime?.iosSimulator ?? null) : clientOverride;
+  const user = useAtomValue(userAtom);
   const machine = useAtomValue(getMachineMetaByIdAtomFamily(session.machineId));
   const machineOnline = useAtomValue(machineOnlineStatusAtomFamily(session.machineId));
   const localMachineId = useAtomValue(localMachineIdAtom);
@@ -79,16 +78,10 @@ function SessionIosSimulatorPanelController({
   const blocker: IosSimulatorPanelBlocker | null =
     availability === 'upgrade-required'
       ? 'upgrade-required'
-      : !client
-        ? 'client-unavailable'
-        : machineOnline === 'offline' && !isLocalMachine
-          ? 'offline'
-          : null;
+      : machineOnline === 'offline' && !isLocalMachine
+        ? 'offline'
+        : null;
 
-  const target = useMemo<IosSimulatorTarget>(
-    () => ({ machineId: session.machineId, sessionId: session.id }),
-    [session.id, session.machineId]
-  );
   const preferenceScope = useMemo<IosSimulatorPreferenceScope | null>(
     () =>
       runtime
@@ -99,9 +92,13 @@ function SessionIosSimulatorPanelController({
 
   const [catalog, setCatalog] = useState<IosSimulatorCatalogState>({ phase: 'loading' });
   const [refreshing, setRefreshing] = useState(false);
-  const [status, setStatus] = useState<IosSimulatorPreviewStatus>(IDLE);
+  const [status, setStatus] = useState<IosSimulatorPanelStatus>(IDLE);
+  const statusRef = useRef(status);
+  statusRef.current = status;
+  const [viewerState, setViewerState] = useState<IosSimulatorViewerState | null>(null);
+  const [viewerReloadKey, setViewerReloadKey] = useState(0);
   const [pendingAction, setPendingAction] = useState<IosSimulatorPendingAction>(null);
-  const [bootRequested, setBootRequested] = useState(false);
+  const [bootExpected, setBootExpected] = useState(false);
   const [chosenUdid, setChosenUdid] = useState<string | null>(null);
   const [preferredUdid] = useState(() => readIosSimulatorSelectedDevice(preferenceScope));
 
@@ -110,47 +107,59 @@ function SessionIosSimulatorPanelController({
   const statusEpoch = useRef(0);
   const actionEpoch = useRef(0);
   const catalogEpoch = useRef(0);
-  const clientRef = useRef(client);
-  clientRef.current = client;
+
+  const requesterUserId = user?.id ?? null;
+  const request = useCallback(
+    async (command: IosSimulatorCommand): Promise<IosSimulatorResponse | null> => {
+      if (!runtime || !requesterUserId) return null;
+      return runtime.requestIosSimulatorControl({
+        machineId: session.machineId,
+        sessionId: session.id,
+        requestedByUserId: requesterUserId,
+        command,
+      });
+    },
+    [requesterUserId, runtime, session.id, session.machineId]
+  );
 
   const refreshCatalog = useCallback(async () => {
-    const current = clientRef.current;
-    if (!current) return;
     const epoch = ++catalogEpoch.current;
     setRefreshing(true);
     try {
-      const result = await current.list(target);
-      if (epoch !== catalogEpoch.current) return;
+      const response = await request({ action: 'list' });
+      if (!response || epoch !== catalogEpoch.current) return;
       setCatalog(
-        result.ok
-          ? { phase: 'ready', runtimes: result.runtimes, devices: result.devices }
-          : { phase: 'error', error: result.error }
+        response.success
+          ? { phase: 'ready', ...toIosSimulatorCatalog(response.devices ?? []) }
+          : {
+              phase: 'error',
+              error: { code: response.error ?? 'failed', message: response.message },
+            }
       );
-    } catch (error) {
-      if (epoch !== catalogEpoch.current) return;
-      setCatalog({
-        phase: 'error',
-        error: { code: 'internal', message: errorMessage(error), retryable: true },
-      });
     } finally {
       if (epoch === catalogEpoch.current) setRefreshing(false);
     }
-  }, [target]);
+  }, [request]);
 
   const refreshStatus = useCallback(async () => {
-    const current = clientRef.current;
-    if (!current) return;
     const epoch = ++statusEpoch.current;
-    try {
-      const next = await current.status(target);
-      if (epoch === statusEpoch.current) setStatus(next);
-    } catch {
-      // A failed status read keeps what is on screen; only an authoritative
-      // answer changes the preview's phase.
-    }
-  }, [target]);
+    const current = statusRef.current;
+    const operationId = getIosSimulatorOperationId(current) ?? undefined;
+    const response = await request({ action: 'status', operationId });
+    if (!response || epoch !== statusEpoch.current) return;
+    // A status read that did not reach the machine keeps what is on screen;
+    // only an authoritative answer changes the preview's phase.
+    if (!response.success && response.error === 'failed') return;
+    setStatus(
+      toIosSimulatorPanelStatus(response, {
+        udid: getIosSimulatorStatusUdid(current) ?? undefined,
+        appOrigin: appOrigin(),
+      })
+    );
+  }, [request]);
 
-  const live = active && blocker === null;
+  const connected = Boolean(runtime && requesterUserId);
+  const live = active && blocker === null && connected;
   const loadedRef = useRef(false);
   useEffect(() => {
     if (!live) return;
@@ -161,12 +170,39 @@ function SessionIosSimulatorPanelController({
     void refreshStatus();
   }, [live, refreshCatalog, refreshStatus]);
 
-  const pollMs = live && pendingAction === null ? getIosSimulatorStatusPollMs(status) : null;
+  // Preparing is polled, and only so long. Polls count per operation.
+  const operationId = getIosSimulatorOperationId(status);
+  // Re-arms the poll even when an answer leaves the status unchanged.
+  const [pollTick, setPollTick] = useState(0);
+  const pollCount = useRef<{ operationId: string | null; count: number }>({
+    operationId: null,
+    count: 0,
+  });
+  const polling =
+    live && pendingAction === null && status.phase === 'preparing' && operationId !== null;
   useEffect(() => {
-    if (pollMs === null) return undefined;
-    const timer = setTimeout(() => void refreshStatus(), pollMs);
+    if (!polling || !operationId) return undefined;
+    if (pollCount.current.operationId !== operationId) {
+      pollCount.current = { operationId, count: 0 };
+    }
+    if (pollCount.current.count >= IOS_SIMULATOR_PREPARING_MAX_POLLS) {
+      statusEpoch.current += 1;
+      setStatus((current) =>
+        current.phase === 'preparing' && current.operationId === operationId
+          ? { phase: 'failed', udid: current.udid, operationId, error: { code: 'timeout' } }
+          : current
+      );
+      return undefined;
+    }
+    const timer = setTimeout(() => {
+      pollCount.current.count += 1;
+      void refreshStatus().finally(() => setPollTick((tick) => tick + 1));
+    }, IOS_SIMULATOR_PREPARING_POLL_MS);
     return () => clearTimeout(timer);
-  }, [pollMs, refreshStatus, status]);
+  }, [operationId, pollTick, polling, refreshStatus]);
+
+  // A new operation has a new viewer, which has not said anything yet.
+  useEffect(() => setViewerState(null), [operationId]);
 
   // A preview that settles changes what the list says (booted, held by us).
   const previousPhase = useRef(status.phase);
@@ -195,77 +231,92 @@ function SessionIosSimulatorPanelController({
     async (
       kind: Exclude<IosSimulatorPendingAction, null>,
       udid: string | undefined,
-      call: (current: IosSimulatorClient) => Promise<IosSimulatorPreviewStatus>
+      command: IosSimulatorCommand
     ) => {
-      const current = clientRef.current;
-      if (!current) return;
       // Only a newer action supersedes this one. A poll never does: it would
       // drop the answer and leave the action pending forever.
       const actionId = ++actionEpoch.current;
       statusEpoch.current += 1;
       setPendingAction(kind);
-      const settle = (next: IosSimulatorPreviewStatus) => {
-        if (actionId !== actionEpoch.current) return;
+      try {
+        const response = await request(command);
+        if (!response || actionId !== actionEpoch.current) return;
         // Polls issued before this answer are older than it.
         statusEpoch.current += 1;
-        setStatus(next);
-      };
-      try {
-        settle(await call(current));
-      } catch (error) {
-        settle({
-          phase: 'failed',
-          udid,
-          error: { code: 'internal', message: errorMessage(error), retryable: true },
-        });
+        setStatus(
+          command.action === 'stop' && response.success
+            ? IDLE
+            : toIosSimulatorPanelStatus(response, { udid, appOrigin: appOrigin() })
+        );
       } finally {
         if (actionId === actionEpoch.current) setPendingAction(null);
         void refreshCatalog();
       }
     },
-    [refreshCatalog]
+    [refreshCatalog, request]
   );
 
   const startPreview = useCallback(
-    (device: IosSimulatorDevice) => {
-      const boot = device.state !== 'booted' && device.state !== 'booting';
-      setBootRequested(boot);
+    (device: IosSimulatorDeviceEntry) => {
+      setBootExpected(device.state !== 'booted' && device.state !== 'booting');
       handleSelectDevice(device.udid);
-      setStatus({
-        phase: 'preparing',
-        udid: device.udid,
-        stage: boot ? 'booting-device' : 'starting-stream',
-      });
-      void runAction('start', device.udid, (current) =>
-        current.startPreview(target, { udid: device.udid, boot })
-      );
+      setStatus({ phase: 'preparing', udid: device.udid, stage: 'preparing' });
+      void runAction('start', device.udid, { action: 'start', udid: device.udid });
     },
-    [handleSelectDevice, runAction, target]
+    [handleSelectDevice, runAction]
   );
 
   const statusUdid = getIosSimulatorStatusUdid(status) ?? undefined;
-  const handleCancel = useCallback(() => {
-    void runAction('cancel', statusUdid, (current) => current.cancelStart(target));
-  }, [runAction, statusUdid, target]);
-  const handleStop = useCallback(() => {
-    void runAction('stop', statusUdid, (current) => current.stopPreview(target));
-  }, [runAction, statusUdid, target]);
+  const stopOperation = useCallback(
+    (kind: 'cancel' | 'stop') => {
+      if (!operationId) return;
+      void runAction(kind, statusUdid, { action: 'stop', operationId });
+    },
+    [operationId, runAction, statusUdid]
+  );
+
+  const startAgain = useCallback(
+    (udid: string) => {
+      const device = devices.find((candidate) => candidate.udid === udid);
+      if (device) {
+        startPreview(device);
+        return;
+      }
+      setBootExpected(false);
+      void runAction('start', udid, { action: 'start', udid });
+    },
+    [devices, runAction, startPreview]
+  );
+
   const handleRestore = useCallback(() => {
-    if (!statusUdid) return;
-    setBootRequested(false);
-    void runAction('start', statusUdid, (current) =>
-      current.startPreview(target, { udid: statusUdid, boot: false })
-    );
-  }, [runAction, statusUdid, target]);
+    if (status.phase === 'ready') {
+      // The stream dropped but the preview may still stand: reload the viewer
+      // page and ask the machine where things are.
+      setViewerState(null);
+      setViewerReloadKey((key) => key + 1);
+      void refreshStatus();
+      return;
+    }
+    if (statusUdid) startAgain(statusUdid);
+  }, [refreshStatus, startAgain, status.phase, statusUdid]);
+
   const handleRetry = useCallback(() => {
-    const device = statusUdid ? devices.find((candidate) => candidate.udid === statusUdid) : null;
-    if (device) {
-      startPreview(device);
+    if (statusUdid) {
+      startAgain(statusUdid);
       return;
     }
     void refreshCatalog();
     void refreshStatus();
-  }, [devices, refreshCatalog, refreshStatus, startPreview, statusUdid]);
+  }, [refreshCatalog, refreshStatus, startAgain, statusUdid]);
+
+  const handleViewerStateChange = useCallback(
+    (next: IosSimulatorViewerState) => {
+      setViewerState(next);
+      // A dropped stream may mean the preview itself ended; ask once.
+      if (next === 'disconnected' || next === 'error') void refreshStatus();
+    },
+    [refreshStatus]
+  );
 
   const handlePickerOpenChange = useCallback(
     (open: boolean) => {
@@ -279,7 +330,7 @@ function SessionIosSimulatorPanelController({
       devices.find((candidate) => candidate.udid === (statusUdid ?? selectedUdid)) ?? null;
     const runtimeEntry =
       device && catalog.phase === 'ready'
-        ? (catalog.runtimes.find((candidate) => candidate.id === device.runtimeId) ?? null)
+        ? (catalog.runtimes.find((candidate) => candidate.key === device.runtimeKey) ?? null)
         : null;
     const text = buildIosSimulatorDiagnostics({
       now: new Date(),
@@ -291,6 +342,7 @@ function SessionIosSimulatorPanelController({
       },
       availability,
       status,
+      viewerState,
       device,
       runtime: runtimeEntry,
       catalog:
@@ -322,6 +374,7 @@ function SessionIosSimulatorPanelController({
     status,
     statusUdid,
     t,
+    viewerState,
   ]);
 
   return (
@@ -332,19 +385,22 @@ function SessionIosSimulatorPanelController({
       refreshing={refreshing}
       selectedUdid={selectedUdid}
       status={status}
+      viewerState={viewerState}
+      viewerReloadKey={viewerReloadKey}
       pendingAction={pendingAction}
-      bootRequested={bootRequested}
+      bootExpected={bootExpected}
       active={active}
       leadingSlot={leadingSlot}
       onSelectDevice={handleSelectDevice}
       onPickerOpenChange={handlePickerOpenChange}
       onRefresh={() => void refreshCatalog()}
       onStart={startPreview}
-      onCancel={handleCancel}
-      onStop={handleStop}
+      onCancel={() => stopOperation('cancel')}
+      onStop={() => stopOperation('stop')}
       onRestore={handleRestore}
       onRetry={handleRetry}
       onCopyDiagnostics={() => void handleCopyDiagnostics()}
+      onViewerStateChange={handleViewerStateChange}
     />
   );
 }

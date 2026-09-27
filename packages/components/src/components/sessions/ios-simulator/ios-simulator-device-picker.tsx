@@ -9,14 +9,13 @@ import { ToggleGroup } from '@lody/ui/toggle-group';
 import { colors } from '@lody/ui/tokens/colors.stylex';
 import { space, text } from '@lody/ui/tokens/scales.stylex';
 import {
-  getIosSimulatorFilterRuntimes,
   groupIosSimulatorDevices,
   type IosSimulatorDeviceGroup,
 } from '@/lib/ios-simulator/ios-simulator-model';
 import type {
-  IosSimulatorDevice,
-  IosSimulatorPreviewStatus,
-  IosSimulatorRuntime,
+  IosSimulatorDeviceEntry,
+  IosSimulatorPanelStatus,
+  IosSimulatorRuntimeEntry,
 } from '@/lib/ios-simulator/ios-simulator-types';
 import { useIosSimulatorDeviceStateLabel } from './ios-simulator-copy';
 
@@ -43,9 +42,9 @@ const styles = stylex.create({
 });
 
 export type IosSimulatorDevicePickerProps = {
-  runtimes: readonly IosSimulatorRuntime[];
-  devices: readonly IosSimulatorDevice[];
-  status: IosSimulatorPreviewStatus;
+  runtimes: readonly IosSimulatorRuntimeEntry[];
+  devices: readonly IosSimulatorDeviceEntry[];
+  status: IosSimulatorPanelStatus;
   selectedUdid: string | null;
   disabled?: boolean;
   refreshing?: boolean;
@@ -76,26 +75,24 @@ export function IosSimulatorDevicePicker({
   const [runtimeFilter, setRuntimeFilter] = useState<string | null>(null);
   const stateLabel = useIosSimulatorDeviceStateLabel();
 
-  const runtimeById = useMemo(
-    () => new Map(runtimes.map((runtime) => [runtime.id, runtime])),
+  const runtimeByKey = useMemo(
+    () => new Map(runtimes.map((runtime) => [runtime.key, runtime])),
     [runtimes]
   );
-  const allGroups = useMemo(() => groupIosSimulatorDevices(runtimes, devices), [devices, runtimes]);
-  const filterRuntimes = useMemo(
-    () => getIosSimulatorFilterRuntimes(runtimes, devices),
+  const catalog = useMemo(
+    () => ({ runtimes: [...runtimes], devices: [...devices] }),
     [devices, runtimes]
   );
+  const allGroups = useMemo(() => groupIosSimulatorDevices(catalog), [catalog]);
+  // Runtimes that actually hold a device, for the filter row.
+  const filterRuntimes = useMemo(() => allGroups.map((group) => group.runtime), [allGroups]);
   const effectiveRuntimeFilter =
-    runtimeFilter && filterRuntimes.some((runtime) => runtime.id === runtimeFilter)
+    runtimeFilter && filterRuntimes.some((runtime) => runtime.key === runtimeFilter)
       ? runtimeFilter
       : null;
   const filteredGroups = useMemo(
-    () =>
-      groupIosSimulatorDevices(runtimes, devices, {
-        query,
-        runtimeId: effectiveRuntimeFilter,
-      }),
-    [devices, effectiveRuntimeFilter, query, runtimes]
+    () => groupIosSimulatorDevices(catalog, { query, runtimeKey: effectiveRuntimeFilter }),
+    [catalog, effectiveRuntimeFilter, query]
   );
   const selected = devices.find((device) => device.udid === selectedUdid) ?? null;
 
@@ -109,9 +106,11 @@ export function IosSimulatorDevicePicker({
       disabled={disabled}
       inputValue={query}
       onInputValueChange={setQuery}
-      itemToStringLabel={(device: IosSimulatorDevice) => device.name}
-      isItemEqualToValue={(a: IosSimulatorDevice, b: IosSimulatorDevice) => a.udid === b.udid}
-      onValueChange={(device: IosSimulatorDevice | null) => {
+      itemToStringLabel={(device: IosSimulatorDeviceEntry) => device.name}
+      isItemEqualToValue={(a: IosSimulatorDeviceEntry, b: IosSimulatorDeviceEntry) =>
+        a.udid === b.udid
+      }
+      onValueChange={(device: IosSimulatorDeviceEntry | null) => {
         if (device) onSelect(device.udid);
       }}
       onOpenChange={(open) => {
@@ -126,12 +125,12 @@ export function IosSimulatorDevicePicker({
         {...stylex.props(styles.trigger)}
       >
         {/* A render function replaces Base UI's placeholder, so it restates it. */}
-        {(device: IosSimulatorDevice | null) =>
+        {(device: IosSimulatorDeviceEntry | null) =>
           device ? (
             <span {...stylex.props(styles.value)}>
               <span {...stylex.props(styles.valueName)}>{device.name}</span>
               <span {...stylex.props(styles.valueRuntime)}>
-                {runtimeById.get(device.runtimeId)?.name ?? ''}
+                {runtimeByKey.get(device.runtimeKey)?.name ?? ''}
               </span>
             </span>
           ) : (
@@ -181,7 +180,7 @@ export function IosSimulatorDevicePicker({
                     {t('sessions.iosSimulator.picker.allRuntimes', 'All')}
                   </Toggle>
                   {filterRuntimes.map((runtime) => (
-                    <Toggle key={runtime.id} value={runtime.id}>
+                    <Toggle key={runtime.key} value={runtime.key}>
                       {runtime.name}
                     </Toggle>
                   ))}
@@ -197,7 +196,7 @@ export function IosSimulatorDevicePicker({
         }
       >
         {(group: IosSimulatorDeviceGroup) => (
-          <Combobox.Group key={group.runtime.id} items={group.devices}>
+          <Combobox.Group key={group.runtime.key} items={group.devices}>
             <Combobox.GroupLabel>{group.runtime.name}</Combobox.GroupLabel>
             {group.devices.map((device) => {
               const state = stateLabel(device, status);

@@ -6,24 +6,25 @@ import { Provider, createStore } from 'jotai';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   getMachineRoomId,
+  type IosSimulatorCommand,
+  type IosSimulatorDevice,
+  type IosSimulatorPreview,
+  type IosSimulatorResponse,
   type MachineId,
   type MachineMeta,
   type SessionId,
   type WorkspaceId,
 } from '@lody/shared';
 
-import { runtimeAtom, type WorkspaceRuntime } from '../src/atoms';
+import { runtimeAtom, userAtom, type WorkspaceRuntime } from '../src/atoms';
 import { machineMetaCacheAtom } from '../src/atoms/doc-meta';
 import { localProbeResultAtom } from '../src/atoms/local-probe';
 import { lodyPresenceSyncStateAtom } from '../src/atoms/presence';
 import { writeTextToClipboard } from '../src/lib/clipboard';
-import { writeIosSimulatorSelectedDevice } from '../src/lib/ios-simulator/ios-simulator-model';
-import type {
-  IosSimulatorClient,
-  IosSimulatorDevice,
-  IosSimulatorListResult,
-  IosSimulatorPreviewStatus,
-} from '../src/lib/ios-simulator/ios-simulator-types';
+import {
+  IOS_SIMULATOR_PREPARING_MAX_POLLS,
+  writeIosSimulatorSelectedDevice,
+} from '../src/lib/ios-simulator/ios-simulator-model';
 import { SessionIosSimulatorPanel } from '../src/components/sessions/ios-simulator/session-ios-simulator-panel';
 
 vi.mock('react-i18next', () => ({
@@ -47,7 +48,9 @@ vi.mock('@/lib/toast', () => ({
 const MACHINE = 'mac-studio' as MachineId;
 const SESSION = { id: 'session-sim' as SessionId, machineId: MACHINE };
 const WORKSPACE = 'workspace-sim' as WorkspaceId;
-const VIEWER_URL = 'https://viewer.example/stream?capability=secret-capability';
+const VIEWER_ORIGIN = 'https://viewer.example';
+const VIEWER_URL = `${VIEWER_ORIGIN}/stream?capability=secret-capability`;
+const IOS_18 = 'com.apple.CoreSimulator.SimRuntime.iOS-18-2';
 
 const macMeta = (protocolCapabilities?: Record<string, number>): MachineMeta => ({
   id: MACHINE,
@@ -60,81 +63,65 @@ const macMeta = (protocolCapabilities?: Record<string, number>): MachineMeta => 
 
 const device = (overrides: Partial<IosSimulatorDevice> & { udid: string }): IosSimulatorDevice => ({
   name: overrides.udid,
-  runtimeId: 'rt.ios-18',
-  family: 'iphone',
-  state: 'shutdown',
+  runtime: IOS_18,
+  deviceType: 'com.apple.CoreSimulator.SimDeviceType.iPhone-16',
+  state: 'Shutdown',
   available: true,
-  occupancy: { kind: 'free' },
-  screen: { width: 390, height: 844 },
+  occupancy: 'available',
   ...overrides,
 });
 
-const catalog = (devices: IosSimulatorDevice[]): IosSimulatorListResult => ({
-  ok: true,
-  runtimes: [
-    { id: 'rt.ios-18', name: 'iOS 18.2', platform: 'iOS', version: '18.2', available: true },
-  ],
-  devices,
+const answer = (fields: Partial<IosSimulatorResponse> = {}): IosSimulatorResponse => ({
+  type: 'ios-simulator/control_response',
+  sessionId: SESSION.id,
+  success: true,
+  ...fields,
 });
 
-type Deferred<T> = { promise: Promise<T>; resolve: (value: T) => void };
-const deferred = <T,>(): Deferred<T> => {
-  let resolve!: (value: T) => void;
-  const promise = new Promise<T>((next) => {
-    resolve = next;
-  });
-  return { promise, resolve };
-};
+const preview = (fields: Partial<IosSimulatorPreview> & Pick<IosSimulatorPreview, 'phase'>) => ({
+  operationId: 'op-1',
+  udid: 'phone',
+  transport: 'remote' as const,
+  ...fields,
+});
 
-/** A client whose every answer the test states; unanswered calls stay pending. */
-function createFakeClient(initial: {
-  list: IosSimulatorListResult;
-  status?: IosSimulatorPreviewStatus;
+/**
+ * The one `ios-simulator/control` RPC, answered by the test. `list` and
+ * `status` answer from the current fields; `start` and `stop` from a queue the
+ * test fills, or stay pending until it does.
+ */
+function createFakeMachine(initial: {
+  devices: IosSimulatorDevice[];
+  preview?: IosSimulatorPreview;
+  list?: IosSimulatorResponse;
 }) {
-  const calls: string[] = [];
-  let listResult = initial.list;
-  let statusResult: IosSimulatorPreviewStatus = initial.status ?? { phase: 'idle' };
-  let pendingStart: Deferred<IosSimulatorPreviewStatus> | null = null;
-  const client: IosSimulatorClient = {
-    list: async () => {
-      calls.push('list');
-      return listResult;
-    },
-    status: async () => {
-      calls.push('status');
-      return statusResult;
-    },
-    startPreview: (_target, request) => {
-      calls.push(`start:${request.udid}:boot=${request.boot}`);
-      pendingStart = deferred();
-      return pendingStart.promise;
-    },
-    cancelStart: async () => {
-      calls.push('cancel');
-      statusResult = { phase: 'idle' };
-      return statusResult;
-    },
-    stopPreview: async () => {
-      calls.push('stop');
-      statusResult = { phase: 'idle' };
-      return statusResult;
-    },
+  const commands: IosSimulatorCommand[] = [];
+  const state = { preview: initial.preview, list: initial.list };
+  const pending: Array<(response: IosSimulatorResponse) => void> = [];
+  const requestIosSimulatorControl = async ({ command }: { command: IosSimulatorCommand }) => {
+    commands.push(command);
+    switch (command.action) {
+      case 'list':
+        return state.list ?? answer({ devices: initial.devices });
+      case 'status':
+        return answer({ preview: state.preview });
+      default:
+        return new Promise<IosSimulatorResponse>((resolve) => pending.push(resolve));
+    }
   };
   return {
-    client,
-    calls,
-    setList: (next: IosSimulatorListResult) => {
-      listResult = next;
+    commands,
+    requestIosSimulatorControl,
+    setPreview: (next: IosSimulatorPreview | undefined) => {
+      state.preview = next;
     },
-    setStatus: (next: IosSimulatorPreviewStatus) => {
-      statusResult = next;
-    },
-    resolveStart: async (next: IosSimulatorPreviewStatus) => {
-      statusResult = next;
+    /** Answers the oldest pending start/stop. */
+    answerNext: async (response: IosSimulatorResponse) => {
       await act(async () => {
-        pendingStart?.resolve(next);
+        pending.shift()?.(response);
         await Promise.resolve();
       });
+      await flush();
     },
   };
 }
@@ -153,25 +140,23 @@ afterEach(() => {
 });
 
 async function renderPanel(options: {
-  client: IosSimulatorClient | null;
-  machine?: MachineMeta;
+  machine: ReturnType<typeof createFakeMachine>;
+  meta?: MachineMeta;
   presence?: 'synced' | 'idle';
   localMachine?: boolean;
-  active?: boolean;
 }) {
   const store = createStore();
+  store.set(userAtom, { id: 'user-1', name: 'Sim User', email: 'sim@example.com' } as never);
   store.set(runtimeAtom, {
     workspaceId: WORKSPACE,
     workspaceSlug: 'sim',
-    iosSimulator: options.client ?? undefined,
+    requestIosSimulatorControl: options.machine.requestIosSimulatorControl,
   } as unknown as WorkspaceRuntime);
   store.set(machineMetaCacheAtom, {
-    [getMachineRoomId(MACHINE)]: options.machine ?? macMeta({ iosSimulator: 1 }),
+    [getMachineRoomId(MACHINE)]: options.meta ?? macMeta({ iosSimulator: 1 }),
   });
-  store.set(lodyPresenceSyncStateAtom, options.presence ?? 'synced');
-  if (options.localMachine) {
-    store.set(localProbeResultAtom, { machineId: MACHINE } as never);
-  }
+  store.set(lodyPresenceSyncStateAtom, options.presence ?? 'idle');
+  if (options.localMachine) store.set(localProbeResultAtom, { machineId: MACHINE } as never);
   container = document.createElement('div');
   document.body.appendChild(container);
   root = createRoot(container);
@@ -187,12 +172,12 @@ async function renderPanel(options: {
     });
     await flush();
   };
-  await render(options.active ?? true);
+  await render(true);
   return { render };
 }
 
 async function flush() {
-  for (let index = 0; index < 4; index += 1) {
+  for (let index = 0; index < 5; index += 1) {
     await act(async () => {
       await Promise.resolve();
     });
@@ -216,184 +201,199 @@ async function click(label: string) {
   await flush();
 }
 
+async function advance(ms: number) {
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(ms);
+  });
+  await flush();
+}
+
 describe('SessionIosSimulatorPanel', () => {
   it('asks for an update on a Mac whose Lody predates the protocol, without calling it', async () => {
-    const fake = createFakeClient({ list: catalog([device({ udid: 'a' })]) });
-    await renderPanel({ client: fake.client, machine: macMeta() });
+    const machine = createFakeMachine({ devices: [device({ udid: 'a' })] });
+    await renderPanel({ machine, meta: macMeta() });
     expect(text()).toContain('Update Lody on Studio');
-    expect(fake.calls).toEqual([]);
+    expect(machine.commands).toEqual([]);
   });
 
   it('says a remote Mac is offline, but keeps talking to this machine directly', async () => {
-    const offline = createFakeClient({ list: catalog([device({ udid: 'a' })]) });
-    await renderPanel({ client: offline.client, presence: 'synced' });
+    const offline = createFakeMachine({ devices: [device({ udid: 'a' })] });
+    await renderPanel({ machine: offline, presence: 'synced' });
     expect(text()).toContain('Studio is offline');
-    expect(offline.calls).toEqual([]);
+    expect(offline.commands).toEqual([]);
     act(() => root?.unmount());
     container?.remove();
 
-    const local = createFakeClient({
-      list: catalog([device({ udid: 'phone', name: 'iPhone 16', state: 'booted' })]),
+    const local = createFakeMachine({
+      devices: [device({ udid: 'phone', name: 'iPhone 16', state: 'Booted' })],
     });
-    await renderPanel({ client: local.client, presence: 'synced', localMachine: true });
+    await renderPanel({ machine: local, presence: 'synced', localMachine: true });
     expect(text()).not.toContain('offline');
     expect(text()).toContain('iPhone 16');
-    expect(local.calls).toContain('list');
+    expect(local.commands).toContainEqual({ action: 'list' });
   });
 
-  it('starts a shut-down device, then shows its screen without ever printing the viewer address', async () => {
-    const fake = createFakeClient({
-      list: catalog([device({ udid: 'phone', name: 'iPhone 16' })]),
-    });
-    await renderPanel({ client: fake.client, presence: 'idle' });
-    expect(text()).toContain('Start and preview');
+  it('starts a shut-down device and polls the operation until the viewer is ready', async () => {
+    vi.useFakeTimers();
+    const machine = createFakeMachine({ devices: [device({ udid: 'phone', name: 'iPhone 16' })] });
+    await renderPanel({ machine });
+    // On open the panel recovers any preview without naming an operation.
+    expect(machine.commands).toContainEqual({ action: 'status', operationId: undefined });
 
     await click('Start and preview');
-    expect(fake.calls).toContain('start:phone:boot=true');
-    expect(text()).toContain('Starting the simulator');
+    expect(machine.commands).toContainEqual({ action: 'start', udid: 'phone' });
+    // Cancel names the operation, so it waits for the machine to name one.
+    expect(button('Cancel').disabled).toBe(true);
 
-    await fake.resolveStart({
-      phase: 'ready',
-      udid: 'phone',
-      viewerUrl: VIEWER_URL,
-      connection: 'remote',
-    });
-    await flush();
+    await machine.answerNext(answer({ preview: preview({ phase: 'booting' }) }));
+    expect(text()).toContain('Starting the simulator');
+    expect(button('Cancel').disabled).toBe(false);
+
+    machine.setPreview(preview({ phase: 'ready', viewerUrl: VIEWER_URL }));
+    await advance(1_000);
+    expect(machine.commands).toContainEqual({ action: 'status', operationId: 'op-1' });
     const frame = container?.querySelector('iframe');
     expect(frame?.getAttribute('src')).toBe(VIEWER_URL);
     expect(frame?.getAttribute('referrerpolicy')).toBe('no-referrer');
-    expect(container?.innerHTML.split(VIEWER_URL).length).toBe(2);
     expect(text()).not.toContain('viewer.example');
+
+    // Ready is not polled: the viewer reports its own stream.
+    const reads = machine.commands.length;
+    await advance(60_000);
+    expect(machine.commands.length).toBe(reads);
   });
 
-  it('cancels a start in flight and ignores the start’s late answer', async () => {
-    const fake = createFakeClient({
-      list: catalog([device({ udid: 'phone', name: 'iPhone 16', state: 'booted' })]),
+  it('greets the viewer at its exact origin and trusts only that frame', async () => {
+    const machine = createFakeMachine({
+      devices: [device({ udid: 'phone', state: 'Booted', occupancy: 'this-session' })],
+      preview: preview({ phase: 'ready', viewerUrl: VIEWER_URL, transport: 'local' }),
     });
-    await renderPanel({ client: fake.client, presence: 'idle' });
-    await click('Preview');
-    expect(fake.calls).toContain('start:phone:boot=false');
-    expect(text()).toContain('Starting the screen stream');
+    const { render } = await renderPanel({ machine });
+    const frame = container?.querySelector('iframe') as HTMLIFrameElement;
+    const posted: Array<[unknown, string]> = [];
+    vi.spyOn(frame.contentWindow!, 'postMessage').mockImplementation(((
+      message: unknown,
+      origin: string
+    ) => posted.push([message, origin])) as never);
+
+    await act(async () => {
+      frame.dispatchEvent(new Event('load'));
+    });
+    expect(posted).toEqual([
+      [{ type: 'lody:ios-simulator:init', operationId: 'op-1', visible: true }, VIEWER_ORIGIN],
+    ]);
+
+    const dropped = {
+      type: 'lody:ios-simulator:state',
+      operationId: 'op-1',
+      state: 'disconnected',
+    };
+    await act(async () => {
+      window.dispatchEvent(
+        new MessageEvent('message', { data: dropped, origin: VIEWER_ORIGIN, source: window })
+      );
+    });
+    expect(text()).not.toContain('lost its connection');
+    await act(async () => {
+      window.dispatchEvent(
+        new MessageEvent('message', {
+          data: dropped,
+          origin: VIEWER_ORIGIN,
+          source: frame.contentWindow,
+        })
+      );
+    });
+    await flush();
+    expect(text()).toContain('The viewer lost its connection.');
+
+    // Hiding the panel keeps the frame and tells the viewer instead.
+    await render(false);
+    expect(container?.querySelector('iframe')).toBe(frame);
+    expect(posted.at(-1)).toEqual([
+      { type: 'lody:ios-simulator:visibility', operationId: 'op-1', visible: false },
+      VIEWER_ORIGIN,
+    ]);
+  });
+
+  it('cancels a preparing preview by stopping its exact operation', async () => {
+    const machine = createFakeMachine({
+      devices: [device({ udid: 'phone', name: 'iPhone 16', state: 'Booted' })],
+      preview: preview({ phase: 'connecting', operationId: 'op-9' }),
+    });
+    await renderPanel({ machine });
+    expect(text()).toContain('Connecting the viewer');
 
     await click('Cancel');
-    expect(fake.calls).toContain('cancel');
-    await fake.resolveStart({
-      phase: 'ready',
-      udid: 'phone',
-      viewerUrl: VIEWER_URL,
-      connection: 'direct',
-    });
-    await flush();
-    expect(container?.querySelector('iframe')).toBeNull();
+    expect(machine.commands).toContainEqual({ action: 'stop', operationId: 'op-9' });
+    await machine.answerNext(
+      answer({ preview: preview({ phase: 'closed', operationId: 'op-9' }) })
+    );
     expect(button('Preview').disabled).toBe(false);
   });
 
-  it('keeps a start in flight when the panel is hidden and shown again', async () => {
-    const fake = createFakeClient({
-      list: catalog([device({ udid: 'phone', name: 'iPhone 16', state: 'booted' })]),
+  it('reports a start that never becomes ready instead of polling forever', async () => {
+    vi.useFakeTimers();
+    const machine = createFakeMachine({
+      devices: [device({ udid: 'phone', state: 'Booted' })],
+      preview: preview({ phase: 'connecting' }),
     });
-    const { render } = await renderPanel({ client: fake.client, presence: 'idle' });
-    await click('Preview');
-    await render(false);
-    await render(true);
-    // Re-showing reads status again while the start is still pending.
-    expect(fake.calls.filter((call) => call === 'status').length).toBe(2);
-
-    await fake.resolveStart({
-      phase: 'ready',
-      udid: 'phone',
-      viewerUrl: VIEWER_URL,
-      connection: 'direct',
-    });
-    await flush();
-    expect(container?.querySelector('iframe')?.getAttribute('src')).toBe(VIEWER_URL);
+    await renderPanel({ machine });
+    for (let poll = 0; poll <= IOS_SIMULATOR_PREPARING_MAX_POLLS; poll += 1) await advance(1_000);
+    expect(text()).toContain('The preview took too long to start');
+    const reads = machine.commands.length;
+    await advance(10_000);
+    expect(machine.commands.length).toBe(reads);
+    expect(button('Stop preview').disabled).toBe(false);
   });
 
-  it('stops a preview without shutting the simulator down', async () => {
-    const fake = createFakeClient({
-      list: catalog([
-        device({
-          udid: 'phone',
-          name: 'iPhone 16',
-          state: 'booted',
-          occupancy: { kind: 'this-session' },
-        }),
-      ]),
-      status: { phase: 'interrupted', udid: 'phone', connection: 'remote', reason: 'expired' },
+  it('offers Restore after the preview closed, as a new start', async () => {
+    const machine = createFakeMachine({
+      devices: [device({ udid: 'phone', state: 'Booted', occupancy: 'this-session' })],
+      preview: preview({ phase: 'closed' }),
     });
-    await renderPanel({ client: fake.client, presence: 'idle' });
-    expect(text()).toContain('The preview expired.');
-
-    await click('Stop preview');
-    expect(fake.calls.filter((call) => call.startsWith('start') || call === 'stop')).toEqual([
-      'stop',
-    ]);
-    expect(button('Preview').disabled).toBe(false);
+    await renderPanel({ machine });
+    expect(text()).toContain('The preview ended.');
+    await click('Restore');
+    expect(machine.commands).toContainEqual({ action: 'start', udid: 'phone' });
   });
 
   it('never offers a preview of a device another Session controls', async () => {
-    const fake = createFakeClient({
-      list: catalog([
-        device({ udid: 'free', name: 'iPhone 16', state: 'booted' }),
+    const machine = createFakeMachine({
+      devices: [
+        device({ udid: 'free', name: 'iPhone 16', state: 'Booted' }),
         device({
           udid: 'taken',
           name: 'iPhone 16 Pro',
-          state: 'booted',
-          occupancy: { kind: 'other-session', sessionTitle: 'Fix login' },
+          state: 'Booted',
+          occupancy: 'other-session',
         }),
-      ]),
+      ],
     });
     writeIosSimulatorSelectedDevice(
       { workspaceId: WORKSPACE, machineId: MACHINE, sessionId: SESSION.id },
       'taken'
     );
-    await renderPanel({ client: fake.client, presence: 'idle' });
-    expect(text()).toContain('“Fix login” is using this simulator');
+    await renderPanel({ machine });
+    expect(text()).toContain('Another session is using this simulator');
     expect(() => button('Preview')).toThrow();
     expect(() => button('Start and preview')).toThrow();
   });
 
-  it('polls while preparing only when on screen, and drops the viewer when hidden', async () => {
-    vi.useFakeTimers();
-    const fake = createFakeClient({
-      list: catalog([device({ udid: 'phone', name: 'iPhone 16', state: 'booted' })]),
-      status: { phase: 'preparing', udid: 'phone', stage: 'connecting' },
-    });
-    const { render } = await renderPanel({ client: fake.client, presence: 'idle' });
-    expect(text()).toContain('Connecting the viewer');
-
-    fake.setStatus({ phase: 'ready', udid: 'phone', viewerUrl: VIEWER_URL, connection: 'direct' });
-    await act(async () => {
-      await vi.advanceTimersByTimeAsync(1_500);
-    });
-    await flush();
-    expect(container?.querySelector('iframe')?.getAttribute('src')).toBe(VIEWER_URL);
-
-    await render(false);
-    expect(container?.querySelector('iframe')).toBeNull();
-    const before = fake.calls.length;
-    await act(async () => {
-      await vi.advanceTimersByTimeAsync(60_000);
-    });
-    expect(fake.calls.length).toBe(before);
-  });
-
   it('explains a Mac without Xcode and copies redacted diagnostics', async () => {
-    const fake = createFakeClient({
-      list: {
-        ok: false,
-        error: {
-          code: 'xcode-missing',
-          message: 'xcrun failed at /Users/alice/Library via https://relay.example/?token=abc',
-        },
-      },
+    const machine = createFakeMachine({
+      devices: [],
+      list: answer({
+        success: false,
+        error: 'environment',
+        message: 'xcrun failed at /Users/alice/Library via https://relay.example/?token=abc',
+      }),
     });
-    await renderPanel({ client: fake.client, presence: 'idle' });
+    await renderPanel({ machine });
     expect(text()).toContain('Xcode isn’t set up on Studio');
 
     await click('Copy diagnostics');
     const copied = vi.mocked(writeTextToClipboard).mock.calls.at(-1)?.[0] ?? '';
-    expect(copied).toContain('error=xcode-missing');
+    expect(copied).toContain('error=environment');
     expect(copied).not.toContain('alice');
     expect(copied).not.toContain('relay.example');
   });

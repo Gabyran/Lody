@@ -2,10 +2,10 @@ import { useCallback } from 'react';
 import { useTranslation } from 'react-i18next';
 import { getIosSimulatorDeviceAction } from '@/lib/ios-simulator/ios-simulator-model';
 import type {
-  IosSimulatorDevice,
+  IosSimulatorDeviceEntry,
   IosSimulatorError,
+  IosSimulatorPanelStatus,
   IosSimulatorPreparingStage,
-  IosSimulatorPreviewStatus,
 } from '@/lib/ios-simulator/ios-simulator-types';
 
 export type IosSimulatorStateLabel = {
@@ -18,7 +18,7 @@ export type IosSimulatorStateLabel = {
 export function useIosSimulatorDeviceStateLabel() {
   const { t } = useTranslation();
   return useCallback(
-    (device: IosSimulatorDevice, status: IosSimulatorPreviewStatus): IosSimulatorStateLabel => {
+    (device: IosSimulatorDeviceEntry, status: IosSimulatorPanelStatus): IosSimulatorStateLabel => {
       const action = getIosSimulatorDeviceAction(device, status);
       switch (action.kind) {
         case 'current':
@@ -53,21 +53,20 @@ export function useIosSimulatorDeviceStateLabel() {
   );
 }
 
+/** The machine reports these in order; booting is skipped for a device already booted. */
 export const IOS_SIMULATOR_PREPARING_STAGES: readonly IosSimulatorPreparingStage[] = [
-  'booting-device',
-  'starting-stream',
+  'preparing',
+  'booting',
   'connecting',
 ];
 
 export function useIosSimulatorStageLabel() {
   const { t } = useTranslation();
   return useCallback(
-    (stage: string): string => {
+    (stage: IosSimulatorPreparingStage): string => {
       switch (stage) {
-        case 'booting-device':
+        case 'booting':
           return t('sessions.iosSimulator.stage.bootingDevice', 'Starting the simulator');
-        case 'starting-stream':
-          return t('sessions.iosSimulator.stage.startingStream', 'Starting the screen stream');
         case 'connecting':
           return t('sessions.iosSimulator.stage.connecting', 'Connecting the viewer');
         default:
@@ -86,21 +85,19 @@ export function useIosSimulatorErrorCopy() {
   return useCallback(
     (error: IosSimulatorError, machineName: string): IosSimulatorErrorCopy => {
       switch (error.code) {
-        case 'xcode-missing':
+        case 'environment':
           return {
             title: t(
               'sessions.iosSimulator.error.xcodeMissing',
               'Xcode isn’t set up on {{machine}}',
-              {
-                machine: machineName,
-              }
+              { machine: machineName }
             ),
             detail: t(
               'sessions.iosSimulator.error.xcodeMissingDetail',
               'Install Xcode and an iOS Simulator runtime on that Mac, open Xcode once to finish setup, then refresh.'
             ),
           };
-        case 'device-occupied':
+        case 'occupied':
           return {
             title: t('sessions.iosSimulator.error.occupied', 'Another session took this simulator'),
             detail: t(
@@ -108,8 +105,7 @@ export function useIosSimulatorErrorCopy() {
               'One session controls a simulator at a time. Choose another simulator, or stop the preview in the session using it.'
             ),
           };
-        case 'device-unavailable':
-        case 'device-not-found':
+        case 'unavailable':
           return {
             title: t('sessions.iosSimulator.error.unavailable', 'This simulator isn’t available'),
             detail: t(
@@ -117,28 +113,12 @@ export function useIosSimulatorErrorCopy() {
               'It may have been deleted, or its runtime is missing. Refresh the list or choose another simulator.'
             ),
           };
-        case 'boot-failed':
-          return {
-            title: t('sessions.iosSimulator.error.bootFailed', 'The simulator didn’t start'),
-            detail: t(
-              'sessions.iosSimulator.error.bootFailedDetail',
-              'Try again. If it keeps failing, open Simulator on that Mac to see what it reports.'
-            ),
-          };
-        case 'stream-failed':
-          return {
-            title: t('sessions.iosSimulator.error.streamFailed', 'The screen stream didn’t start'),
-            detail: t(
-              'sessions.iosSimulator.error.streamFailedDetail',
-              'The simulator is still running. Try again, or copy the diagnostics for a bug report.'
-            ),
-          };
         case 'timeout':
           return {
-            title: t('sessions.iosSimulator.error.timeout', 'The Mac took too long to answer'),
+            title: t('sessions.iosSimulator.error.timeout', 'The preview took too long to start'),
             detail: t(
               'sessions.iosSimulator.error.timeoutDetail',
-              'It may be busy starting the simulator. Try again in a moment.'
+              'The Mac may still be starting the simulator. Try again, or stop the preview.'
             ),
           };
         case 'unsupported':
@@ -151,7 +131,7 @@ export function useIosSimulatorErrorCopy() {
               'This version of Lody on that Mac can’t stream simulators yet.'
             ),
           };
-        case 'unauthorized':
+        case 'denied':
           return {
             title: t(
               'sessions.iosSimulator.error.unauthorized',

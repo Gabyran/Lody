@@ -7,13 +7,18 @@ import { Separator } from '@lody/ui/separator';
 import { Spinner } from '@lody/ui/spinner';
 import { colors } from '@lody/ui/tokens/colors.stylex';
 import { space, text } from '@lody/ui/tokens/scales.stylex';
-import type { IosSimulatorPreviewStatus } from '@/lib/ios-simulator/ios-simulator-types';
+import type {
+  IosSimulatorPanelStatus,
+  IosSimulatorViewerState,
+} from '@/lib/ios-simulator/ios-simulator-types';
 import { useIosSimulatorStageLabel } from './ios-simulator-copy';
 
 export type IosSimulatorPendingAction = 'start' | 'cancel' | 'stop' | null;
 
 export type IosSimulatorConnectionStatusProps = {
-  status: IosSimulatorPreviewStatus;
+  status: IosSimulatorPanelStatus;
+  /** What the viewer page last reported for a ready preview. */
+  viewerState?: IosSimulatorViewerState | null;
   /** Name of the device `status` is about. */
   deviceName?: string;
   pendingAction?: IosSimulatorPendingAction;
@@ -26,10 +31,16 @@ export type IosSimulatorConnectionStatusProps = {
 
 type StatusKind = 'idle' | 'preparing' | 'direct' | 'remote' | 'interrupted' | 'failed';
 
-const statusKind = (status: IosSimulatorPreviewStatus): StatusKind => {
+const statusKind = (
+  status: IosSimulatorPanelStatus,
+  viewerState: IosSimulatorViewerState | null
+): StatusKind => {
   switch (status.phase) {
     case 'ready':
-      return status.connection;
+      if (viewerState === 'disconnected' || viewerState === 'error') return 'interrupted';
+      return status.transport === 'local' ? 'direct' : 'remote';
+    case 'closed':
+      return 'interrupted';
     default:
       return status.phase;
   }
@@ -86,6 +97,7 @@ function StatusGlyph({ kind }: { kind: StatusKind }) {
  */
 export function IosSimulatorConnectionStatus({
   status,
+  viewerState = null,
   deviceName,
   pendingAction = null,
   onRetry,
@@ -96,7 +108,8 @@ export function IosSimulatorConnectionStatus({
 }: IosSimulatorConnectionStatusProps) {
   const { t } = useTranslation();
   const stageLabel = useIosSimulatorStageLabel();
-  const kind = statusKind(status);
+  const kind = statusKind(status, viewerState);
+  const canCancel = status.phase === 'preparing' && Boolean(status.operationId);
   const busy = pendingAction !== null;
 
   const word =
@@ -216,14 +229,15 @@ export function IosSimulatorConnectionStatus({
                 type="button"
                 variant="secondary"
                 size="mini"
-                // A start still in flight is exactly what Cancel is for.
-                disabled={pendingAction === 'cancel'}
+                // A start still in flight is exactly what Cancel is for, once
+                // the machine has named its operation.
+                disabled={!canCancel || pendingAction === 'cancel'}
                 onClick={onCancel}
               >
                 {t('sessions.iosSimulator.action.cancel', 'Cancel')}
               </Button>
             ) : null}
-            {(kind === 'direct' || kind === 'remote' || kind === 'interrupted') && onStop ? (
+            {status.phase === 'ready' && onStop ? (
               <Button
                 type="button"
                 variant="secondary"

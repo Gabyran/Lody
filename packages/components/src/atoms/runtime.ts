@@ -76,7 +76,6 @@ import type { WorkspaceWriter } from '../providers/workspace-writer';
 import type { CodeCollabFileIndexCache } from '@/lib/code-collab-file-index-cache';
 import { readStoredAuthToken } from '@/lib/auth-bootstrap';
 import type { RoomSyncState } from '@/lib/room-sync-state';
-import type { IosSimulatorClient } from '@/lib/ios-simulator/ios-simulator-types';
 import { currentWorkspaceIdAtom, currentWorkspaceSlugAtom } from './workspace-context';
 
 /**
@@ -498,11 +497,17 @@ export type WorkspaceRuntime = {
     options?: { configId?: AgentConfigId }
   ) => Promise<MachinePiExtensionsResponse>;
   /**
-   * iOS Simulator preview over Machine RPC, authenticated inside the
-   * implementation. Absent until the runtime implements the contract; the
-   * panel then asks for an update instead of calling anything.
+   * The one `ios-simulator/control` Machine RPC. Local machines are reached
+   * directly; remote ones with a preview-control proof for the exact command.
+   * Transport failures resolve as `{ success: false, error: 'failed' }`.
    */
-  readonly iosSimulator?: IosSimulatorClient;
+  requestIosSimulatorControl: (request: {
+    machineId: MachineId;
+    sessionId: SessionId;
+    requestedByUserId: string;
+    command: import('@lody/shared').IosSimulatorCommand;
+    timeoutMs?: number;
+  }) => Promise<import('@lody/shared').IosSimulatorResponse>;
   dispose: () => Promise<void>;
 };
 

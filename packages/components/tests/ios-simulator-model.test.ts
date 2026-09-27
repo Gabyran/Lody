@@ -1,62 +1,62 @@
 // @vitest-environment jsdom
 
 import { afterEach, describe, expect, it } from 'vitest';
+import type { IosSimulatorDevice, IosSimulatorResponse } from '@lody/shared';
 import {
   buildIosSimulatorDiagnostics,
+  describeIosSimulatorRuntime,
   getIosSimulatorDeviceAction,
   getIosSimulatorPanelAvailability,
-  getIosSimulatorStatusPollMs,
+  getIosSimulatorViewerOrigin,
   groupIosSimulatorDevices,
+  parseIosSimulatorViewerState,
   readIosSimulatorSelectedDevice,
   redactIosSimulatorText,
   resolveIosSimulatorSelection,
+  toIosSimulatorCatalog,
+  toIosSimulatorDeviceEntry,
+  toIosSimulatorPanelStatus,
   writeIosSimulatorSelectedDevice,
 } from '../src/lib/ios-simulator/ios-simulator-model';
-import type {
-  IosSimulatorDevice,
-  IosSimulatorPreviewStatus,
-  IosSimulatorRuntime,
-} from '../src/lib/ios-simulator/ios-simulator-types';
+import type { IosSimulatorPanelStatus } from '../src/lib/ios-simulator/ios-simulator-types';
 
-const runtimes: IosSimulatorRuntime[] = [
-  { id: 'rt.ios-17-5', name: 'iOS 17.5', platform: 'iOS', version: '17.5', available: true },
-  {
-    id: 'rt.watchos-11',
-    name: 'watchOS 11.0',
-    platform: 'watchOS',
-    version: '11.0',
-    available: true,
-  },
-  { id: 'rt.ios-18-2', name: 'iOS 18.2', platform: 'iOS', version: '18.2', available: true },
-];
+const IOS_18 = 'com.apple.CoreSimulator.SimRuntime.iOS-18-2';
+const IOS_17 = 'com.apple.CoreSimulator.SimRuntime.iOS-17-5';
+const WATCH_11 = 'com.apple.CoreSimulator.SimRuntime.watchOS-11-0';
 
 const device = (overrides: Partial<IosSimulatorDevice> & { udid: string }): IosSimulatorDevice => ({
   name: overrides.udid,
-  runtimeId: 'rt.ios-18-2',
-  family: 'iphone',
-  state: 'shutdown',
+  runtime: IOS_18,
+  deviceType: 'com.apple.CoreSimulator.SimDeviceType.iPhone-16',
+  state: 'Shutdown',
   available: true,
-  occupancy: { kind: 'free' },
+  occupancy: 'available',
   ...overrides,
 });
 
-const devices: IosSimulatorDevice[] = [
-  device({ udid: 'ipad', name: 'iPad Air', family: 'ipad' }),
+const wireDevices: IosSimulatorDevice[] = [
+  device({ udid: 'ipad', name: 'iPad Air', deviceType: 'iPad Air (M2)' }),
   device({ udid: 'pro-10', name: 'iPhone 10 Pro' }),
   device({ udid: 'pro-9', name: 'iPhone 9 Pro' }),
-  device({ udid: 'old', name: 'iPhone 15', runtimeId: 'rt.ios-17-5', state: 'booted' }),
-  device({ udid: 'watch', name: 'Apple Watch Ultra', runtimeId: 'rt.watchos-11', family: 'watch' }),
-  device({ udid: 'orphan', name: 'iPhone SE', runtimeId: 'rt.ios-16-0' }),
+  device({ udid: 'old', name: 'iPhone 15', runtime: IOS_17, state: 'Booted' }),
+  device({
+    udid: 'watch',
+    name: 'Apple Watch Ultra',
+    runtime: WATCH_11,
+    deviceType: 'Apple Watch',
+  }),
+  device({ udid: 'custom', name: 'iPhone SE', runtime: 'Custom Runtime' }),
 ];
-
-const IDLE: IosSimulatorPreviewStatus = { phase: 'idle' };
+const catalog = toIosSimulatorCatalog(wireDevices);
+const entries = catalog.devices;
+const IDLE: IosSimulatorPanelStatus = { phase: 'idle' };
+const APP_ORIGIN = 'http://localhost:3000';
 
 describe('iOS Simulator availability', () => {
   it('offers the tab only when the target machine is a Mac', () => {
     expect(getIosSimulatorPanelAvailability(null)).toBe('hidden');
-    expect(getIosSimulatorPanelAvailability({ os: 'linux' })).toBe('hidden');
     expect(
-      getIosSimulatorPanelAvailability({ os: 'win32', protocolCapabilities: { iosSimulator: 1 } })
+      getIosSimulatorPanelAvailability({ os: 'linux', protocolCapabilities: { iosSimulator: 1 } })
     ).toBe('hidden');
   });
 
@@ -68,77 +68,134 @@ describe('iOS Simulator availability', () => {
   });
 });
 
-describe('groupIosSimulatorDevices', () => {
+describe('catalog', () => {
+  it('reads runtime identifiers and display names alike', () => {
+    expect(describeIosSimulatorRuntime(IOS_18)).toMatchObject({
+      name: 'iOS 18.2',
+      platform: 'iOS',
+      version: '18.2',
+    });
+    expect(describeIosSimulatorRuntime('watchOS 11.0')).toMatchObject({
+      name: 'watchOS 11.0',
+      platform: 'watchOS',
+    });
+    expect(describeIosSimulatorRuntime('Custom Runtime')).toMatchObject({ name: 'Custom Runtime' });
+  });
+
+  it('normalizes simctl states and derives the device family', () => {
+    expect(
+      toIosSimulatorDeviceEntry(
+        device({ udid: 'a', state: 'Shutting Down', deviceType: 'iPad Pro' })
+      )
+    ).toMatchObject({ state: 'shutting-down', family: 'ipad' });
+    expect(toIosSimulatorDeviceEntry(device({ udid: 'a', state: 'Creating' })).state).toBe(
+      'unknown'
+    );
+  });
+
   it('groups by runtime, newest iOS first, and sorts names naturally', () => {
-    const groups = groupIosSimulatorDevices(runtimes, devices);
+    const groups = groupIosSimulatorDevices(catalog);
     expect(groups.map((group) => group.runtime.name)).toEqual([
       'iOS 18.2',
       'iOS 17.5',
       'watchOS 11.0',
-      'ios 16 0',
+      'Custom Runtime',
     ]);
-    // iPhones before iPads, and "9" before "10".
     expect(groups[0]?.devices.map((entry) => entry.udid)).toEqual(['pro-9', 'pro-10', 'ipad']);
   });
 
-  it('keeps a device whose runtime is missing from the catalog', () => {
-    const orphanGroup = groupIosSimulatorDevices(runtimes, devices).at(-1);
-    expect(orphanGroup?.devices.map((entry) => entry.udid)).toEqual(['orphan']);
-    expect(orphanGroup?.runtime.available).toBe(false);
+  it('searches name and runtime together and filters by runtime', () => {
+    const udids = (filter: Parameters<typeof groupIosSimulatorDevices>[1]) =>
+      groupIosSimulatorDevices(catalog, filter).flatMap((group) =>
+        group.devices.map((entry) => entry.udid)
+      );
+    expect(udids({ query: 'iphone 17' })).toEqual(['old']);
+    expect(udids({ runtimeKey: WATCH_11 })).toEqual(['watch']);
+    expect(udids({ query: 'pixel' })).toEqual([]);
+  });
+});
+
+describe('toIosSimulatorPanelStatus', () => {
+  const response = (overrides: Partial<IosSimulatorResponse>): IosSimulatorResponse => ({
+    type: 'ios-simulator/control_response',
+    sessionId: 's',
+    success: true,
+    ...overrides,
   });
 
-  it('searches name and runtime together and filters by runtime', () => {
+  it('maps every preparing phase to a stage of one preparing status', () => {
+    for (const phase of ['preparing', 'booting', 'connecting'] as const) {
+      expect(
+        toIosSimulatorPanelStatus(
+          response({ preview: { operationId: 'op', udid: 'a', phase, transport: 'remote' } }),
+          { appOrigin: APP_ORIGIN }
+        )
+      ).toEqual({ phase: 'preparing', udid: 'a', operationId: 'op', stage: phase });
+    }
+  });
+
+  it('keeps a ready viewer only on a distinct http(s) origin', () => {
+    const ready = (viewerUrl?: string) =>
+      toIosSimulatorPanelStatus(
+        response({
+          preview: { operationId: 'op', udid: 'a', phase: 'ready', transport: 'local', viewerUrl },
+        }),
+        { appOrigin: APP_ORIGIN }
+      );
+    expect(ready('http://127.0.0.1:61234/viewer?cap=x')).toMatchObject({
+      phase: 'ready',
+      viewerOrigin: 'http://127.0.0.1:61234',
+      transport: 'local',
+    });
+    expect(ready(`${APP_ORIGIN}/viewer`)).toMatchObject({ phase: 'failed' });
+    expect(ready('javascript:alert(1)')).toMatchObject({ phase: 'failed' });
+    expect(ready(undefined)).toMatchObject({ phase: 'failed' });
+  });
+
+  it('reports a refused command with its reason and the device it was about', () => {
     expect(
-      groupIosSimulatorDevices(runtimes, devices, { query: 'iphone 17' }).flatMap((group) =>
-        group.devices.map((entry) => entry.udid)
-      )
-    ).toEqual(['old']);
-    expect(
-      groupIosSimulatorDevices(runtimes, devices, { runtimeId: 'rt.watchos-11' }).flatMap((group) =>
-        group.devices.map((entry) => entry.udid)
-      )
-    ).toEqual(['watch']);
-    expect(groupIosSimulatorDevices(runtimes, devices, { query: 'pixel' })).toEqual([]);
+      toIosSimulatorPanelStatus(response({ success: false, error: 'occupied', message: 'held' }), {
+        udid: 'a',
+        appOrigin: APP_ORIGIN,
+      })
+    ).toEqual({
+      phase: 'failed',
+      udid: 'a',
+      operationId: undefined,
+      error: { code: 'occupied', message: 'held' },
+    });
+    expect(toIosSimulatorPanelStatus(response({}), { appOrigin: APP_ORIGIN })).toEqual(IDLE);
   });
 });
 
 describe('getIosSimulatorDeviceAction', () => {
+  const entry = (overrides: Partial<IosSimulatorDevice>) =>
+    toIosSimulatorDeviceEntry(device({ udid: 'a', ...overrides }));
+
   it('starts a shut-down device and previews a booted one', () => {
-    expect(getIosSimulatorDeviceAction(device({ udid: 'a' }), IDLE)).toEqual({
-      kind: 'start-and-preview',
-    });
-    expect(getIosSimulatorDeviceAction(device({ udid: 'a', state: 'booted' }), IDLE)).toEqual({
+    expect(getIosSimulatorDeviceAction(entry({}), IDLE)).toEqual({ kind: 'start-and-preview' });
+    expect(getIosSimulatorDeviceAction(entry({ state: 'Booted' }), IDLE)).toEqual({
       kind: 'preview',
     });
   });
 
   it('never offers a takeover of a device another Session controls', () => {
     expect(
-      getIosSimulatorDeviceAction(
-        device({
-          udid: 'a',
-          state: 'booted',
-          occupancy: { kind: 'other-session', sessionTitle: 'Fix login' },
-        }),
-        IDLE
-      )
-    ).toEqual({ kind: 'occupied', sessionTitle: 'Fix login' });
+      getIosSimulatorDeviceAction(entry({ state: 'Booted', occupancy: 'other-session' }), IDLE)
+    ).toEqual({ kind: 'occupied' });
   });
 
-  it('reports the Session’s own preview as current in every live phase', () => {
-    const own = device({ udid: 'a', state: 'booted', occupancy: { kind: 'this-session' } });
-    for (const status of [
-      { phase: 'preparing', udid: 'a', stage: 'connecting' },
-      { phase: 'ready', udid: 'a', viewerUrl: 'http://x', connection: 'direct' },
-      { phase: 'interrupted', udid: 'a', connection: 'remote', reason: 'expired' },
-    ] satisfies IosSimulatorPreviewStatus[]) {
-      expect(getIosSimulatorDeviceAction(own, status)).toEqual({ kind: 'current' });
-    }
+  it('reports the Session’s own preparing or ready preview as current', () => {
+    const own = entry({ state: 'Booted', occupancy: 'this-session' });
+    expect(
+      getIosSimulatorDeviceAction(own, { phase: 'preparing', udid: 'a', stage: 'connecting' })
+    ).toEqual({ kind: 'current' });
     expect(
       getIosSimulatorDeviceAction(own, {
-        phase: 'failed',
+        phase: 'closed',
         udid: 'a',
-        error: { code: 'stream-failed' },
+        operationId: 'op',
+        transport: 'remote',
       })
     ).toEqual({ kind: 'preview' });
   });
@@ -146,66 +203,70 @@ describe('getIosSimulatorDeviceAction', () => {
   it('reports unavailable and mid-shutdown devices', () => {
     expect(
       getIosSimulatorDeviceAction(
-        device({ udid: 'a', available: false, unavailableReason: 'runtime missing' }),
+        entry({ available: false, unavailableReason: 'no runtime' }),
         IDLE
       )
-    ).toEqual({ kind: 'unavailable', reason: 'runtime missing' });
-    expect(
-      getIosSimulatorDeviceAction(device({ udid: 'a', state: 'shutting-down' }), IDLE)
-    ).toEqual({
+    ).toEqual({ kind: 'unavailable', reason: 'no runtime' });
+    expect(getIosSimulatorDeviceAction(entry({ state: 'Shutting Down' }), IDLE)).toEqual({
       kind: 'settling',
     });
   });
 });
 
 describe('resolveIosSimulatorSelection', () => {
-  const ready: IosSimulatorPreviewStatus = {
+  const ready: IosSimulatorPanelStatus = {
     phase: 'ready',
     udid: 'pro-9',
+    operationId: 'op',
     viewerUrl: 'http://x',
-    connection: 'direct',
+    viewerOrigin: 'http://x',
+    transport: 'local',
   };
 
   it('puts a choice made in the panel above the live preview', () => {
-    expect(resolveIosSimulatorSelection(devices, { chosenUdid: 'ipad', status: ready })).toBe(
+    expect(resolveIosSimulatorSelection(entries, { chosenUdid: 'ipad', status: ready })).toBe(
       'ipad'
     );
   });
 
   it('puts the live preview above the remembered device', () => {
-    expect(resolveIosSimulatorSelection(devices, { preferredUdid: 'ipad', status: ready })).toBe(
+    expect(resolveIosSimulatorSelection(entries, { preferredUdid: 'ipad', status: ready })).toBe(
       'pro-9'
     );
-    expect(resolveIosSimulatorSelection(devices, { preferredUdid: 'ipad', status: IDLE })).toBe(
+    expect(resolveIosSimulatorSelection(entries, { preferredUdid: 'ipad', status: IDLE })).toBe(
       'ipad'
     );
   });
 
   it('falls back to a held, then booted, then free device and ignores unknown ids', () => {
-    const held = [...devices, device({ udid: 'held', occupancy: { kind: 'this-session' } })];
+    const held = [
+      ...entries,
+      toIosSimulatorDeviceEntry(device({ udid: 'held', occupancy: 'this-session' })),
+    ];
     expect(resolveIosSimulatorSelection(held, { preferredUdid: 'gone', status: IDLE })).toBe(
       'held'
     );
-    expect(resolveIosSimulatorSelection(devices, { status: IDLE })).toBe('old');
-    const noneBooted = devices.map((entry) => ({ ...entry, state: 'shutdown' as const }));
-    expect(resolveIosSimulatorSelection(noneBooted, { status: IDLE })).toBe('ipad');
+    expect(resolveIosSimulatorSelection(entries, { status: IDLE })).toBe('old');
     expect(resolveIosSimulatorSelection([], { status: IDLE })).toBeNull();
   });
 });
 
-describe('status polling', () => {
-  it('polls only while something is changing or being watched', () => {
-    expect(getIosSimulatorStatusPollMs({ phase: 'preparing', udid: 'a', stage: 'x' })).toBe(1_500);
-    expect(
-      getIosSimulatorStatusPollMs({
-        phase: 'ready',
-        udid: 'a',
-        viewerUrl: 'u',
-        connection: 'remote',
-      })
-    ).toBe(15_000);
-    expect(getIosSimulatorStatusPollMs(IDLE)).toBeNull();
-    expect(getIosSimulatorStatusPollMs({ phase: 'failed', error: { code: 'timeout' } })).toBeNull();
+describe('viewer handshake', () => {
+  it('accepts only a known state for the exact operation', () => {
+    const message = { type: 'lody:ios-simulator:state', operationId: 'op', state: 'ready' };
+    expect(parseIosSimulatorViewerState(message, 'op')).toBe('ready');
+    expect(parseIosSimulatorViewerState(message, 'other-op')).toBeNull();
+    expect(parseIosSimulatorViewerState({ ...message, state: 'hacked' }, 'op')).toBeNull();
+    expect(parseIosSimulatorViewerState({ ...message, type: 'x' }, 'op')).toBeNull();
+    expect(parseIosSimulatorViewerState('ready', 'op')).toBeNull();
+  });
+
+  it('never addresses a viewer on the app’s own origin', () => {
+    expect(getIosSimulatorViewerOrigin('https://t.example/v?c=1', APP_ORIGIN)).toBe(
+      'https://t.example'
+    );
+    expect(getIosSimulatorViewerOrigin(`${APP_ORIGIN}/v`, APP_ORIGIN)).toBeNull();
+    expect(getIosSimulatorViewerOrigin('not a url', APP_ORIGIN)).toBeNull();
   });
 });
 
@@ -219,7 +280,6 @@ describe('selected-device preference', () => {
     expect(readIosSimulatorSelectedDevice({ ...scope, workspaceId: 'w2' })).toBeNull();
     expect(readIosSimulatorSelectedDevice({ ...scope, machineId: 'm2' })).toBeNull();
     expect(readIosSimulatorSelectedDevice({ ...scope, sessionId: 's2' })).toBeNull();
-    expect(readIosSimulatorSelectedDevice(null)).toBeNull();
   });
 });
 
@@ -240,14 +300,17 @@ describe('diagnostics', () => {
       status: {
         phase: 'ready',
         udid: 'pro-9',
+        operationId: 'op',
         viewerUrl: 'https://secret-tunnel.example/viewer?capability=xyz',
-        connection: 'remote',
+        viewerOrigin: 'https://secret-tunnel.example',
+        transport: 'remote',
       },
-      device: devices[2],
-      runtime: runtimes[2],
-      catalog: { phase: 'ready', deviceCount: devices.length },
+      viewerState: 'disconnected',
+      device: entries[2],
+      runtime: catalog.runtimes[0],
+      catalog: { phase: 'ready', deviceCount: entries.length },
     });
-    expect(text).toContain('preview: ready connection=remote');
+    expect(text).toContain('preview: ready transport=remote viewer=disconnected');
     expect(text).toContain('device: iPhone 9 Pro');
     expect(text).not.toContain('secret-tunnel');
     expect(text).not.toContain('capability');

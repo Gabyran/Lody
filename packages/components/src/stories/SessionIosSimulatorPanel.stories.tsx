@@ -1,71 +1,62 @@
 import type { Meta, StoryObj } from '@storybook/react-vite';
+import type { IosSimulatorDevice } from '@lody/shared';
 import { fn } from 'storybook/test';
 import {
   IosSimulatorPanelView,
   type IosSimulatorPanelViewProps,
 } from '@/components/sessions/ios-simulator/ios-simulator-panel-view';
-import type {
-  IosSimulatorDevice,
-  IosSimulatorRuntime,
-} from '@/lib/ios-simulator/ios-simulator-types';
+import { toIosSimulatorCatalog } from '@/lib/ios-simulator/ios-simulator-model';
 
-const runtimes: IosSimulatorRuntime[] = [
-  { id: 'ios-18-2', name: 'iOS 18.2', platform: 'iOS', version: '18.2', available: true },
-  { id: 'ios-17-5', name: 'iOS 17.5', platform: 'iOS', version: '17.5', available: true },
-  { id: 'watchos-11', name: 'watchOS 11.2', platform: 'watchOS', version: '11.2', available: true },
-];
+const IOS_18 = 'com.apple.CoreSimulator.SimRuntime.iOS-18-2';
+const IOS_17 = 'com.apple.CoreSimulator.SimRuntime.iOS-17-5';
+const WATCH_11 = 'com.apple.CoreSimulator.SimRuntime.watchOS-11-2';
 
 const devices: IosSimulatorDevice[] = [
   {
     udid: 'iphone-16-pro',
     name: 'iPhone 16 Pro',
-    runtimeId: 'ios-18-2',
-    family: 'iphone',
-    state: 'booted',
+    runtime: IOS_18,
+    deviceType: 'com.apple.CoreSimulator.SimDeviceType.iPhone-16-Pro',
+    state: 'Booted',
     available: true,
-    occupancy: { kind: 'free' },
-    screen: { width: 402, height: 874 },
+    occupancy: 'available',
   },
   {
     udid: 'iphone-16',
     name: 'iPhone 16',
-    runtimeId: 'ios-18-2',
-    family: 'iphone',
-    state: 'shutdown',
+    runtime: IOS_18,
+    deviceType: 'com.apple.CoreSimulator.SimDeviceType.iPhone-16',
+    state: 'Shutdown',
     available: true,
-    occupancy: { kind: 'free' },
-    screen: { width: 393, height: 852 },
+    occupancy: 'available',
   },
   {
     udid: 'ipad-pro',
     name: 'iPad Pro 13-inch (M4)',
-    runtimeId: 'ios-18-2',
-    family: 'ipad',
-    state: 'booted',
+    runtime: IOS_18,
+    deviceType: 'com.apple.CoreSimulator.SimDeviceType.iPad-Pro-13-inch-M4',
+    state: 'Booted',
     available: true,
-    occupancy: { kind: 'other-session', sessionTitle: 'Fix checkout layout' },
-    screen: { width: 1032, height: 1376 },
+    occupancy: 'other-session',
   },
   {
     udid: 'iphone-15',
     name: 'iPhone 15',
-    runtimeId: 'ios-17-5',
-    family: 'iphone',
-    state: 'shutdown',
+    runtime: IOS_17,
+    deviceType: 'com.apple.CoreSimulator.SimDeviceType.iPhone-15',
+    state: 'Shutdown',
     available: false,
     unavailableReason: 'The iOS 17.5 runtime is not installed.',
-    occupancy: { kind: 'free' },
-    screen: { width: 393, height: 852 },
+    occupancy: 'available',
   },
   {
     udid: 'watch-ultra',
     name: 'Apple Watch Ultra 2 (49mm)',
-    runtimeId: 'watchos-11',
-    family: 'watch',
-    state: 'shutdown',
+    runtime: WATCH_11,
+    deviceType: 'com.apple.CoreSimulator.SimDeviceType.Apple-Watch-Ultra-2-49mm',
+    state: 'Shutdown',
     available: true,
-    occupancy: { kind: 'other-session' },
-    screen: { width: 410, height: 502 },
+    occupancy: 'available',
   },
 ];
 
@@ -74,10 +65,21 @@ const SAMPLE_VIEWER_URL = `data:text/html,${encodeURIComponent(
   '<body style="margin:0;height:100vh;display:grid;place-items:center;background:linear-gradient(160deg,#1c3d7a,#6a2c70);color:#fff;font:600 17px -apple-system,system-ui">9:41</body>'
 )}`;
 
+const ready = (transport: 'local' | 'remote') =>
+  ({
+    phase: 'ready',
+    udid: 'iphone-16-pro',
+    operationId: 'op-1',
+    viewerUrl: SAMPLE_VIEWER_URL,
+    // A `data:` stand-in has an opaque origin, so the story greets it with '*'.
+    viewerOrigin: '*',
+    transport,
+  }) as const;
+
 const baseArgs: IosSimulatorPanelViewProps = {
   machineName: 'Studio',
   blocker: null,
-  catalog: { phase: 'ready', runtimes, devices },
+  catalog: { phase: 'ready', ...toIosSimulatorCatalog(devices) },
   selectedUdid: 'iphone-16-pro',
   status: { phase: 'idle' },
   onSelectDevice: fn(),
@@ -89,6 +91,7 @@ const baseArgs: IosSimulatorPanelViewProps = {
   onRestore: fn(),
   onRetry: fn(),
   onCopyDiagnostics: fn(),
+  onViewerStateChange: fn(),
 };
 
 const meta = {
@@ -115,74 +118,52 @@ export const StartAndPreview: Story = { args: { selectedUdid: 'iphone-16' } };
 export const Preparing: Story = {
   args: {
     selectedUdid: 'iphone-16',
-    bootRequested: true,
-    pendingAction: 'start',
-    status: { phase: 'preparing', udid: 'iphone-16', stage: 'starting-stream' },
+    bootExpected: true,
+    status: { phase: 'preparing', udid: 'iphone-16', operationId: 'op-2', stage: 'booting' },
   },
 };
 
-export const PreviewingDirect: Story = {
-  args: {
-    status: {
-      phase: 'ready',
-      udid: 'iphone-16-pro',
-      viewerUrl: SAMPLE_VIEWER_URL,
-      connection: 'direct',
-    },
-  },
-};
+export const PreviewingLocal: Story = { args: { status: ready('local'), viewerState: 'ready' } };
 
-export const PreviewingRemote: Story = {
-  args: {
-    status: {
-      phase: 'ready',
-      udid: 'iphone-16-pro',
-      viewerUrl: SAMPLE_VIEWER_URL,
-      connection: 'remote',
-    },
-  },
+export const PreviewingRemote: Story = { args: { status: ready('remote'), viewerState: 'ready' } };
+
+export const ViewerDisconnected: Story = {
+  args: { status: ready('remote'), viewerState: 'disconnected' },
 };
 
 /** Another device is chosen while this Session previews one: switching ends that preview. */
 export const SwitchingDevices: Story = {
-  args: {
-    selectedUdid: 'iphone-16',
-    status: {
-      phase: 'ready',
-      udid: 'iphone-16-pro',
-      viewerUrl: SAMPLE_VIEWER_URL,
-      connection: 'remote',
-    },
-  },
+  args: { selectedUdid: 'iphone-16', status: ready('remote') },
 };
 
 export const OccupiedByAnotherSession: Story = { args: { selectedUdid: 'ipad-pro' } };
 
-export const OccupiedOutsideThisWorkspace: Story = { args: { selectedUdid: 'watch-ultra' } };
-
 export const UnavailableDevice: Story = { args: { selectedUdid: 'iphone-15' } };
 
-export const Interrupted: Story = {
+export const Closed: Story = {
   args: {
-    status: {
-      phase: 'interrupted',
-      udid: 'iphone-16-pro',
-      connection: 'remote',
-      reason: 'expired',
-    },
+    status: { phase: 'closed', udid: 'iphone-16-pro', operationId: 'op-1', transport: 'remote' },
   },
 };
 
-export const StreamFailed: Story = {
+export const Failed: Story = {
   args: {
     status: {
       phase: 'failed',
       udid: 'iphone-16-pro',
-      error: {
-        code: 'stream-failed',
-        message: 'simctl io recordVideo exited with status 1',
-        retryable: true,
-      },
+      operationId: 'op-1',
+      error: { code: 'failed', message: 'simctl io exited with status 1' },
+    },
+  },
+};
+
+export const TimedOut: Story = {
+  args: {
+    status: {
+      phase: 'failed',
+      udid: 'iphone-16-pro',
+      operationId: 'op-1',
+      error: { code: 'timeout' },
     },
   },
 };
@@ -196,13 +177,13 @@ export const XcodeMissing: Story = {
     selectedUdid: null,
     catalog: {
       phase: 'error',
-      error: { code: 'xcode-missing', message: 'xcrun: error: unable to find utility "simctl"' },
+      error: { code: 'environment', message: 'xcrun: error: unable to find utility "simctl"' },
     },
   },
 };
 
 export const NoSimulators: Story = {
-  args: { selectedUdid: null, catalog: { phase: 'ready', runtimes, devices: [] } },
+  args: { selectedUdid: null, catalog: { phase: 'ready', runtimes: [], devices: [] } },
 };
 
 export const MachineOffline: Story = {
@@ -222,12 +203,5 @@ export const Narrow: Story = {
       </div>
     ),
   ],
-  args: {
-    status: {
-      phase: 'ready',
-      udid: 'iphone-16-pro',
-      viewerUrl: SAMPLE_VIEWER_URL,
-      connection: 'direct',
-    },
-  },
+  args: { status: ready('local'), viewerState: 'ready' },
 };

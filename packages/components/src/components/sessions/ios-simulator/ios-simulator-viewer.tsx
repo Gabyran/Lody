@@ -1,10 +1,17 @@
-import type { CSSProperties } from 'react';
+import { useEffect, useRef, useState, type CSSProperties } from 'react';
 import * as stylex from '@stylexjs/stylex';
 import { colors, shadow } from '@lody/ui/tokens/colors.stylex';
 import { radius, space } from '@lody/ui/tokens/scales.stylex';
-
-/** A modern iPhone in portrait, for a device that reported no screen size. */
-const FALLBACK_ASPECT_RATIO = 9 / 19.5;
+import {
+  IOS_SIMULATOR_VIEWER_INIT,
+  IOS_SIMULATOR_VIEWER_VISIBILITY,
+  getIosSimulatorAspectRatio,
+  parseIosSimulatorViewerState,
+} from '@/lib/ios-simulator/ios-simulator-model';
+import type {
+  IosSimulatorDeviceFamily,
+  IosSimulatorViewerState,
+} from '@/lib/ios-simulator/ios-simulator-types';
 
 const styles = stylex.create({
   /** A size container, so the frame can fit by whichever axis runs out first. */
@@ -33,34 +40,105 @@ const styles = stylex.create({
 
 export type IosSimulatorViewerProps = {
   viewerUrl: string;
+  /** Exact origin of `viewerUrl`, already checked not to be the app's own. */
+  viewerOrigin: string;
+  operationId: string;
   title: string;
-  screen?: { width: number; height: number };
+  family?: IosSimulatorDeviceFamily;
+  /** The panel is on screen. Combined with the document's own visibility. */
+  visible: boolean;
+  onStateChange: (state: IosSimulatorViewerState) => void;
 };
 
-export function getIosSimulatorAspectRatio(screen?: { width: number; height: number }): number {
-  if (!screen || !(screen.width > 0) || !(screen.height > 0)) return FALLBACK_ASPECT_RATIO;
-  return screen.width / screen.height;
+function useDocumentVisible(): boolean {
+  const [visible, setVisible] = useState(
+    () => typeof document === 'undefined' || document.visibilityState !== 'hidden'
+  );
+  useEffect(() => {
+    const update = () => setVisible(document.visibilityState !== 'hidden');
+    document.addEventListener('visibilitychange', update);
+    return () => document.removeEventListener('visibilitychange', update);
+  }, []);
+  return visible;
 }
 
 /**
- * The simulator's screen, fitted whole inside the panel at the device's own
- * aspect ratio. The page inside is the machine's dedicated viewer; this frame
- * only sizes it. It is mounted only while the panel is on screen, so a hidden
- * panel holds no stream open.
+ * The simulator's screen, fitted whole inside the panel. The page inside is
+ * the machine's dedicated viewer, which draws frames and forwards input itself;
+ * this frame sizes it and runs the handshake.
+ *
+ * After each load the panel sends `init` to the frame's exact origin, and from
+ * then on accepts `state` only from that frame's window, that origin and that
+ * operation. Hiding the panel does not unmount the frame — it tells the viewer
+ * it is hidden, and the viewer pauses its stream.
  */
-export function IosSimulatorViewer({ viewerUrl, title, screen }: IosSimulatorViewerProps) {
-  const aspect = { '--ios-simulator-aspect': String(getIosSimulatorAspectRatio(screen)) };
+export function IosSimulatorViewer({
+  viewerUrl,
+  viewerOrigin,
+  operationId,
+  title,
+  family,
+  visible,
+  onStateChange,
+}: IosSimulatorViewerProps) {
+  const frameRef = useRef<HTMLIFrameElement>(null);
+  const [loaded, setLoaded] = useState(false);
+  const sentVisibleRef = useRef<boolean | null>(null);
+  const documentVisible = useDocumentVisible();
+  const effectiveVisible = visible && documentVisible;
+  const visibleRef = useRef(effectiveVisible);
+  visibleRef.current = effectiveVisible;
+  const onStateChangeRef = useRef(onStateChange);
+  onStateChangeRef.current = onStateChange;
+
+  useEffect(() => {
+    const receive = (event: MessageEvent) => {
+      const frameWindow = frameRef.current?.contentWindow;
+      if (!frameWindow || event.source !== frameWindow || event.origin !== viewerOrigin) return;
+      const state = parseIosSimulatorViewerState(event.data, operationId);
+      if (state) onStateChangeRef.current(state);
+    };
+    window.addEventListener('message', receive);
+    return () => window.removeEventListener('message', receive);
+  }, [operationId, viewerOrigin]);
+
+  // A new address is a new document: it has to be greeted again.
+  useEffect(() => setLoaded(false), [viewerUrl]);
+
+  useEffect(() => {
+    if (!loaded || sentVisibleRef.current === effectiveVisible) return;
+    sentVisibleRef.current = effectiveVisible;
+    frameRef.current?.contentWindow?.postMessage(
+      { type: IOS_SIMULATOR_VIEWER_VISIBILITY, operationId, visible: effectiveVisible },
+      viewerOrigin
+    );
+  }, [effectiveVisible, loaded, operationId, viewerOrigin]);
+
+  const handleLoad = () => {
+    sentVisibleRef.current = visibleRef.current;
+    frameRef.current?.contentWindow?.postMessage(
+      { type: IOS_SIMULATOR_VIEWER_INIT, operationId, visible: visibleRef.current },
+      viewerOrigin
+    );
+    setLoaded(true);
+  };
+
+  const aspect = { '--ios-simulator-aspect': String(getIosSimulatorAspectRatio(family)) };
   return (
     <div {...stylex.props(styles.stage)} data-testid="ios-simulator-viewer">
       <iframe
+        ref={frameRef}
         {...stylex.props(styles.frame)}
         style={aspect as CSSProperties}
         src={viewerUrl}
         title={title}
         referrerPolicy="no-referrer"
-        // An opaque origin: the viewer authenticates by its URL capability and
-        // needs no cookies or storage of its own.
-        sandbox="allow-scripts"
+        // The handshake names the viewer's exact origin, so the frame keeps it.
+        // That is safe only because `getIosSimulatorViewerOrigin` rejects a
+        // viewer on the app's own origin; everything else stays sandboxed.
+        // oxlint-disable-next-line react/iframe-missing-sandbox
+        sandbox="allow-scripts allow-same-origin"
+        onLoad={handleLoad}
       />
     </div>
   );
