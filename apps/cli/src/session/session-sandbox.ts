@@ -152,7 +152,8 @@ const defaultSandboxDeps = (): SessionSandboxDeps => ({
   configureExecutionProcess: async (pid: number, logger?: Logger) => {
     await applyExecutionProcessResourceProfile(pid, logger);
   },
-  killPid: (pid: number, signal?: NodeJS.Signals | 0) => nodeProcessLive.kill(pid, signal ?? 'SIGTERM'),
+  killPid: (pid: number, signal?: NodeJS.Signals | 0) =>
+    nodeProcessLive.kill(pid, signal ?? 'SIGTERM'),
 });
 
 const toNodeProcess = (deps: SessionSandboxDeps): NodeProcessApi => ({
