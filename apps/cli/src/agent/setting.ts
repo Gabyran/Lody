@@ -681,10 +681,11 @@ function normalizePathEntry(entry: string): string {
 function pinGhShimBinDirFirst(parts: string[]): string[] {
   const shimDir = normalizePathEntry(getGhShimHostBinDir());
   const index = parts.findIndex((entry) => normalizePathEntry(entry) === shimDir);
-  if (index <= 0) {
+  const shimEntry = parts[index];
+  if (index <= 0 || shimEntry === undefined) {
     return parts;
   }
-  return [parts[index], ...parts.slice(0, index), ...parts.slice(index + 1)];
+  return [shimEntry, ...parts.slice(0, index), ...parts.slice(index + 1)];
 }
 
 export function getDefaultAcpPathEntries(homeDir = homedir(), agentType?: string): string[] {
