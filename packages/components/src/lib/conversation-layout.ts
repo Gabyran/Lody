@@ -35,8 +35,10 @@ export const CONVERSATION_CONTENT_WIDTH_CLASS = `mx-auto w-full max-w-[calc(48re
 /**
  * Wide blocks — tables, fenced code and diffs, Mermaid diagrams, display math,
  * and tool diffs/terminal output — grow past the prose column when their
- * content needs it, centred on the column, up to this cap and to the pane width
- * less `sideReservePx` on each side. Narrower content keeps the column width.
+ * content needs it, centred on the column, up to the pane width less
+ * `sideReservePx` on each side. There is no absolute cap: on a large screen a
+ * long diff line uses the whole pane rather than scrolling beside empty space.
+ * Narrower content keeps the column width.
  *
  * Returned as a CSS length for the `--conversation-wide-block-max-width`
  * variable, which the `.conversation-wide-*` rules in `tailwind/index.css` read.
@@ -44,8 +46,6 @@ export const CONVERSATION_CONTENT_WIDTH_CLASS = `mx-auto w-full max-w-[calc(48re
  * `ContainerQueryProvider`): no container may sit between it and a wide block.
  * Outside the stream the variable is unset and the rules fall back to 100%.
  */
-export const CONVERSATION_WIDE_BLOCK_MAX_WIDTH_REM = 72;
-
 export function conversationWideBlockMaxWidth(sideReservePx: number): string {
-  return `min(100cqw - ${2 * sideReservePx}px, ${CONVERSATION_WIDE_BLOCK_MAX_WIDTH_REM}rem)`;
+  return `calc(100cqw - ${2 * sideReservePx}px)`;
 }

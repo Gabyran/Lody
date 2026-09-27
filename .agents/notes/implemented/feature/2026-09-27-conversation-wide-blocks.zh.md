@@ -10,7 +10,7 @@ Translation: current
 对话栏把内容限制在 768px，让正文保持易读的行长；但表格、代码、图表、公式、diff
 和终端输出的排版由内容决定，而不是由行长决定，即使面板两侧还空着几百像素，它们也只能
 在栏内横向滚动或折行。现在当面板宽度不小于 1024px 时，这些块会按内容需要变宽，居中于
-阅读栏，上限为 72rem，且两侧各留出大纲导轨和边距的宽度；内容本身不宽的块保持栏宽。
+阅读栏，最宽到面板两侧各留出大纲导轨和边距的宽度；内容本身不宽的块保持栏宽。
 这部分推翻了[阅读对比度决策](2026-09-24-reading-contrast.zh.md)：那次审阅认为块伸出
 阅读栏看起来很怪，撤回了更早的一次实现。按内容定宽和 1024px 门槛能否解决这个问题，需要在
 应用中审阅判断。
@@ -28,8 +28,10 @@ Translation: current
   Mermaid 图和独立公式，以及活动行中的工具 diff 和终端输出。正文、标题、列表、引用、
   图片、用户消息和带边框的面板（计划、工具内容里的 Markdown、各种卡片）保持栏宽。
 - **多宽**：`width: max-content`，不窄于阅读栏（`min-width: 100%`），上限为
-  `--conversation-wide-block-max-width` = `min(100cqw - 2 × (导轨 + 18px), 72rem)`。
-  所以短代码块或两列表格仍然正好是栏宽；超过上限的内容继续在块内滚动。
+  `--conversation-wide-block-max-width` = `100cqw - 2 × (导轨 + 18px)`。
+  所以短代码块或两列表格仍然正好是栏宽；比面板还宽的内容继续在块内滚动。
+- **没有绝对上限**：第一版还把块限制在 72rem（1152px）以内。在大屏上审阅时，`diff`
+  代码块停在 1152px 并在大片空白旁横向滚动，违背了这次改动的目的，所以去掉了这个上限。
 - **放在哪**：`left: 50%` 加 `translate: -50%`，无论块多宽都居中于阅读栏。阅读栏本身
   在面板中居中，所以块两侧留白相同，也不会压到左侧的大纲导轨。
 - **何时生效**：仅当面板宽度不小于 1024px（对面板 `@container` 的容器查询）。低于这个
@@ -39,8 +41,7 @@ Translation: current
 
 ## 职责
 
-- `lib/conversation-layout.ts` 负责上限（`conversationWideBlockMaxWidth`、
-  `CONVERSATION_WIDE_BLOCK_MAX_WIDTH_REM`）。
+- `lib/conversation-layout.ts` 负责上限（`conversationWideBlockMaxWidth`）。
 - `ai-gui/view.tsx` 在对话流的滚动容器上设置该变量（预留 `RAIL_WIDTH` + 18px），通过
   `MarkdownBlock` 的 `wideBlocks` 让助手正文参与，并给活动行的 diff 和终端加上
   `conversation-wide-block`。
@@ -63,6 +64,9 @@ Translation: current
   Review，1600px 视口，面板 1150px）：八列表格变为 955px，长代码行和独立公式为
   966–1014px，Mermaid 流程图和折行的终端输出达到 1014px 上限；窄表格、短代码块和自上而下
   的图保持 768px。每个块的中心都与阅读栏中心一致。在 1000px 视口下所有块保持 768px。
+- 去掉 72rem 上限后，把上限变量调到 3000px 模拟大屏面板：长代码行停在 1224px，正好等于
+  它的滚动宽度，不再出现滚动条；其他块都保持各自的内容宽度。块按内容定宽，面板宽度只是
+  上限。
 - 在平移后的块中，Mermaid 的点击激活和以指针为中心的双指缩放仍然正常。
 - 工具 `DiffViewer` 在无头 Storybook 中不渲染正文，改动前后都是如此。一个复刻 `@pierre/diffs` 代码网格（按内容定宽的行号列、
   `1fr` 的代码列、`white-space: pre`）的合成元素在真实包裹层内达到了上限；真实组件未被观察到。

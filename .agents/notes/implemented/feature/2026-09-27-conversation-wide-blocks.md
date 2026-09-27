@@ -11,8 +11,8 @@ The conversation column caps content at 768px so prose keeps a readable measure,
 tables, code, diagrams, display math, diffs and terminal output are laid out by their
 content, not by line length: in the column they scroll sideways or wrap even when the
 pane has hundreds of spare pixels. On a pane of at least 1024px these blocks now grow to
-the width their content needs, centred on the column, up to 72rem and to the pane less
-the outline rail and gutter on each side; narrower content keeps the column width.
+the width their content needs, centred on the column, up to the pane less the outline
+rail and gutter on each side; narrower content keeps the column width.
 This partly reverses the [reading-contrast decision](2026-09-24-reading-contrast.md),
 which reverted an earlier breakout because blocks jutting out of the column looked odd.
 Whether sizing to content and the 1024px gate answer that is a judgement for review in
@@ -33,9 +33,12 @@ a desktop pane the margins beside the column stay empty.
   output in activity rows. Prose, headings, lists, quotes, images, user messages and
   bordered panels (plans, tool content Markdown, cards) keep the column.
 - **How wide**: `width: max-content`, never below the column (`min-width: 100%`), capped
-  by `--conversation-wide-block-max-width` = `min(100cqw - 2 × (rail + 18px), 72rem)`.
+  by `--conversation-wide-block-max-width` = `100cqw - 2 × (rail + 18px)`.
   A short code block or a two-column table therefore keeps exactly the column width, and
-  content wider than the cap still scrolls inside its block.
+  content wider than the pane still scrolls inside its block.
+- **No absolute cap**: a first version also capped blocks at 72rem (1152px). In review
+  on a large screen, a `diff` fence stopped at 1152px and scrolled beside wide empty
+  margins, which defeated the point, so the cap was dropped.
 - **Where**: `left: 50%` plus `translate: -50%` centre the block on the column at any
   width. The column itself is centred in the pane, so the block stays clear of the
   left outline rail at the same margin on both sides.
@@ -47,8 +50,7 @@ a desktop pane the margins beside the column stay empty.
 
 ## Responsibilities
 
-- `lib/conversation-layout.ts` owns the cap (`conversationWideBlockMaxWidth`,
-  `CONVERSATION_WIDE_BLOCK_MAX_WIDTH_REM`).
+- `lib/conversation-layout.ts` owns the cap (`conversationWideBlockMaxWidth`).
 - `ai-gui/view.tsx` sets the variable on the stream's scroll container (reserving
   `RAIL_WIDTH` + 18px), opts assistant prose in through `MarkdownBlock`'s `wideBlocks`,
   and tags activity-row diffs and terminals with `conversation-wide-block`.
@@ -74,6 +76,10 @@ a desktop pane the margins beside the column stay empty.
   the 1014px cap; the narrow table, short code block and top-down diagram stayed at
   768px. Every block's centre matched the column's. At a 1000px viewport every block
   stayed at 768px.
+- Without the 72rem cap, with the cap variable raised to 3000px to stand in for a large
+  pane: the long code line settled at 1224px, exactly its scroll width, and no longer
+  scrolled; every other block kept its own content width. Blocks size to content, and
+  the pane is only an upper bound.
 - Mermaid activation and pointer-anchored pinch zoom still work inside a translated
   block.
 - The tool `DiffViewer` does not render its body in headless Storybook, before or after
