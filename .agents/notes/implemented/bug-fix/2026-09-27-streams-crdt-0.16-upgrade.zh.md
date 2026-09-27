@@ -5,6 +5,8 @@ Translation: current
 
 [English](2026-09-27-streams-crdt-0.16-upgrade.md)
 
+PR：[LodyAI/Lody#1044](https://github.com/LodyAI/Lody/pull/1044)
+
 ## 摘要
 
 presence 可能在慢请求后积压同 key 的过期状态，卡住的 token 回调也可能让请求无限等待。
@@ -71,7 +73,9 @@ CLI presence / CLI machine-monitor / 前端 EphemeralRoomTransport
 针对性检查覆盖 components presence/monitor/recovery（25 项）、shared presence、认证与
 快照 codec（45 项）、CLI presence/monitor/session/document 与 relay authorship（45 项），
 以及 RPC（119 项通过，3 项需显式启用的服务集成测试跳过）。受影响包类型检查、静态边界检查、
-格式化、冻结锁文件离线安装均通过。最终全仓检查结果记录于 PR。
+格式化、冻结锁文件离线安装、文档检查和最终完整 `pnpm check` 均通过。全仓运行包括
+components 4,338 项、CLI 3,097 项、shared 1,214 项、RPC 119 项测试；4 项 CLI 与
+3 项服务集成测试保留原有跳过条件。
 
 本次没有部署生产，也没有进行线上 presence 验收。服务端房间保留、缓冲 16、服务端 TTL 90s
 需要另行部署。现有客户端 presence 时效和 TTL 常量不变。

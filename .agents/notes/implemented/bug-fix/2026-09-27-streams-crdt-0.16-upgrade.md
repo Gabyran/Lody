@@ -5,6 +5,8 @@ Translation: current
 
 [中文](2026-09-27-streams-crdt-0.16-upgrade.zh.md)
 
+PR: [LodyAI/Lody#1044](https://github.com/LodyAI/Lody/pull/1044)
+
 ## Abstract
 
 Presence could queue obsolete same-key states behind a slow request, and a stalled token
@@ -86,8 +88,10 @@ without removing its rate/size invariant.
 Targeted checks cover components presence/monitor/recovery (25 tests), shared presence,
 authentication and snapshot codec (45), CLI presence/monitor/session/document and relay
 authorship (45), and RPC (119 passed; 3 opt-in service integration tests skipped).
-Affected package typechecks, static boundary checks, formatting, and frozen offline
-installation pass. Final repository-wide checks are recorded in the PR.
+Affected package typechecks, static boundary checks, formatting, frozen offline
+installation, docs check, and the final full `pnpm check` pass. The full run includes
+4,338 components tests, 3,097 CLI tests, 1,214 shared tests, and 119 RPC tests;
+4 CLI and 3 service integration tests retain their existing skip conditions.
 
 No production deployment or live presence acceptance was performed. Server room
 retention, buffer 16, and server TTL 90s require a separate deployment. Existing local
