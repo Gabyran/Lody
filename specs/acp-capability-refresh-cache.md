@@ -12,18 +12,37 @@ and the answer almost never differs from the one already stored.
 
 ## What the machine promises
 
-The machine answers from the capability entry it already persisted when, and only when, that
-entry was produced by a real probe and its `capabilitySourceVersion` is exactly the version the
-current launch inputs would produce. That version covers everything Lody controls: the ACP
-adapter build, the managed runtime version actually installed, a runtime-override path, a custom
-launch command, and the environment values that change an agent's identity. Changing any of them
-is a miss, so a cached answer can never describe a different binary than the one Lody would run.
+The machine answers from the capability entry it already persisted when, and only when, all of
+these hold:
+
+- The entry was produced by a real probe.
+- Its `capabilitySourceVersion` is exactly the version the current launch inputs would produce.
+  That version identifies the binary: the ACP adapter build, the managed runtime version actually
+  installed, a runtime-override path or extension set, and a custom launch command.
+- The machine itself recorded that the entry came from exactly the current launch inputs,
+  **including the config's environment**. The source version cannot carry this: for custom and
+  registry configs, and for every builtin except DeepSeek's endpoint, it does not depend on the
+  environment at all, yet a token or endpoint change can change what the agent advertises.
+
+Changing any launch input — binary, override, command, or any environment value — is a miss.
+
+The launch-input record is deliberately kept only in the answering machine's memory. The entry
+lives in the Machine Flock document, which syncs to the cloud, and neither an environment value
+nor any derivative of one — a hash of a low-entropy token can be recovered by enumeration — may be
+written there. The cost is that a machine that restarts cannot attribute an existing entry to its
+current inputs, so it probes each config once before trusting the cache again.
 
 An entry the machine cannot key on is never reused. If the expected version depends on work the
 machine refuses to do without being asked — a managed runtime that is not installed yet — the
 machine probes instead of guessing the version it would install. Entries older than a bounded
 lifetime are re-probed, because an agent's slash commands, sub-agents, and model entitlements can
 change in the agent's own configuration where Lody cannot see them.
+
+The lifetime is measured from the last time a probe or a created session confirmed the entry,
+not from the last time its content changed. Writers still skip rewriting unchanged content, because
+every write costs a Flock write, flush and sync, but only while the entry is younger than half its
+lifetime; after that an unchanged confirmation renews it. Without renewal an entry whose content
+never changes would expire once and then miss on every request that followed.
 
 A cached answer is indistinguishable from a probed one to the caller: it carries the same modes,
 models, config options, commands, and capability entry, so a client writes it into its Machine
@@ -69,8 +88,11 @@ provenance), `packages/shared/tests/local-session-control.test.ts` and
 transports), `packages/shared/tests/machine-protocol-capabilities.test.ts` and
 `packages/loro-streams-rpc/tests/loro-streams-rpc.test.ts` (negotiation: the emitted payload is
 validated against a previous-generation schema derived from the current one, on both transports),
-`apps/cli/tests/session-execution-service.test.ts` (cache hit starts no agent; override change,
-expiry, and `force` all do), `apps/cli/tests/agent-setting.test.ts` (the expected version equals
+`apps/cli/tests/session-execution-service.test.ts` over a real `MachineDocument` (cache hit
+starts no agent; override change, expiry, an environment edit, a restart, and `force` all do; an
+expired entry re-probed with identical content is served from the cache again; a young one is not
+rewritten; no environment value or digest prefix reaches the persisted rows),
+`apps/cli/src/lib/loro/machine-document-capabilities.test.ts` (renewal threshold), `apps/cli/tests/agent-setting.test.ts` (the expected version equals
 what a launch stamps, and is unavailable while a managed runtime is missing),
 `packages/components/tests/startup-acp-capabilities-refresh.test.ts` (an aborted pass does not
 re-probe what already answered). Measured behavior before the change is recorded in

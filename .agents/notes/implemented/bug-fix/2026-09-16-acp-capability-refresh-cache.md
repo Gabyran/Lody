@@ -14,7 +14,10 @@ one of those probes recomputed the capability entry that was already stored unde
 at all, and the renderer's "one startup pass" gate was a boolean that any abort reset, so each
 presence reconnect re-probed every agent config. The machine now answers from the persisted entry
 when the entry came from a real probe, its source version is exactly what the current launch
-inputs would produce, and it is younger than 24 hours; startup discovery now records completion
+inputs would produce, the machine itself recorded — in memory only, never in the synced document —
+that the entry came from the current launch inputs including the environment, and it was confirmed
+within 24 hours; an unchanged confirmation renews it once it is past half that age, so a stable
+entry does not expire into a permanent miss. Startup discovery now records completion
 per config, so restarting an interrupted pass re-probes nothing that already answered. Explicit
 probes — Settings refresh, post-authentication verification, onboarding's provider test, provider
 setup — set a new `force` flag, negotiated through `MachineMeta.protocolCapabilities` because a
@@ -84,7 +87,8 @@ how often it re-arms or why the boolean is false.
 
 `refreshMachineAcpCapabilitiesForConfig` consults the persisted entry before the existing
 in-flight dedupe. A hit requires all of: a resolvable expected source version, an exact
-`sourceVersion` match at the current `cacheVersion`, `provenance: 'runtime'`, and an age within
+`sourceVersion` match at the current `cacheVersion`, `provenance: 'runtime'`, a launch-input
+record showing this process wrote the entry from the current inputs (see below), and an age within
 `ACP_CAPABILITY_REFRESH_CACHE_TTL_MS`. `decideAcpCapabilityRefreshCache` in `@lody/shared` owns
 that decision and names each miss reason, which the machine logs.
 
@@ -98,17 +102,88 @@ happened. It also mirrors `resolveManagedRuntimeForLaunch` by enqueueing the upd
 `updateAvailable`: that enqueue was previously reached only through launches, and idle capability
 refreshes were in practice the thing discovering managed-runtime updates.
 
+Rebasing onto main brought a new managed builtin, `pi`, and the exhaustive override map failed to
+compile until it was considered — the purpose of declaring it exhaustively. Pi has no replacement
+binary; its override is an extension list, which the launcher answers by calling
+`ensureCurrentRuntime` (installing the target version first) instead of using what is installed.
+The resolver therefore returns `undefined` for Pi with extensions whenever the installed version is
+not the target, since that is not the runtime a probe would start.
+
+## Renewing an unchanged entry (review correction)
+
+Review caught that the first revision could not keep its own promise. `MachineDocument.
+updateAcpCapabilities` compares the new entry with the stored one while ignoring `fetchedAt` and
+returns the stored entry untouched when they match. That skip predates this change and was
+harmless while nothing read `fetchedAt`; once the TTL did, an entry whose content never changes —
+the common case — expired once and was then re-probed by every later unforced request, forever,
+because each probe produced identical content and so never moved `fetchedAt`. It also falsified
+this note's own claim that created sessions refresh the entry "for free": an unchanged session
+report was skipped in exactly the same way.
+
+The skip exists for a real reason: without it every probe and every created session costs a Flock
+write, a flush and a Machine Flock sync. The writer now keeps skipping unchanged content while the
+stored entry is younger than `ACP_CAPABILITY_FETCH_TIME_RENEW_AFTER_MS` and rewrites it — only to
+move `fetchedAt` — once it is older.
+
+Half the TTL is chosen because it is the value that yields both guarantees that matter. Writes are
+bounded: an unchanged entry is rewritten at most once per config per 12 hours however often
+sessions start or refreshes are forced. And the free-refresh claim becomes true: an agent that
+starts at least one session per 12 hours has its entry renewed before it can expire, so it never
+needs a probe at all. A threshold equal to the TTL would bound writes the same way but let an
+entry used every 20 hours still lapse; a smaller one only adds writes. Probes after expiry always
+renew, since an expired entry is by definition past half its lifetime.
+
 ### Why the TTL is 24 hours
 
 The source version already covers every input Lody controls, so the TTL only bounds drift Lody
 cannot observe: slash commands, sub-agents, or model entitlements a user changes in the agent's own
 configuration. Two paths converge faster than any TTL — `scheduleCreatedSessionCapabilityUpdate`
-rewrites the entry from every real session's `session/new` response, so agents people actually use
-are refreshed for free, and Settings offers an explicit forced refresh. What the TTL is left to
+confirms the entry from every real session's `session/new` response (renewing it once it is past
+half its lifetime, see below — the first revision claimed this without it being true), so agents
+people actually use are refreshed without a probe, and Settings offers an explicit forced refresh. What the TTL is left to
 cover is agents nobody launches, where a shorter value buys little: an hour would cost ~144
 probes/day on this machine, a day costs ~6, and both are far below the measured ~1,700. A
 future-dated `fetchedAt` counts as fresh rather than as a reason to re-probe, because writer and
 reader stamp it from the same server clock, so a negative age means a clock adjustment.
+
+## Environment edits, and why the record lives only in memory (review correction)
+
+The first revision also claimed that override, env and custom-command changes always miss. The env
+half was wrong. `serializeCustomAcpLaunchSpec` is `command` plus `args`; a registry version is
+`id@version`; among builtins only DeepSeek digests one environment value, its base URL. Yet
+`fetchAcpCapabilities` merges the config environment into the spawned agent, and a token, endpoint
+or account switch can change the models and options it advertises. An edited environment therefore
+kept matching the stored `sourceVersion` and was answered with stale capabilities for up to a day.
+
+The hard constraint is where an environment identity may be stored. Capability entries live in the
+Machine Flock document, which syncs to the cloud, and `apps/cli/AGENTS.md` already forbids putting
+an API key or a derivative of it into a cache key: a digest of a low-entropy token is recoverable by
+enumeration, which the review rules class as a secret leak.
+
+Chosen: the answering daemon keeps, per config, a SHA-256 fingerprint of everything the probe was
+launched with — the same serialization the in-flight dedupe already keys on, environment included —
+in a process-memory map. It is set whenever this process writes or confirms an entry, by a probe or
+by a created session, and a cache hit requires it to equal the fingerprint of the current inputs.
+Nothing new is persisted, synced or logged. The hash exists only so the long-lived map does not hold
+another plaintext copy of the environment.
+
+The cost is explicit: after a daemon restart the map is empty, so each config probes once before
+the cache is trusted again. That is a handful of probes per daemon lifetime — about what the
+startup pass did before this change anyway — against the ~1,700 per day measured.
+
+Alternatives, both rejected:
+
+- **A revision or update timestamp on the `agentConfig` row that joins the hit decision.** The row
+  has no such field; adding one is a schema change every writer must adopt, and an edit from an
+  older renderer or CLI would not bump it, so the cache would stay stale exactly in mixed-version
+  operation.
+- **Invalidating the capability entry when the config is edited.** Also writer-dependent — every
+  edit path in every client version must remember to do it — and a missed path fails silently in
+  the stale direction.
+
+The in-memory record compares the inputs the daemon is about to launch with, so it is correct no
+matter which client, in which version, made the edit. It also covers every launch input, so it
+subsumes rather than duplicates the DeepSeek endpoint digest.
 
 ## `force` has to be negotiated, and omission is the mechanism
 
@@ -191,7 +266,12 @@ inventing data, which is why this note takes that route instead.
 
 Behavior is covered by the tests listed in [the Spec](../../../../specs/acp-capability-refresh-cache.md);
 the machine-side tests assert that no probe is started, not that a mock was called a certain number
-of times. The negotiation tests validate the payload a client actually emits against a
+of times, and since the review corrections they run over a real `MachineDocument` on an in-memory
+Flock so the skip/renew/overwrite decisions are the production ones. Both corrections were ablated:
+disabling renewal fails the writer threshold test and the "expired, re-probed identical, then
+served from cache" test; treating launch inputs as always matching fails the environment-edit and
+restart tests. The persisted-rows test checks for each token, for its SHA-256, and for the SHA-256
+of its `KEY=value` pair, down to the 12-hex-character prefix length this codebase stores elsewhere. The negotiation tests validate the payload a client actually emits against a
 previous-generation schema **derived from the current one** (`.omit({ force: true })`), so the
 reconstruction cannot drift away from what shipped, on both transports.
 

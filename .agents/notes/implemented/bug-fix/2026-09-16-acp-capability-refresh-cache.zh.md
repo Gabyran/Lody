@@ -12,7 +12,9 @@ Translation: current
 在 `capabilitySourceVersion` 未变的情况下完全一致。两个彼此独立的缺陷共同造成了它：机器侧
 根本没有缓存命中路径；渲染端"只跑一遍"的闸门是一个布尔值，任何 abort 都会把它清掉，于是每
 一次 presence 重连都会重新探测全部 agent config。现在机器在条目确实来自真实探测、其 source
-version 恰等于当前启动输入会产生的版本、且未超过 24 小时时，直接用该条目回答；启动期发现改为
+version 恰等于当前启动输入会产生的版本、机器自己记录过（只在内存中，绝不写入同步文档）该条目
+正是由包括环境变量在内的当前启动输入产生、且在 24 小时内被确认过时，直接用该条目回答；内容未变
+的确认会在条目超过一半寿命后为其续期，因此稳定的条目不会在过期后变成永久 miss。启动期发现改为
 按 config 记录完成情况，因此被打断的一遍重启后不会重复探测任何已回答的 config。显式探测——
 设置页刷新、认证后校验、引导流程的 Provider 测试、provider setup——都设置新增的 `force` 标志，
 并通过 `MachineMeta.protocolCapabilities` 协商，因为早于该字段的 daemon 会严格解析请求并把它
@@ -72,7 +74,8 @@ grok——既产生不了观测到的 `pi-acp`/`opencode`/`kimi` 请求，也不
 
 `refreshMachineAcpCapabilitiesForConfig` 在既有的 in-flight 去重之前先查已持久化条目。命中要求
 同时满足：期望 source version 可解析、在当前 `cacheVersion` 下 `sourceVersion` 完全相等、
-`provenance: 'runtime'`、且年龄在 `ACP_CAPABILITY_REFRESH_CACHE_TTL_MS` 之内。该判定由
+`provenance: 'runtime'`、存在一条启动输入记录表明本进程是由当前输入写下该条目的（见下文）、
+且年龄在 `ACP_CAPABILITY_REFRESH_CACHE_TTL_MS` 之内。该判定由
 `@lody/shared` 的 `decideAcpCapabilityRefreshCache` 拥有，并给出每种 miss 的原因，机器会记录它。
 
 不显然的一点是如何算出"一次探测会打上的版本"。存下的版本是*启动器*产生的，对 managed builtin
@@ -84,15 +87,70 @@ grok——既产生不了观测到的 `pi-acp`/`opencode`/`kimi` 请求，也不
 协调器入队。此前这个入队只能经由启动路径到达，而实践中恰恰是空闲期的能力刷新在发现 managed
 runtime 更新。
 
+rebase 到 main 带来了一个新的 managed builtin `pi`，穷举的 override 映射在考虑它之前编译失败
+——这正是穷举声明的用意。Pi 没有替代二进制；它的 override 是扩展列表，启动器对此调用
+`ensureCurrentRuntime`（先安装目标版本），而不是使用已安装的版本。因此当已安装版本不是目标版本
+时，带扩展的 Pi 在解析器里返回 `undefined`，因为那并不是探测会启动的 runtime。
+
+## 为未变的条目续期（评审更正）
+
+评审发现第一版无法兑现它自己的承诺。`MachineDocument.updateAcpCapabilities` 在忽略
+`fetchedAt` 的前提下比较新旧条目，相同则原样返回旧条目。这个跳过早于本改动就存在，在没人读
+`fetchedAt` 时无害；一旦 TTL 依据它，内容从不变化的条目——常见情况——过期一次之后，此后每一个
+非强制请求都会重新探测，永远如此，因为每次探测得到相同内容，`fetchedAt` 永远不动。它也证伪了
+本记录自己的说法——新建会话会"免费"刷新条目：内容未变的会话上报也以完全相同的方式被跳过。
+
+这个跳过有真实的理由：没有它，每次探测和每个新建会话都要付出一次 Flock 写入、flush 与 Machine
+Flock 同步。现在写入方在已存条目年龄小于 `ACP_CAPABILITY_FETCH_TIME_RENEW_AFTER_MS` 时仍跳过
+未变内容，超过之后则重写它——只为推进 `fetchedAt`。
+
+取 TTL 的一半，是因为这是同时给出两项关键保证的取值。写入有界：无论会话启动多频繁、强制刷新多
+频繁，未变条目每个 config 每 12 小时至多重写一次。免费刷新的说法也随之成立：一个每 12 小时至少
+启动一次会话的 Agent，其条目会在过期前被续期，因此根本不需要探测。阈值取整个 TTL 也能同样约束
+写入，却会让每 20 小时用一次的条目照样过期；取更小的值只会增加写入。过期后的探测总会续期，因为
+过期条目必然已超过一半寿命。
+
 ### TTL 为何取 24 小时
 
 source version 已覆盖 Lody 能控制的全部输入，所以 TTL 只用来限定 Lody 观察不到的漂移：用户在
 Agent 自己的配置里改动的斜杠命令、子 Agent 或模型权限。有两条路径比任何 TTL 都收敛得更快——
-`scheduleCreatedSessionCapabilityUpdate` 会用每个真实会话的 `session/new` 响应重写条目，所以
-真正在用的 Agent 是免费刷新的；设置页还提供显式强制刷新。留给 TTL 覆盖的只剩没人启动的 Agent，
+`scheduleCreatedSessionCapabilityUpdate` 会用每个真实会话的 `session/new` 响应确认条目（在其
+超过一半寿命后续期，见下文——第一版在这一点尚不成立时就这么写了），所以真正在用的 Agent 无需
+探测即可刷新；设置页还提供显式强制刷新。留给 TTL 覆盖的只剩没人启动的 Agent，
 在那里取更短的值收益很小：一小时在这台机器上约 144 次探测/天，一天约 6 次，两者都远低于实测的
 约 1700 次。`fetchedAt` 落在未来算作新鲜而不是重探的理由，因为写方与读方用的是同一个服务器时钟，
 负年龄意味着时钟调整。
+
+## 环境变量编辑，以及为何记录只放在内存里（评审更正）
+
+第一版还声称 override、env 与自定义命令的变化总会 miss。env 这一半是错的。
+`serializeCustomAcpLaunchSpec` 只是 `command` 加 `args`；registry 版本是 `id@version`；builtin
+中只有 DeepSeek 摘要了一个环境变量值，即它的 base URL。可 `fetchAcpCapabilities` 会把 config
+环境变量合并进被启动的 Agent，token、endpoint 或账号的切换都可能改变它声明的模型与选项。于是
+被编辑过的环境变量仍与已存的 `sourceVersion` 匹配，最长一天内都会拿到过期的能力。
+
+硬约束在于环境变量的身份可以存放在哪里。能力条目存在 Machine Flock 文档中，该文档会同步上云；
+`apps/cli/AGENTS.md` 已禁止把 API key 或其派生值放进缓存键：低熵 token 的摘要可被穷举还原，
+按评审规则属于 secret leak。
+
+选定方案：应答的 daemon 为每个 config 在进程内存的 map 中保存一份 SHA-256 指纹，覆盖探测启动时
+用到的一切——与 in-flight 去重已在使用的同一序列化，含环境变量。每当本进程写入或确认一个条目
+（无论经由探测还是新建会话）就设置它；缓存命中要求它等于当前输入的指纹。没有任何新内容被持久化、
+同步或记录日志。做哈希只是为了不让这个长寿命的 map 再多持有一份环境变量明文。
+
+代价是明确的：daemon 重启后 map 为空，每个 config 会先探测一次，之后才再次信任缓存。每个 daemon
+生命周期就是寥寥几次探测——大致相当于本改动之前启动扫描本来就会做的——对比实测的每天约 1700 次。
+
+两个替代方案，均否决：
+
+- **在 `agentConfig` 行上加 revision 或更新时间，参与命中判定。** 该行没有这样的字段；加一个就是
+  每个写入方都得采用的 schema 变更，而较旧的渲染端或 CLI 编辑时不会推进它，于是恰恰在混合版本
+  运行期间缓存会保持过期。
+- **在 config 被编辑时让能力条目失效。** 同样依赖写入方——每个客户端版本里的每条编辑路径都得
+  记得这么做——漏掉一条就会在过期方向上静默失败。
+
+内存记录比较的是 daemon 即将用来启动的输入，因此无论是哪个客户端、哪个版本做的编辑，它都正确。
+它也覆盖全部启动输入，因此是吸收而非重复了 DeepSeek endpoint 摘要。
 
 ## `force` 必须协商，而"省略"就是机制本身
 
@@ -165,7 +223,11 @@ CLI 的进程内调用方——`session-execution-service.ts` 里认证后的校
 ## 验证与界限
 
 行为覆盖见 [Spec](../../../../specs/acp-capability-refresh-cache.md) 中列出的测试；机器侧测试
-断言的是"没有启动探测"，而不是某个 mock 被调用了几次。协商测试把客户端实际发出的 payload 对照
+断言的是"没有启动探测"，而不是某个 mock 被调用了几次；评审更正之后，这些测试经由内存 Flock 上
+的真实 `MachineDocument` 运行，因此跳过/续期/覆盖的决定都是生产环境的决定。两处更正都做过消融：
+关闭续期会让写入阈值测试和"过期、探测出相同内容、然后由缓存回答"测试失败；把启动输入一律视为
+匹配会让环境变量编辑测试与重启测试失败。持久化行测试逐一检查每个 token、它的 SHA-256，以及其
+`KEY=value` 对的 SHA-256，直到本代码库其他地方存储的 12 位十六进制前缀长度。协商测试把客户端实际发出的 payload 对照
 一份**由当前 schema 派生**的上一代 schema（`.omit({ force: true })`）校验，因此该重建不会与实际
 发布过的形态漂移，两条传输都覆盖。
 

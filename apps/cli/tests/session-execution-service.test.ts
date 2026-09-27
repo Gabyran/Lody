@@ -4,6 +4,8 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
+import type { LoroRepo } from 'loro-repo';
 import { Effect, Fiber } from 'effect';
 import {
   RequestError,
@@ -25,6 +27,7 @@ import {
   type ACPSessionId,
   type AgentConfigMeta,
   type AgentConfigId,
+  type MachineFlockKey,
   type ChatFailedReason,
   type LocalProjectId,
   type MachineId,
@@ -36,7 +39,7 @@ import {
   type WorkspaceId,
 } from '@lody/shared';
 import type { SessionManager } from '../src/session/session-manager';
-import { SessionDocument, type LoroDocumentManager } from '../src/lib/loro/doc';
+import { MachineDocument, SessionDocument, type LoroDocumentManager } from '../src/lib/loro/doc';
 import { composeTestSessionDoc } from './session-doc-fixture';
 import { Session } from '../src/session/session';
 import { SessionEditAndResendService } from '../src/session/session-edit-and-resend-service';
@@ -8073,65 +8076,28 @@ describe('SessionExecutionService', () => {
   });
 
   describe('ACP capability refresh cache', () => {
-    const cachedSourceVersion = 'registry:deepseek:9.9.9';
-    const createCachedCapability = (
-      overrides: Partial<AcpCapabilityCacheEntry> = {}
-    ): AcpCapabilityCacheEntry => ({
-      cliType: 'registry',
-      agentType: 'deepseek',
-      cacheVersion: ACP_CAPABILITY_CACHE_VERSION,
-      provenance: 'runtime',
-      sourceVersion: cachedSourceVersion,
-      modes: [{ id: 'default', name: 'Default' }],
-      models: [{ modelId: 'kimi-k3', name: 'Kimi K3' }],
-      configOptions: [
-        {
-          id: 'model',
-          name: 'Model',
-          category: 'model',
-          type: 'select',
-          currentValue: 'kimi-k3',
-          options: [{ value: 'kimi-k3', name: 'Kimi K3' }],
-        },
-      ],
-      availableCommands: [{ name: 'review' }],
-      sessionFork: false,
-      acknowledgedSteer: true,
-      sessionForkWorktree: false,
-      fetchedAt: Date.now(),
-      ...overrides,
-    });
+    const sourceVersion = 'opencode@1.0.0';
+    const secretToken = 'sk-test-9f3a-low-entropy-token';
 
-    const createCacheService = (args: {
-      capability?: AcpCapabilityCacheEntry;
-      expectedSourceVersion?: string;
-    }) => {
-      const fetchAcpCapabilities = vi.fn(async () => ({ modes: [], models: [] }));
-      const updateAcpCapabilities = vi.fn(async () => args.capability);
-      const deps = createBaseDeps({
-        workspaceDocument: {
-          repo: {
-            upsertDocMeta: vi.fn(async () => {}),
-            getDocMeta: vi.fn(async () => undefined),
-          },
-          getOrCreateSessionDoc: vi.fn(),
-          updateAcpCapabilities,
-          getAcpCapabilities: vi.fn(async () => args.capability),
-          getAgentConfigForMachineLaunch: vi.fn(async () =>
-            createLaunchConfig({ agentType: 'deepseek' })
-          ),
-        } as unknown as LoroDocumentManager,
-        fetchAcpCapabilities,
-        resolveAcpCapabilitySourceVersion: vi.fn(
-          async () => args.expectedSourceVersion ?? cachedSourceVersion
-        ),
-      });
-      return {
-        service: new SessionExecutionService(deps),
-        fetchAcpCapabilities,
-        updateAcpCapabilities,
-      };
-    };
+    /** Machine Flock rows in memory, behind the real MachineDocument writer. */
+    class InMemoryMachineFlock {
+      readonly rows = new Map<string, { key: MachineFlockKey; value: unknown }>();
+      commits = 0;
+      scan(options?: { prefix?: readonly unknown[] }) {
+        return [...this.rows.values()].filter((row) =>
+          options?.prefix ? options.prefix.every((part, index) => row.key[index] === part) : true
+        );
+      }
+      set(key: MachineFlockKey, value: unknown): void {
+        this.rows.set(JSON.stringify(key), { key: [...key] as MachineFlockKey, value });
+      }
+      delete(key: MachineFlockKey): void {
+        this.rows.delete(JSON.stringify(key));
+      }
+      commit(): void {
+        this.commits += 1;
+      }
+    }
 
     const request = {
       type: 'machine/acp-capabilities-refresh' as const,
@@ -8140,56 +8106,34 @@ describe('SessionExecutionService', () => {
       configId: capabilityConfigId,
     };
 
-    it('answers from the persisted entry without starting an agent', async () => {
-      const capability = createCachedCapability();
-      const { service, fetchAcpCapabilities, updateAcpCapabilities } = createCacheService({
-        capability,
-      });
-
-      await expect(service.refreshMachineAcpCapabilities(request)).resolves.toEqual({
-        type: 'machine/acp-capabilities-refresh_response',
-        machineId: 'machine-1',
-        configId: capabilityConfigId,
+    /**
+     * A service whose capability reads and writes go through a real
+     * MachineDocument, so persistence decisions (skip, renew, overwrite) are the
+     * production ones. Probes always report the same capabilities.
+     */
+    const createHarness = (
+      options: {
+        env?: Record<string, string>;
+        expectedSourceVersion?: () => string | undefined;
+        getAcpCapabilities?: () => Promise<AcpCapabilityCacheEntry | undefined>;
+      } = {}
+    ) => {
+      const flock = new InMemoryMachineFlock();
+      const machine = new MachineDocument(
+        {
+          openFlockDoc: vi.fn(async () => ({ flock, syncOnce: vi.fn(async () => undefined) })),
+          flush: vi.fn(async () => undefined),
+        } as unknown as LoroRepo,
+        'workspace-1' as WorkspaceId,
+        'machine-1' as MachineId,
+        () => {}
+      );
+      let launchConfig = createLaunchConfig({
         cliType: 'registry',
-        agentType: 'deepseek',
-        success: true,
-        modes: [{ id: 'default', name: 'Default', description: undefined }],
-        models: [{ modelId: 'kimi-k3', name: 'Kimi K3', description: undefined }],
-        configOptions: [{ id: 'model', name: 'Model', category: 'model', optionCount: 1 }],
-        capability,
-        availableCommands: [{ name: 'review' }],
+        agentType: 'opencode',
+        env: options.env ?? { OPENCODE_API_KEY: secretToken },
       });
-      expect(fetchAcpCapabilities).not.toHaveBeenCalled();
-      expect(updateAcpCapabilities).not.toHaveBeenCalled();
-    });
-
-    it('starts the agent when the launch inputs no longer produce the stored source version', async () => {
-      const { service, fetchAcpCapabilities } = createCacheService({
-        capability: createCachedCapability(),
-        expectedSourceVersion: `${cachedSourceVersion}+override:other-binary`,
-      });
-
-      await expect(service.refreshMachineAcpCapabilities(request)).resolves.toEqual(
-        expect.objectContaining({ success: true })
-      );
-      expect(fetchAcpCapabilities).toHaveBeenCalledTimes(1);
-    });
-
-    it('starts the agent when the stored entry is older than the cache lifetime', async () => {
-      const { service, fetchAcpCapabilities } = createCacheService({
-        capability: createCachedCapability({
-          fetchedAt: Date.now() - ACP_CAPABILITY_REFRESH_CACHE_TTL_MS - 1,
-        }),
-      });
-
-      await expect(service.refreshMachineAcpCapabilities(request)).resolves.toEqual(
-        expect.objectContaining({ success: true })
-      );
-      expect(fetchAcpCapabilities).toHaveBeenCalledTimes(1);
-    });
-
-    it('reports a failed refresh when the persisted entry cannot be read', async () => {
-      const fetchAcpCapabilities = vi.fn(async () => ({ modes: [], models: [] }));
+      let probes = 0;
       const deps = createBaseDeps({
         workspaceDocument: {
           repo: {
@@ -8197,41 +8141,204 @@ describe('SessionExecutionService', () => {
             getDocMeta: vi.fn(async () => undefined),
           },
           getOrCreateSessionDoc: vi.fn(),
-          updateAcpCapabilities: vi.fn(async () => {}),
-          getAcpCapabilities: vi.fn(async () => {
-            throw new Error('machine flock document is unreadable');
-          }),
-          getAgentConfigForMachineLaunch: vi.fn(async () =>
-            createLaunchConfig({ agentType: 'deepseek' })
-          ),
+          getAcpCapabilities:
+            options.getAcpCapabilities ??
+            ((_machineId: MachineId, configId: AgentConfigId) =>
+              machine.getAcpCapabilities(configId)),
+          updateAcpCapabilities: (
+            _machineId: MachineId,
+            ...rest: Parameters<MachineDocument['updateAcpCapabilities']>
+          ) => machine.updateAcpCapabilities(...rest),
+          getAgentConfigForMachineLaunch: vi.fn(async () => launchConfig),
         } as unknown as LoroDocumentManager,
-        fetchAcpCapabilities,
-        resolveAcpCapabilitySourceVersion: vi.fn(async () => cachedSourceVersion),
+        fetchAcpCapabilities: async () => {
+          probes += 1;
+          return {
+            modes: [{ id: 'default', name: 'Default' }],
+            models: [{ modelId: 'model-a', name: 'Model A' }],
+            availableCommands: [{ name: 'review' }],
+            sessionFork: false,
+            acknowledgedSteer: true,
+            capabilitySourceVersion: sourceVersion,
+          };
+        },
+        resolveAcpCapabilitySourceVersion: async () =>
+          options.expectedSourceVersion ? options.expectedSourceVersion() : sourceVersion,
       });
+      return {
+        service: new SessionExecutionService(deps),
+        flock,
+        probes: () => probes,
+        editEnv: (env: Record<string, string>) => {
+          launchConfig = { ...launchConfig, env };
+        },
+        storedEntry: () =>
+          [...flock.rows.values()].find((row) => row.key[0] === 'acpCapability')?.value as
+            | AcpCapabilityCacheEntry
+            | undefined,
+      };
+    };
 
-      await expect(
-        new SessionExecutionService(deps).refreshMachineAcpCapabilities(request)
-      ).resolves.toEqual(
-        expect.objectContaining({
+    const start = new Date('2026-09-20T00:00:00.000Z').getTime();
+    const withClock = async (run: () => Promise<void>) => {
+      // Only Date is faked: the refresh path has no timers, and freezing the
+      // scheduler would stall the service's own promise chains.
+      vi.useFakeTimers({ toFake: ['Date'] });
+      vi.setSystemTime(start);
+      try {
+        await run();
+      } finally {
+        vi.useRealTimers();
+      }
+    };
+
+    it('answers from the persisted entry without starting an agent once it has probed it', () =>
+      withClock(async () => {
+        const harness = createHarness();
+
+        await harness.service.refreshMachineAcpCapabilities(request);
+        const cached = await harness.service.refreshMachineAcpCapabilities(request);
+
+        expect(harness.probes()).toBe(1);
+        expect(cached).toEqual({
           type: 'machine/acp-capabilities-refresh_response',
-          success: false,
-          error: expect.stringContaining('machine flock document is unreadable'),
-        })
-      );
-      expect(fetchAcpCapabilities).not.toHaveBeenCalled();
-    });
+          machineId: 'machine-1',
+          configId: capabilityConfigId,
+          cliType: 'registry',
+          agentType: 'opencode',
+          success: true,
+          modes: [{ id: 'default', name: 'Default', description: undefined }],
+          models: [{ modelId: 'model-a', name: 'Model A', description: undefined }],
+          configOptions: undefined,
+          capability: harness.storedEntry(),
+          availableCommands: [{ name: 'review' }],
+        });
+      }));
 
-    it('starts the agent for a forced refresh even when the stored entry is current', async () => {
-      const { service, fetchAcpCapabilities, updateAcpCapabilities } = createCacheService({
-        capability: createCachedCapability(),
-      });
+    it('keeps answering from the cache after an expired entry is re-probed with identical content', () =>
+      withClock(async () => {
+        const harness = createHarness();
+        await harness.service.refreshMachineAcpCapabilities(request);
 
-      await expect(
-        service.refreshMachineAcpCapabilities({ ...request, force: true })
-      ).resolves.toEqual(expect.objectContaining({ success: true }));
-      expect(fetchAcpCapabilities).toHaveBeenCalledTimes(1);
-      expect(updateAcpCapabilities).toHaveBeenCalledTimes(1);
-    });
+        vi.setSystemTime(start + ACP_CAPABILITY_REFRESH_CACHE_TTL_MS + 1);
+        await harness.service.refreshMachineAcpCapabilities(request);
+        expect(harness.probes()).toBe(2);
+
+        // The probe found nothing new, yet the entry must be fresh again: otherwise
+        // every later request re-probes forever.
+        vi.setSystemTime(start + ACP_CAPABILITY_REFRESH_CACHE_TTL_MS + 60_000);
+        await harness.service.refreshMachineAcpCapabilities(request);
+        expect(harness.probes()).toBe(2);
+        expect(harness.storedEntry()?.fetchedAt).toBe(
+          start + ACP_CAPABILITY_REFRESH_CACHE_TTL_MS + 1
+        );
+      }));
+
+    it('does not write the Machine Flock when a young entry is re-probed with identical content', () =>
+      withClock(async () => {
+        const harness = createHarness();
+        await harness.service.refreshMachineAcpCapabilities(request);
+        const commitsAfterFirstProbe = harness.flock.commits;
+
+        vi.setSystemTime(start + 60 * 60 * 1000);
+        await harness.service.refreshMachineAcpCapabilities({ ...request, force: true });
+
+        expect(harness.probes()).toBe(2);
+        expect(harness.flock.commits).toBe(commitsAfterFirstProbe);
+        expect(harness.storedEntry()?.fetchedAt).toBe(start);
+      }));
+
+    it('starts the agent after the config environment is edited', () =>
+      withClock(async () => {
+        const harness = createHarness();
+        await harness.service.refreshMachineAcpCapabilities(request);
+        await harness.service.refreshMachineAcpCapabilities(request);
+        expect(harness.probes()).toBe(1);
+
+        // Neither a registry nor a custom source version depends on env, so the
+        // stored sourceVersion still matches; only the launch inputs changed.
+        harness.editEnv({ OPENCODE_API_KEY: `${secretToken}-rotated` });
+        await harness.service.refreshMachineAcpCapabilities(request);
+        expect(harness.probes()).toBe(2);
+
+        await harness.service.refreshMachineAcpCapabilities(request);
+        expect(harness.probes()).toBe(2);
+      }));
+
+    it('probes once after a restart rather than trusting an entry it cannot attribute', () =>
+      withClock(async () => {
+        const harness = createHarness();
+        await harness.service.refreshMachineAcpCapabilities(request);
+
+        const restarted = createHarness();
+        restarted.flock.rows.clear();
+        for (const [key, row] of harness.flock.rows) restarted.flock.rows.set(key, row);
+        // A fresh process has no record of which launch inputs produced the entry.
+        await restarted.service.refreshMachineAcpCapabilities(request);
+        await restarted.service.refreshMachineAcpCapabilities(request);
+
+        expect(restarted.probes()).toBe(1);
+      }));
+
+    it('never persists the config environment or a derivative of it', () =>
+      withClock(async () => {
+        const harness = createHarness();
+        await harness.service.refreshMachineAcpCapabilities(request);
+        harness.editEnv({ OPENCODE_API_KEY: `${secretToken}-rotated` });
+        await harness.service.refreshMachineAcpCapabilities(request);
+
+        const persisted = JSON.stringify([...harness.flock.rows.values()]);
+        const sha256 = (value: string) => createHash('sha256').update(value).digest('hex');
+        for (const secret of [secretToken, `${secretToken}-rotated`]) {
+          expect(persisted).not.toContain(secret);
+          for (const derived of [sha256(secret), sha256(`OPENCODE_API_KEY=${secret}`)]) {
+            // Twelve hex characters is the shortest digest prefix this codebase
+            // stores anywhere (the DeepSeek endpoint suffix).
+            expect(persisted).not.toContain(derived.slice(0, 12));
+          }
+        }
+      }));
+
+    it('starts the agent when the launch inputs no longer produce the stored source version', () =>
+      withClock(async () => {
+        let expected = sourceVersion;
+        const harness = createHarness({ expectedSourceVersion: () => expected });
+        await harness.service.refreshMachineAcpCapabilities(request);
+
+        expected = `${sourceVersion}+override:other-binary`;
+        await harness.service.refreshMachineAcpCapabilities(request);
+
+        expect(harness.probes()).toBe(2);
+      }));
+
+    it('starts the agent for a forced refresh even when the stored entry is current', () =>
+      withClock(async () => {
+        const harness = createHarness();
+        await harness.service.refreshMachineAcpCapabilities(request);
+
+        await expect(
+          harness.service.refreshMachineAcpCapabilities({ ...request, force: true })
+        ).resolves.toEqual(expect.objectContaining({ success: true }));
+        expect(harness.probes()).toBe(2);
+      }));
+
+    it('reports a failed refresh when the persisted entry cannot be read', () =>
+      withClock(async () => {
+        const harness = createHarness({
+          getAcpCapabilities: async () => {
+            throw new Error('machine flock document is unreadable');
+          },
+        });
+
+        await expect(harness.service.refreshMachineAcpCapabilities(request)).resolves.toEqual(
+          expect.objectContaining({
+            type: 'machine/acp-capabilities-refresh_response',
+            success: false,
+            error: expect.stringContaining('machine flock document is unreadable'),
+          })
+        );
+        expect(harness.probes()).toBe(0);
+      }));
   });
 
   it('deduplicates concurrent ACP capability refreshes for the same config and launch inputs', async () => {

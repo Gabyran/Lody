@@ -545,6 +545,29 @@ describe('resolveBuiltinACPSetting', () => {
       expect(getRuntimeStatus).not.toHaveBeenCalled();
     });
 
+    it('refuses to name a Pi version when selected extensions would force a runtime update', async () => {
+      const getRuntimeStatus = vi.fn().mockResolvedValue({
+        kind: 'installed',
+        platformArch: 'node',
+        version: '0.1.0',
+        targetVersion: '0.2.0',
+        command: '/managed/pi/cli.js',
+        updateAvailable: true,
+      });
+
+      // With extensions the launcher installs the target version before it
+      // starts, so the installed 0.1.0 is not what a probe would run.
+      await expect(
+        withManagedRuntimeManager({ getRuntimeStatus }, () =>
+          resolveExpectedAcpCapabilitySourceVersion({
+            cliType: 'builtin',
+            agentType: 'pi',
+            runtimeOverrides: { piExtensions: ['/ext/one'] },
+          })
+        )
+      ).resolves.toBeUndefined();
+    });
+
     it('still queues a managed-runtime update when it answers from the installed version', async () => {
       const enqueue = vi.fn();
       const getRuntimeStatus = vi.fn().mockResolvedValue({

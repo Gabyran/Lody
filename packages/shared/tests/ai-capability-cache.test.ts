@@ -1,8 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import {
   ACP_CAPABILITY_CACHE_VERSION,
+  ACP_CAPABILITY_FETCH_TIME_RENEW_AFTER_MS,
   ACP_CAPABILITY_REFRESH_CACHE_TTL_MS,
   decideAcpCapabilityRefreshCache,
+  shouldRenewAcpCapabilityFetchTime,
   getAcpCapabilityCacheEntryAuthority,
   getAcpCapabilityCacheStaleReason,
   getReadableAcpCapabilityCacheEntry,
@@ -113,6 +115,7 @@ describe('ACP capability refresh cache decision', () => {
       decideAcpCapabilityRefreshCache({
         entry: capability,
         expectedSourceVersion,
+        launchInputs: 'matching',
         nowMs: capability.fetchedAt + ACP_CAPABILITY_REFRESH_CACHE_TTL_MS,
       })
     ).toEqual({ hit: true, entry: capability });
@@ -125,6 +128,7 @@ describe('ACP capability refresh cache decision', () => {
       decideAcpCapabilityRefreshCache({
         entry: capability,
         expectedSourceVersion,
+        launchInputs: 'matching',
         nowMs: capability.fetchedAt + ACP_CAPABILITY_REFRESH_CACHE_TTL_MS + 1,
       })
     ).toEqual({ hit: false, reason: 'expired' });
@@ -137,6 +141,7 @@ describe('ACP capability refresh cache decision', () => {
       decideAcpCapabilityRefreshCache({
         entry: capability,
         expectedSourceVersion,
+        launchInputs: 'matching',
         nowMs: capability.fetchedAt - 60_000,
       })
     ).toEqual({ hit: true, entry: capability });
@@ -153,10 +158,21 @@ describe('ACP capability refresh cache decision', () => {
       args: { expectedSourceVersion: undefined },
       reason: 'source-version-unresolved',
     },
+    {
+      name: 'launch inputs this process never saw produce the entry',
+      args: { expectedSourceVersion: entry().sourceVersion, launchInputs: 'unknown' as const },
+      reason: 'launch-inputs-unknown',
+    },
+    {
+      name: 'an edited environment, which the source version does not cover',
+      args: { expectedSourceVersion: entry().sourceVersion, launchInputs: 'changed' as const },
+      reason: 'launch-inputs-changed',
+    },
   ])('misses on $name', ({ args, reason }) => {
     expect(
       decideAcpCapabilityRefreshCache({
         entry: currentEntry(),
+        launchInputs: 'matching',
         nowMs: 1_000_000,
         ...args,
       })
@@ -168,6 +184,7 @@ describe('ACP capability refresh cache decision', () => {
       decideAcpCapabilityRefreshCache({
         entry: currentEntry({ provenance: undefined }),
         expectedSourceVersion,
+        launchInputs: 'matching',
         nowMs: 1_000_000,
       })
     ).toEqual({ hit: false, reason: 'not-runtime-provenance' });
@@ -178,8 +195,26 @@ describe('ACP capability refresh cache decision', () => {
       decideAcpCapabilityRefreshCache({
         entry: undefined,
         expectedSourceVersion,
+        launchInputs: 'matching',
         nowMs: 1_000_000,
       })
     ).toEqual({ hit: false, reason: 'missing' });
+  });
+});
+
+describe('ACP capability fetch-time renewal', () => {
+  it('renews an unchanged entry well before it could expire', () => {
+    expect(ACP_CAPABILITY_FETCH_TIME_RENEW_AFTER_MS).toBeLessThan(
+      ACP_CAPABILITY_REFRESH_CACHE_TTL_MS
+    );
+    expect(
+      shouldRenewAcpCapabilityFetchTime(
+        { fetchedAt: 0 },
+        ACP_CAPABILITY_FETCH_TIME_RENEW_AFTER_MS - 1
+      )
+    ).toBe(false);
+    expect(
+      shouldRenewAcpCapabilityFetchTime({ fetchedAt: 0 }, ACP_CAPABILITY_FETCH_TIME_RENEW_AFTER_MS)
+    ).toBe(true);
   });
 });

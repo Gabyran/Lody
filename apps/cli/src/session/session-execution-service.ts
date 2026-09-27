@@ -64,7 +64,7 @@ import {
   serializeCustomAcpLaunchSpec,
 } from '@lody/shared';
 import type { ContentBlock } from '@agentclientprotocol/sdk';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import type { ModelInfo } from '@lody/shared';
 import { Cause, Data, Effect, Exit, Fiber, type Scope } from 'effect';
 import {
@@ -790,6 +790,14 @@ export class SessionExecutionService {
   // a fresh CLI subprocess and wait a few seconds; running it twice in parallel
   // doubles process cost and races the final `updateAcpCapabilities` write.
   private readonly inFlightAcpRefresh = new Map<string, InFlightAcpRefreshEntry>();
+  /**
+   * Fingerprint of the launch inputs — env included — behind each capability
+   * entry this process wrote. Memory only, on purpose: the entry itself lives in
+   * the Machine Flock document, which syncs to the cloud, and even a hash of a
+   * token is a credential derivative a low-entropy token can be recovered from.
+   * An empty map after restart just means each config probes once.
+   */
+  private readonly acpCapabilityLaunchInputFingerprints = new Map<AgentConfigId, string>();
 
   // Coalesce concurrent install requests for the same agent so the user clicking
   // "download" twice (or a refresh racing an install) triggers a single download.
@@ -5809,6 +5817,17 @@ export class SessionExecutionService {
         capabilities.goalActions,
         { sessionTitle: capabilities.sessionTitle }
       );
+      this.acpCapabilityLaunchInputFingerprints.set(
+        agentConfigId,
+        fingerprintAcpLaunchInputs({
+          configId: agentConfigId,
+          cliType: config.agentCliType,
+          agentType: config.agentType,
+          env: config.env,
+          customAcp: config.customAcp,
+          runtimeOverrides: config.runtimeOverrides,
+        })
+      );
     })().catch((error: unknown) => {
       this.deps.logger.debug(
         `[${session.sessionId}] Failed to update ACP capabilities from created session: ${formatErrorMessage(
@@ -6149,8 +6168,10 @@ export class SessionExecutionService {
    * The persisted entry when it still describes what a probe would return.
    *
    * A hit requires the exact `capabilitySourceVersion` the current launch inputs
-   * would produce, so editing a runtime override, a custom command, or an env
-   * value that feeds the version always misses. Lookup failures propagate to the
+   * would produce, and that this process wrote the entry from the same launch
+   * inputs — env included, which the source version mostly does not cover — so
+   * editing a runtime override, a custom command, or any env value misses.
+   * Lookup failures propagate to the
    * caller, which reports them as a failed refresh rather than probing: a broken
    * Machine Flock document would fail the probe's write-back too.
    */
@@ -6164,12 +6185,19 @@ export class SessionExecutionService {
       runtimeOverrides: message.runtimeOverrides,
       env: message.env,
     });
+    const recordedFingerprint = this.acpCapabilityLaunchInputFingerprints.get(message.configId);
     const decision = decideAcpCapabilityRefreshCache({
       entry: await this.deps.workspaceDocument.getAcpCapabilities(
         this.deps.machineId,
         message.configId
       ),
       expectedSourceVersion,
+      launchInputs:
+        recordedFingerprint === undefined
+          ? 'unknown'
+          : recordedFingerprint === fingerprintAcpLaunchInputs(message)
+            ? 'matching'
+            : 'changed',
       nowMs: getServerNow(),
     });
     if (!decision.hit) {
@@ -6243,6 +6271,10 @@ export class SessionExecutionService {
         acknowledgedSteer,
         goalActions,
         { signal: options.signal, sessionTitle }
+      );
+      this.acpCapabilityLaunchInputFingerprints.set(
+        message.configId,
+        fingerprintAcpLaunchInputs(message)
       );
 
       return {
@@ -6649,6 +6681,32 @@ const findRegistryAcpAgent = (agentType: string): RegistryAcpAgent | undefined =
 // NUL separates field segments and \x01 separates env pairs so equivalent
 // env maps produce identical keys and ambiguous separators in values can't
 // collide. Env vars on POSIX cannot contain either control character.
+/**
+ * In-memory identity of everything a capability probe is launched with. Hashed
+ * only so the long-lived map does not retain another plaintext copy of the env;
+ * it is never persisted, synced, or logged.
+ */
+const fingerprintAcpLaunchInputs = (inputs: {
+  configId: AgentConfigId;
+  cliType: AgentConfigCliType;
+  agentType: string;
+  env?: Record<string, string>;
+  customAcp?: CustomAcpLaunchSpec;
+  runtimeOverrides?: BuiltinRuntimeOverrides;
+}): string =>
+  createHash('sha256')
+    .update(
+      computeAcpRefreshDedupeKey(
+        inputs.configId,
+        inputs.cliType,
+        inputs.agentType,
+        inputs.env,
+        inputs.customAcp,
+        inputs.runtimeOverrides
+      )
+    )
+    .digest('hex');
+
 const computeAcpRefreshDedupeKey = (
   configId: AgentConfigId,
   cliType: AgentConfigCliType,

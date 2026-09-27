@@ -527,15 +527,48 @@ export const getAcpCapabilityCacheStaleReason = (
  */
 export const ACP_CAPABILITY_REFRESH_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 
+/**
+ * Age after which rewriting an unchanged capability entry is worth a Machine
+ * Flock write, solely to move `fetchedAt` forward.
+ *
+ * Writers skip unchanged entries so that every probe and every created session
+ * does not cost a Flock write, flush and sync. That skip must not outlive the
+ * TTL, or an entry whose content never changes expires once and then misses
+ * forever. Half the TTL is the smallest window that still gives two guarantees
+ * at once: a renewal is at most one write per config per half-TTL no matter how
+ * often sessions start or refreshes are forced, and an agent that starts even
+ * one session per half-TTL keeps its entry fresh without any probe at all,
+ * because that session's own write lands before the entry can expire.
+ */
+export const ACP_CAPABILITY_FETCH_TIME_RENEW_AFTER_MS = ACP_CAPABILITY_REFRESH_CACHE_TTL_MS / 2;
+
+/** Whether an unchanged entry should still be rewritten to renew its fetch time. */
+export const shouldRenewAcpCapabilityFetchTime = (
+  entry: Pick<AcpCapabilityCacheEntry, 'fetchedAt'>,
+  nowMs: number
+): boolean => nowMs - entry.fetchedAt >= ACP_CAPABILITY_FETCH_TIME_RENEW_AFTER_MS;
+
 export type AcpCapabilityRefreshCacheMissReason =
   | AcpCapabilityCacheStaleReason
   | 'source-version-unresolved'
+  | 'launch-inputs-unknown'
+  | 'launch-inputs-changed'
   | 'not-runtime-provenance'
   | 'expired';
 
 export type AcpCapabilityRefreshCacheDecision =
   | { hit: true; entry: AcpCapabilityCacheEntry }
   | { hit: false; reason: AcpCapabilityRefreshCacheMissReason };
+
+/**
+ * Whether the launch inputs that produced a persisted entry match the ones a
+ * probe would use now. `sourceVersion` cannot answer this alone: for custom and
+ * registry configs, and for every builtin except DeepSeek's base URL, it does not
+ * depend on the config's environment, and a token or endpoint change can still
+ * change what the agent advertises. The answering daemon remembers a fingerprint
+ * per entry it wrote, in memory only, so this is `'unknown'` after a restart.
+ */
+export type AcpCapabilityLaunchInputsMatch = 'matching' | 'changed' | 'unknown';
 
 /**
  * Decides whether a capability refresh may be answered from the persisted entry.
@@ -549,13 +582,20 @@ export type AcpCapabilityRefreshCacheDecision =
 export const decideAcpCapabilityRefreshCache = (args: {
   entry: AcpCapabilityCacheEntry | undefined;
   expectedSourceVersion: string | undefined;
+  launchInputs: AcpCapabilityLaunchInputsMatch;
   nowMs: number;
   ttlMs?: number;
 }): AcpCapabilityRefreshCacheDecision => {
-  const { entry, expectedSourceVersion, nowMs } = args;
+  const { entry, expectedSourceVersion, launchInputs, nowMs } = args;
   const ttlMs = args.ttlMs ?? ACP_CAPABILITY_REFRESH_CACHE_TTL_MS;
   if (expectedSourceVersion === undefined) {
     return { hit: false, reason: 'source-version-unresolved' };
+  }
+  if (launchInputs !== 'matching') {
+    return {
+      hit: false,
+      reason: launchInputs === 'changed' ? 'launch-inputs-changed' : 'launch-inputs-unknown',
+    };
   }
   const staleReason = getAcpCapabilityCacheStaleReason(entry, expectedSourceVersion);
   if (staleReason || !entry) {
