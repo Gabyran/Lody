@@ -4,6 +4,7 @@ import type {
   ElectronPublicBrowserInteraction,
   IpcPushMap,
   IpcSendMap,
+  IPC_SYNC_SEND_CHANNELS,
   SendLocalSessionControlResult,
 } from '@lody/shared/electron-ipc';
 import type { LocalSessionControlRequest, LocalSessionControlResponse } from '@lody/shared';
@@ -62,6 +63,14 @@ export function onIpcEvent<K extends keyof IpcPushMap>(
 
 export function sendIpc<K extends keyof IpcSendMap>(channel: K, payload: IpcSendMap[K]): void {
   window.ipc?.send(channel, payload);
+}
+
+/** Returns once main handled the message; only for `IPC_SYNC_SEND_CHANNELS`. */
+export function sendIpcSync<K extends (typeof IPC_SYNC_SEND_CHANNELS)[number]>(
+  channel: K,
+  payload: IpcSendMap[K]
+): void {
+  window.ipc?.sendSync?.(channel, payload);
 }
 
 export async function sendLocalSessionControl(

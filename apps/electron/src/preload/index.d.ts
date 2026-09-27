@@ -47,6 +47,7 @@ type LodyIpcBridge = {
   invoke: (channel: string, ...args: unknown[]) => Promise<unknown>
   on: (channel: string, listener: (payload: unknown) => void) => () => void
   send: (channel: string, payload?: unknown) => void
+  sendSync: (channel: string, payload?: unknown) => void
 }
 
 declare global {

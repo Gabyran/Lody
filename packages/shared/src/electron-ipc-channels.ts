@@ -57,7 +57,10 @@ export type IpcSendMap = {
   'app.windowReady': null;
   'app.windowContentReady': ElectronWindowTarget;
   'app.preparedWindowState': PreparedWindowTarget & { ready: boolean };
-  /** This window's earliest repo change refused for lack of space, or null when all saved. */
+  /**
+   * This window's earliest repo change refused for lack of space, or null when all
+   * saved. Sent synchronously ({@link IPC_SYNC_SEND_CHANNELS}), on every refused write.
+   */
   'storage.rendererUnsaved': {
     since: number | null;
     /** Refused writes so far; a new value is news even when `since` is unchanged. */
@@ -115,4 +118,19 @@ export function isIpcPushChannel(channel: string): channel is keyof IpcPushMap {
 
 export function isIpcSendChannel(channel: string): channel is keyof IpcSendMap {
   return SEND_CHANNEL_VALUES.includes(channel);
+}
+
+/**
+ * Sends main must have handled before the renderer runs anything else. A window's
+ * storage report voids an unload approval main holds for it; sent asynchronously,
+ * it could still be in flight when that window's next `beforeunload` is overridden
+ * on the strength of the old approval (a separate message, with no ordering between
+ * the two). Main answers every one of them.
+ */
+export const IPC_SYNC_SEND_CHANNELS = [IPC_SEND_CHANNELS.storageRendererUnsaved] as const;
+
+export function isIpcSyncSendChannel(
+  channel: string
+): channel is (typeof IPC_SYNC_SEND_CHANNELS)[number] {
+  return (IPC_SYNC_SEND_CHANNELS as readonly string[]).includes(channel);
 }

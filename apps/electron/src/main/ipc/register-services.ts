@@ -50,10 +50,12 @@ export function registerIpcServices(deps: IpcServiceDeps) {
   // teardown, new document, renderer gone), never merely because it closed.
   const parseSince = (value: unknown): number | null | undefined =>
     value === null ? null : typeof value === 'number' && Number.isFinite(value) ? value : undefined
+  // Sent synchronously: the window waits for this answer, so the report is applied
+  // before its next `beforeunload` can reach the window storage barrier.
   ipcMain.on(IPC_SEND_CHANNELS.storageRendererUnsaved, (event, payload: unknown) => {
     const since = parseSince((payload as { since?: unknown } | null)?.since)
-    if (since === undefined) return
-    deps.rendererStorageState.report(event.sender.id, since)
+    if (since !== undefined) deps.rendererStorageState.report(event.sender.id, since)
+    event.returnValue = null
   })
   ipcMain.on(IPC_SEND_CHANNELS.storageQuitCheckResult, (event, payload: unknown) => {
     const { requestId, since: rawSince } = (payload ?? {}) as {

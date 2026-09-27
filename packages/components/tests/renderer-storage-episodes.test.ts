@@ -8,7 +8,10 @@ import {
   SIGN_OUT_CANCELLED_CODE,
   tearDownWindows,
 } from '@lody/shared/renderer-storage-barrier';
-import { RendererStorageEpisodes } from '../src/lib/renderer-storage-episodes';
+import {
+  RendererStorageEpisodes,
+  rendererStorageEpisodes,
+} from '../src/lib/renderer-storage-episodes';
 import {
   getAuthSessionIntentGeneration,
   signOutWithoutRedirect,
@@ -326,47 +329,95 @@ describe('sign-out across windows', () => {
 });
 
 describe('refusals inside an open episode', () => {
-  it('reports again when another write is refused, although the earliest since is unchanged', async () => {
+  it('voids an unload approval at the refusal itself, before the next unload', async () => {
+    const state = new RendererStorageState();
     const published: Array<[number | null, number]> = [];
-    let fire: (() => void) | null = null;
-    const episodes = new RendererStorageEpisodes(
-      (since, revision) => published.push([since, revision]),
-      {
-        setTimer: (callback) => {
-          fire = callback;
-          return 1;
-        },
-      }
-    );
+    const episodes = new RendererStorageEpisodes((since, revision) => {
+      published.push([since, revision]);
+      state.report(1, since);
+    });
     const store = createQuotaStore();
     const episode = episodes.register(() => guard.flushNow());
     const guard = new RepoStorageGuard(store.adapter, {
       onUnsavedChange: (since) => episode.report(since),
       onWriteRefused: () => episode.refused(),
       now: () => 1_000,
+      // Nothing runs on a timer here: a refusal must reach main by itself.
       setTimer: () => null,
       clearTimer: () => {},
     });
     const repo = await LoroRepo.create({ storageAdapter: guard.adapter, metaDebounceCommitMs: 0 });
     guard.attach(repo);
+    const confirms: Array<[number, string]> = [];
+    const barrier = new WindowStorageBarrier({
+      state,
+      quitApproved: () => false,
+      confirmDiscard: async (since, kind) => {
+        confirms.push([since, kind]);
+        return true;
+      },
+      quitCheck: {
+        timeoutMs: 3_000,
+        setTimer: () => null,
+        clearTimer: () => {},
+        send: (windowId, requestId) => {
+          void episodes
+            .flushForQuit()
+            .then((since) => state.handleQuitCheckResult(windowId, requestId, since));
+          return true;
+        },
+      },
+    });
 
     store.state.full = true;
     await repo.upsertDocMeta('doc-a', { title: 'first' });
     await expect(repo.persistMetaNow()).rejects.toThrow();
-    const afterFirst = published.length;
-    expect(published.at(-1)?.[0]).toBe(1_000);
+    // The page reloads itself; its flush is still refused and the user picks Reload Anyway.
+    expect(barrier.onUnloadPrevented(1)).toBe(false);
+    await barrier.whenDecided(1);
+    expect(confirms).toEqual([[1_000, 'reload']]);
+    const beforeRefusal = published.length;
 
-    // More work on the full disk: the episode's `since` stays 1_000.
-    await repo.upsertDocMeta('doc-b', { title: 'typed after an approval' });
+    // Before the user retries, another write is refused inside the same episode.
+    await repo.upsertDocMeta('doc-b', { title: 'typed after the approval' });
     await expect(repo.persistMetaNow()).rejects.toThrow();
-    expect(fire).not.toBeNull();
-    fire!();
-    expect(published.length).toBeGreaterThan(afterFirst);
     const [since, revision] = published.at(-1)!;
+    expect(published.length).toBeGreaterThan(beforeRefusal);
     expect(since).toBe(1_000);
-    expect(revision).toBeGreaterThan(published[afterFirst - 1]![1]);
+    expect(revision).toBeGreaterThan(published[beforeRefusal - 1]![1]);
+
+    // The retried unload is not let through on the old approval: it flushes and asks again.
+    expect(barrier.onUnloadPrevented(1)).toBe(false);
+    await barrier.whenDecided(1);
+    expect(confirms).toEqual([
+      [1_000, 'reload'],
+      [1_000, 'reload'],
+    ]);
 
     store.state.full = false;
     await guard.close();
+  });
+
+  it("reaches main before the window's next task, not with the IPC queue", () => {
+    // Main as the preload bridge reaches it: `send` is delivered later, like any
+    // async IPC message; `sendSync` returns only once main handled it.
+    const main = new RendererStorageState();
+    const deliver = (payload: unknown) =>
+      main.report(1, (payload as { since: number | null }).since);
+    (window as unknown as { ipc: unknown }).ipc = {
+      send: (_channel: string, payload: unknown) => queueMicrotask(() => deliver(payload)),
+      sendSync: (_channel: string, payload: unknown) => deliver(payload),
+    };
+    try {
+      const episode = rendererStorageEpisodes.register(async () => 1_000);
+      episode.report(1_000);
+      const generation = main.generation(1);
+      episode.refused();
+      // Synchronously after the refusal, as a `beforeunload` right after it would see.
+      expect(main.generation(1)).toBeGreaterThan(generation);
+      episode.release();
+    } finally {
+      delete (window as { ipc?: unknown }).ipc;
+    }
   });
 });

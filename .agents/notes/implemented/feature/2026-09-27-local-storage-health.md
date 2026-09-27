@@ -194,6 +194,25 @@ changes without asking. Review caught it. Now:
   the registry sends a revision at most every 500 ms.
 - An approval is also single use and short-lived.
 
+Correction: the 500 ms throttle reopened the hole it was meant to close. A write
+refused right after "Reload Anyway" stayed unreported for up to half a second.
+A retry in that time found main's generation unchanged, and the approval let the
+window unload. An asynchronous report would not be enough either: it travels
+separately from `will-prevent-unload`, and nothing orders the two. Review caught
+it. The renderer now publishes every refusal at once, and `storage.rendererUnsaved`
+is the one channel sent with `ipcRenderer.sendSync` (`IPC_SYNC_SEND_CHANNELS`). The
+window waits until main has applied the report, so its next `beforeunload` cannot
+reach the barrier first. This costs one synchronous round trip per refused save,
+which happens only while storage refuses writes. The unload bypass stays in main
+rather than moving into the renderer, because the quit coverage and teardown
+approvals depend on it too. Tests:
+
+- Real `LoroRepo` and barrier: after "Reload Anyway", a new refusal with no timer
+  run voids the approval, and the retried unload is flushed and asked again.
+- A bridge model: the report reaches main synchronously, while `send` is delivered
+  later.
+  Restoring the debounce, or sending asynchronously, each fails one of them.
+
 **Sign-out and cache clear force-destroy other windows, so they approve first.** They
 call `destroy()`, which runs no `beforeunload`, so the unload guard never saw them;
 review caught that as well. Both now go through `tearDownWindows`, which calls

@@ -1,5 +1,5 @@
 import { rendererStorageFullAtom } from '@/atoms/local-storage-health';
-import { onIpcEvent, sendIpc } from '@/lib/electron-ipc-client';
+import { onIpcEvent, sendIpc, sendIpcSync } from '@/lib/electron-ipc-client';
 import { jotaiStore } from '@/lib/utils';
 
 /**
@@ -20,31 +20,19 @@ export type RendererStorageEpisodeHandle = {
   release: () => void;
 };
 
-/** Main learns about writes refused after an approval at most this often. */
-const REFUSAL_PUBLISH_INTERVAL_MS = 500;
-
-export type RendererStorageEpisodesOptions = {
-  setTimer?: (callback: () => void, delayMs: number) => unknown;
-};
-
 export class RendererStorageEpisodes {
   private readonly episodes = new Map<symbol, Episode>();
   private published: number | null = null;
   /**
    * Counts refused writes. Main voids an unload approval when it sees a newer
    * report, so data that became unsaved after the approval is asked about again.
+   * Every refusal is published at once, never deferred: main has to see it before
+   * this window's next `beforeunload`, or it would unload on the old approval.
    */
   private revision = 0;
   private publishedRevision = 0;
-  private refusalTimer: unknown = null;
-  private readonly setTimer: (callback: () => void, delayMs: number) => unknown;
 
-  constructor(
-    private readonly publish: (since: number | null, revision: number) => void,
-    options: RendererStorageEpisodesOptions = {}
-  ) {
-    this.setTimer = options.setTimer ?? ((callback, delayMs) => setTimeout(callback, delayMs));
-  }
+  constructor(private readonly publish: (since: number | null, revision: number) => void) {}
 
   register(flushNow: () => Promise<number | null>): RendererStorageEpisodeHandle {
     const key = Symbol('renderer-storage-episode');
@@ -59,12 +47,7 @@ export class RendererStorageEpisodes {
       refused: () => {
         if (!this.episodes.has(key)) return;
         this.revision += 1;
-        // Coalesced: a burst of refused saves (typing on a full disk) is one report.
-        if (this.refusalTimer !== null) return;
-        this.refusalTimer = this.setTimer(() => {
-          this.refusalTimer = null;
-          this.update();
-        }, REFUSAL_PUBLISH_INTERVAL_MS);
+        this.update();
       },
       release: () => {
         this.episodes.delete(key);
@@ -114,7 +97,8 @@ export class RendererStorageEpisodes {
 
 export const rendererStorageEpisodes = new RendererStorageEpisodes((since, revision) => {
   jotaiStore.set(rendererStorageFullAtom, since === null ? null : { since });
-  sendIpc('storage.rendererUnsaved', { since, revision });
+  // Synchronous, so main applied it before anything else runs here (`beforeunload`).
+  sendIpcSync('storage.rendererUnsaved', { since, revision });
 });
 
 let quitCheckInstalled = false;

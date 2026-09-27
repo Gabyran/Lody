@@ -55,7 +55,9 @@ access without a new capability/security decision in the owning
 Quit asks before stopping when changes would be lost in the local agent OR in any
 window's own repo (`@lody/shared/renderer-storage-barrier`); each such window gets a final
 `storage.quitCheck` flush first. Approval covers only the storage generations it asked
-about; after the agent stops, `approveFinal` asks about anything newer before `app.quit()`. Closing or reloading one window goes through
+about; after the agent stops, `approveFinal` asks about anything newer before `app.quit()`.
+A window's storage report (`storage.rendererUnsaved`) is sent synchronously on every
+refused write; never defer, throttle or send it async, or an unload outruns it. Closing or reloading one window goes through
 `WindowStorageBarrier` (`will-prevent-unload`); never drop a window's report on
 destroy, and never reload with a built-in menu role or a raw `webContents.reload()`
 that skips recording the intent. A product window is `destroy()`ed only through
