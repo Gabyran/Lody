@@ -484,8 +484,8 @@ export function startApplication(executionHost?: DesktopExecutionHost): void {
       // it now drops whatever has not reached disk or the cloud.
       // The agent and every window with unsaved storage are asked first.
       confirmQuit: approveQuit,
+      abort: abortQuit,
       stop: async () => {
-        setAppQuitting(true)
         setWindowsTrayAvailable(false)
         windowsTrayService.stop()
         windowBadgeService.reset()
@@ -500,9 +500,12 @@ export function startApplication(executionHost?: DesktopExecutionHost): void {
         ])
         if (cliResult.status === 'rejected') throw cliResult.reason
       },
-      quit: () => app.quit(),
+      // Only now, with the agent stopped: windows close instead of hiding.
+      quit: () => {
+        setAppQuitting(true)
+        app.quit()
+      },
       reportFailure: (error) => {
-        abortQuit()
         // A timeout does not prove exit. Keep ownership until quit succeeds.
         console.error('[Electron] Quit blocked by the embedded CLI', error)
         dialog.showErrorBox(

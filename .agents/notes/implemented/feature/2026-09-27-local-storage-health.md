@@ -267,7 +267,15 @@ updater paths.
 
 - It flushes the agent and the windows, and confirms what is still unsaved.
 - A cancel, an install failure or a failed stop aborts: approval and the quitting
-  flag are both cleared.
+  flag are both cleared. For a failed stop, that rollback lived only in the
+  application's failure callback, and the ordinary quit set the flag before its stop
+  could fail. Review asked for one owner of it. `createDesktopQuitBarrier` now takes
+  a required `abort` and calls it whenever stopping fails. The ordinary quit sets the
+  flag only right before `app.quit()`, once the agent has stopped. A test fails the
+  agent stop after an approved quit: approval and flag are cleared, and a window
+  that then reports a refused write is flushed and asked on close. Dropping the
+  `abort` call fails it. Services stopped before the agent (tray, relays, updater)
+  stay stopped until the next quit attempt, as the failure dialog says.
 - The window barrier trusts only the coordinator's approval, never the global flag.
 - The updater asks before it marks anything or starts the install; on Linux that is
   before the password prompt and `app.relaunch()`.

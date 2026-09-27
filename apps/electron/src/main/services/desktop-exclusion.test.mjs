@@ -99,6 +99,7 @@ void test('quit asks first and stays open when the user cancels', async () => {
   let stopCalls = 0
   let quitCalls = 0
   const handler = createDesktopQuitBarrier({
+    abort: () => {},
     confirmQuit: async () => answers.shift(),
     stop: async () => {
       stopCalls++
@@ -141,6 +142,7 @@ void test('quit warns for a window whose storage refused changes, even with a he
   const warnings = []
   let stopCalls = 0
   const handler = createDesktopQuitBarrier({
+    abort: () => {},
     confirmQuit: async () => {
       const since = await resolveUnsavedBeforeQuit({ cliUnsavedSince: null, renderer, quitCheck })
       if (since === null) return true
@@ -190,6 +192,7 @@ void test('an OS session end holds for unsaved storage and runs the same quit ba
   let stopCalls = 0
   let exited = 0
   const quitBarrier = createDesktopQuitBarrier({
+    abort: coordinator.abort,
     confirmQuit: coordinator.approve,
     stop: async () => {
       stopCalls++
@@ -435,6 +438,67 @@ void test('a cancelled quit clears a preset quitting flag, so window close is gu
   await barrier.whenDecided(7)
 })
 
+void test('a quit whose agent stop fails guards windows again', async () => {
+  let appQuitting = false
+  const state = new RendererStorageState()
+  const asked = []
+  const coordinator = createQuitCoordinator({
+    unsavedSince: async () => state.earliestUnsaved(),
+    confirmDiscard: async () => true,
+    setAppQuitting: (quitting) => {
+      appQuitting = quitting
+    }
+  })
+  const flushed = []
+  const barrier = new WindowStorageBarrier({
+    state,
+    quitApproved: coordinator.isApproved,
+    confirmDiscard: async (since, kind) => {
+      asked.push([kind, since])
+      return false
+    },
+    quitCheck: {
+      timeoutMs: 3_000,
+      setTimer: () => null,
+      clearTimer: () => {},
+      send: (windowId, requestId) => {
+        flushed.push(windowId)
+        queueMicrotask(() => state.handleQuitCheckResult(windowId, requestId, 2_000))
+        return true
+      }
+    }
+  })
+  const failures = []
+  let windowsFreeDuringStop = null
+  const quitBarrier = createDesktopQuitBarrier({
+    confirmQuit: coordinator.approve,
+    abort: coordinator.abort,
+    stop: async () => {
+      windowsFreeDuringStop = coordinator.isApproved()
+      throw new Error('the agent did not confirm it stopped')
+    },
+    quit: () => {
+      appQuitting = true
+    },
+    reportFailure: (error) => failures.push(error.message)
+  })
+
+  // Nothing unsaved: the quit is approved, then the agent stop fails.
+  await quitBarrier({ preventDefault() {} })
+  assert.equal(windowsFreeDuringStop, true)
+  assert.deepEqual(failures, ['the agent did not confirm it stopped'])
+  assert.equal(appQuitting, false)
+  assert.equal(coordinator.isApproved(), false)
+
+  // The app stays open; a window whose storage now refuses a write is guarded again.
+  state.report(7, 2_000)
+  barrier.noteIntent(7, 'close', () => {})
+  assert.equal(barrier.onUnloadPrevented(7), false)
+  await barrier.whenDecided(7)
+  assert.deepEqual(flushed, [7])
+  assert.deepEqual(asked, [['close', 2_000]])
+})
+
 void test('an approval without an intent does not outlive new unsaved data, reuse or its lifetime', async () => {
   const { state, barrier, answer, confirms, lost, clock, setConfirm } = createBarrierHarness()
   setConfirm(true)
@@ -661,6 +725,7 @@ void test('quit waits for execution exit, retains ownership on failure, and allo
   let stopCalls = 0
   let finalQuitPrevented
   const handler = createDesktopQuitBarrier({
+    abort: () => {},
     stop: () => {
       stopCalls++
       return stopping

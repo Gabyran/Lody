@@ -12,6 +12,12 @@ export function createDesktopQuitBarrier(options: {
   stop: () => Promise<void>
   quit: () => void
   reportFailure: (error: unknown) => void
+  /**
+   * Rolls back the approval `confirmQuit` gave, and the app-wide quitting state,
+   * when stopping fails and the app stays open: windows must be guarded again,
+   * not left free to unload. (A cancelled `confirmQuit` rolls back itself.)
+   */
+  abort: () => void
   confirmQuit?: () => Promise<boolean>
 }) {
   let state: 'running' | 'stopping' | 'stopped' = 'running'
@@ -34,6 +40,7 @@ export function createDesktopQuitBarrier(options: {
       await options.stop()
     } catch (error: unknown) {
       state = 'running'
+      options.abort()
       options.reportFailure(error)
       return
     }
