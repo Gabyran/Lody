@@ -2,8 +2,9 @@
  * Prevent quit (and OS lease release) until owned execution has confirmed exit.
  *
  * `confirmQuit` runs first and may cancel the quit, for example while the
- * local agent reports changes it could not save; a failure to ask counts as a
- * yes, so a broken dialog never traps the user in the app.
+ * local agent reports changes it could not save. A check that throws counts as
+ * a no: it may have been the one protecting those changes. (The quit
+ * coordinator never throws; a dialog that fails to open is its own no.)
  *
  * The returned promise settles once this attempt is back to running or stopped;
  * `preventDefault` is always called synchronously, before the first await.
@@ -35,8 +36,11 @@ export function createDesktopQuitBarrier(options: {
     let confirmed = true
     try {
       confirmed = (await options.confirmQuit?.()) ?? true
-    } catch {
-      confirmed = true
+    } catch (error: unknown) {
+      // Not a yes: the check that failed may have been the one protecting unsaved
+      // changes. `createQuitCoordinator` never rejects, so this only guards misuse.
+      console.error('[Electron] Quit check failed; staying open', error)
+      confirmed = false
     }
     if (!confirmed) {
       state = 'running'
@@ -53,8 +57,10 @@ export function createDesktopQuitBarrier(options: {
     let final = true
     try {
       final = (await options.confirmFinal?.()) ?? true
-    } catch {
-      final = true
+    } catch (error: unknown) {
+      console.error('[Electron] Final quit check failed; staying open', error)
+      options.abort()
+      final = false
     }
     if (!final) {
       state = 'running'

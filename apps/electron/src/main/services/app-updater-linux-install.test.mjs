@@ -232,6 +232,7 @@ void test('a write refused during the password prompt is guarded and asked about
     }
   })
   const coordinator = createQuitCoordinator({
+    knownUnsavedSince: () => null,
     unsavedSince: () =>
       resolveUnsavedBeforeQuit({ cliUnsavedSince: null, renderer: state, quitCheck }),
     confirmDiscard: async () => true,

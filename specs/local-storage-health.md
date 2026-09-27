@@ -110,7 +110,9 @@ The desktop asks before quitting whenever changes would be lost: the local agent
 or any window's own repo. Each window reports its earliest unsaved change to the
 main process. On quit, every window holding unsaved changes is asked to flush once
 more and answer. A window that does not answer within 3 seconds keeps its last
-report; silence is not proof that it saved. The question names the earliest unsaved
+report; silence is not proof that it saved, and neither is a window that cannot be
+reached. A quit check that fails asks about what is already known unsaved, and never
+reads as consent. The question names the earliest unsaved
 change. Quitting then loses changes not yet synced elsewhere.
 
 An answer covers only what it asked about. Windows keep running while the local

@@ -182,6 +182,7 @@ void test('an OS session end holds for unsaved storage and runs the same quit ba
   const answers = [false, true]
   const asked = []
   const coordinator = createQuitCoordinator({
+    knownUnsavedSince: () => null,
     unsavedSince: () => resolveUnsavedBeforeQuit({ cliUnsavedSince: null, renderer, quitCheck }),
     confirmDiscard: async (since) => {
       asked.push(since)
@@ -248,6 +249,79 @@ void test('an OS session end holds for unsaved storage and runs the same quit ba
 
   // Approved: a repeated session end is not held any longer.
   assert.equal(endSession(), false)
+})
+
+void test('a quit check that throws keeps known unsaved changes and never quits unasked', async () => {
+  const state = new RendererStorageState()
+  state.report(1, 100)
+  // The frame was torn down between the liveness check and the send.
+  const quitCheck = {
+    timeoutMs: 3_000,
+    setTimer: () => null,
+    clearTimer: () => {},
+    send: () => {
+      throw new Error('Render frame was disposed before WebFrameMain could be accessed')
+    }
+  }
+  // The window keeps its report, as when it cannot be asked at all.
+  assert.equal(
+    await resolveUnsavedBeforeQuit({ cliUnsavedSince: null, renderer: state, quitCheck }),
+    100
+  )
+
+  const asked = []
+  let stopCalls = 0
+  let quitCalls = 0
+  const quitWith = (unsavedSince) => {
+    const coordinator = createQuitCoordinator({
+      unsavedSince,
+      knownUnsavedSince: () => state.earliestUnsaved(),
+      confirmDiscard: async (since) => {
+        asked.push(since)
+        return false
+      },
+      setAppQuitting: () => {},
+      renderer: state,
+      windowIds: () => [1],
+      approveWindows: async () => true
+    })
+    return createDesktopQuitBarrier({
+      confirmQuit: coordinator.approve,
+      abort: coordinator.abort,
+      stop: async () => {
+        stopCalls++
+      },
+      quit: () => {
+        quitCalls++
+      },
+      reportFailure: () => {}
+    })({ preventDefault() {} })
+  }
+
+  // Even when the whole check fails, the user is asked about what main knows.
+  await quitWith(async () => {
+    throw new Error('quit check failed')
+  })
+  assert.deepEqual(asked, [100])
+  assert.equal(stopCalls, 0)
+  assert.equal(quitCalls, 0)
+
+  // A barrier whose check throws stays open instead of reading it as a yes.
+  await createDesktopQuitBarrier({
+    confirmQuit: async () => {
+      throw new Error('broken check')
+    },
+    abort: () => {},
+    stop: async () => {
+      stopCalls++
+    },
+    quit: () => {
+      quitCalls++
+    },
+    reportFailure: () => {}
+  })({ preventDefault() {} })
+  assert.equal(stopCalls, 0)
+  assert.equal(quitCalls, 0)
 })
 
 void test('a window that does not answer, or cannot be asked, keeps its last report', async () => {
@@ -391,6 +465,7 @@ void test('a cancelled quit clears a preset quitting flag, so window close is gu
   const asked = []
   let quitAnswer = false
   const coordinator = createQuitCoordinator({
+    knownUnsavedSince: () => null,
     unsavedSince: async () => state.earliestUnsaved(),
     confirmDiscard: async (since) => {
       asked.push(['quit', since])
@@ -449,6 +524,7 @@ void test('a quit whose agent stop fails guards windows again', async () => {
   const state = new RendererStorageState()
   const asked = []
   const coordinator = createQuitCoordinator({
+    knownUnsavedSince: () => null,
     unsavedSince: async () => state.earliestUnsaved(),
     confirmDiscard: async () => true,
     setAppQuitting: (quitting) => {
@@ -532,6 +608,7 @@ void test('a write refused while the agent stops is flushed and asked about befo
     }
   })
   const coordinator = createQuitCoordinator({
+    knownUnsavedSince: () => null,
     unsavedSince: () =>
       resolveUnsavedBeforeQuit({ cliUnsavedSince: null, renderer: state, quitCheck }),
     confirmDiscard: async (since) => {

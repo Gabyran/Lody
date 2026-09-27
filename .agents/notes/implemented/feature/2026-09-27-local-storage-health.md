@@ -239,6 +239,24 @@ sync are saved in that binary form too. Real `LoroRepo` tests:
 Counting every refusal, treating whole payloads as exact, treating exact ones by
 target only, or restoring the delayed publish each fails one of them.
 
+**A failed quit check is not a yes.** The quit barrier read any exception from
+its check as consent, so the ordinary quit failed open. That was meant to keep a
+broken dialog from trapping the user. A `webContents.send` that threw (a frame torn
+down between the liveness check and the send) rejected the whole check, and the app
+stopped and quit over a window it knew was unsaved. Review caught it. Now:
+
+- The quit-check send treats a throw like an unreachable window: it keeps its last
+  report.
+- `createQuitCoordinator` never rejects. A failed check falls back to what main
+  already knows (`knownUnsavedSince`: the agent's issue and the windows' reports)
+  and asks about it.
+- The barrier treats a throwing check, or final check, as a no and stays open.
+
+The dialog failing to open is already a no inside the coordinator. A test drives
+three cases: a throwing send, a rejecting check, and a throwing barrier check. In
+none of them does the app stop or quit without the question. Removing each fallback
+fails it.
+
 A remote doc update refused while the question is open is exact and new, so it
 still costs another round. Loro updates do not tell local ops from received ones
 at this boundary.

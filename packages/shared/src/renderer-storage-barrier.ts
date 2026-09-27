@@ -106,8 +106,15 @@ export class RendererStorageState {
         resolve();
       });
       // A window that cannot be asked keeps its last report: not being able to
-      // ask is not proof that it saved.
-      if (!options.send(windowId, requestId)) {
+      // ask is not proof that it saved. That includes a send that throws, e.g. a
+      // frame torn down between the liveness check and the send.
+      let sent = false;
+      try {
+        sent = options.send(windowId, requestId);
+      } catch {
+        sent = false;
+      }
+      if (!sent) {
         clearTimer(timer);
         this.pending.delete(requestId);
         resolve();
@@ -409,6 +416,11 @@ export type QuitCoordinator = {
 export function createQuitCoordinator(options: {
   /** The earliest change a quit would lose, after a final flush; null if none. */
   unsavedSince: () => Promise<number | null>;
+  /**
+   * What is already known unsaved, without asking anyone. The answer when the
+   * final flush itself fails: a failed check must not read as "nothing unsaved".
+   */
+  knownUnsavedSince: () => number | null;
   confirmDiscard: (since: number) => Promise<boolean>;
   setAppQuitting: (quitting: boolean) => void;
   renderer: RendererStorageState;
@@ -437,9 +449,15 @@ export function createQuitCoordinator(options: {
         .windowIds()
         .every((id) => options.renderer.unsavedSince(id) === null || coversWindow(id)),
     abort,
+    // Never rejects: a quit barrier cannot tell a failed check from a yes.
     approve: async () => {
       if (approved) return true;
-      const since = await options.unsavedSince();
+      let since: number | null;
+      try {
+        since = await options.unsavedSince();
+      } catch {
+        since = options.knownUnsavedSince();
+      }
       // What the user is about to be asked about; a later refusal is not covered.
       const asked = new Map(options.windowIds().map((id) => [id, options.renderer.generation(id)]));
       if (since !== null && !(await options.confirmDiscard(since).catch(() => false))) {

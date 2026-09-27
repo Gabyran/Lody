@@ -245,7 +245,12 @@ export function startApplication(executionHost?: DesktopExecutionHost): void {
       send: (windowId, requestId) => {
         const target = webContents.fromId(windowId)
         if (!target || target.isDestroyed()) return false
-        target.send(IPC_PUSH_CHANNELS.storageQuitCheck, { requestId })
+        try {
+          target.send(IPC_PUSH_CHANNELS.storageQuitCheck, { requestId })
+        } catch {
+          // Torn down since the check above: it keeps its last report.
+          return false
+        }
         return true
       }
     }
@@ -286,7 +291,15 @@ export function startApplication(executionHost?: DesktopExecutionHost): void {
         .getCliState()
         .runtime?.issues.find((issue) => issue.code === LOCAL_STORAGE_UNSAVED_ISSUE_CODE)
         ?.firstSeenAtMs ?? null
+    // What main already knows is unsaved, without asking any process.
+    const knownUnsavedSince = (): number | null => {
+      const cli = cliUnsavedSince()
+      const renderer = rendererStorageState.earliestUnsaved()
+      if (cli === null) return renderer
+      return renderer === null ? cli : Math.min(cli, renderer)
+    }
     const quitCoordinator = createQuitCoordinator({
+      knownUnsavedSince,
       unsavedSince: async () =>
         await resolveUnsavedBeforeQuit({
           cliUnsavedSince: cliUnsavedSince(),
@@ -315,12 +328,7 @@ export function startApplication(executionHost?: DesktopExecutionHost): void {
     // A shutdown, restart or log-off ends the app without `before-quit` on Windows;
     // with changes known unsaved, hold it and run the ordinary quit instead.
     const sessionEndGuard = createSessionEndGuard({
-      unsavedSince: () => {
-        const cli = cliUnsavedSince()
-        const renderer = rendererStorageState.earliestUnsaved()
-        if (cli === null) return renderer
-        return renderer === null ? cli : Math.min(cli, renderer)
-      },
+      unsavedSince: knownUnsavedSince,
       quitApproved: quitCoordinator.coversAll,
       requestQuit: () => setImmediate(() => app.quit())
     })
