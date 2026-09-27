@@ -371,15 +371,6 @@ export type MessageFileDiffEntriesByTurn = Readonly<
 
 const EMPTY_EDITED_FILE_ENTRIES: readonly AssistantEditedFileEntry[] = [];
 
-/** How close an outline jump has to land before it counts as arrived. */
-const OUTLINE_JUMP_TOLERANCE_PX = 2;
-/**
- * One correction is normally enough — arriving measures the target's rows, so
- * the re-issued jump uses real offsets. The bound only exists so a target that
- * genuinely cannot reach the top (the list's tail) stops retrying.
- */
-const OUTLINE_JUMP_MAX_CORRECTIONS = 3;
-
 export type ChatStreamItem = SessionMessageItem | EmptySessionItem | PlaceholderSessionItem;
 
 type AssistantVirtualContent =
@@ -1592,16 +1583,9 @@ export const SessionChatStreamView = forwardRef<
     const [assistantExpansionVersion, setAssistantExpansionVersion] = useState(0);
     const [hoveredAssistantMessageId, setHoveredAssistantMessageId] = useState<string | null>(null);
     /**
-     * An outline jump in flight. Declared here, beside the other suppression
-     * state, because `autoScrollSuppressedRef` below reads it — see
-     * `handleOutlineJump` for what maintains it.
-     */
-    const pendingOutlineJumpRef = useRef<{ rowIndex: number; attempts: number } | null>(null);
-    /**
-     * Every reason this component has to stop follow-output. Group expansion
-     * releases in the layout effect of its own commit; an outline jump releases
-     * when the jump finishes (see `pendingOutlineJumpRef`), because an event
-     * handler cannot count on a commit happening at all.
+     * Every reason this component has to stop follow-output: native text
+     * selection and message selection. A jump needs none: it sets the engine's
+     * reading intent, which already releases follow.
      */
     const autoScrollSuppressedRef = useMemo(
       () => ({
@@ -1609,7 +1593,6 @@ export const SessionChatStreamView = forwardRef<
           return (
             nativeTextSelectionActiveRef.current ||
             messageSelection !== null ||
-            pendingOutlineJumpRef.current !== null ||
             Boolean(suppressStickyAutoScrollRef?.current)
           );
         },
@@ -1888,7 +1871,6 @@ export const SessionChatStreamView = forwardRef<
       },
       onChange: (ids) => {
         onRetainedTurnIdsChange?.(ids);
-        if (nativeTextSelectionActiveRef.current) pendingOutlineJumpRef.current = null;
         setSelectionVersion((version) => version + 1);
       },
       onRelease: () => {
@@ -2008,84 +1990,20 @@ export const SessionChatStreamView = forwardRef<
       syncActiveOutlineIndexRef,
     ]);
 
-    /** How far a pending jump still is from its target, in item-offset space. */
-    const outlineJumpDrift = useCallback(
-      (rowIndex: number): number => {
-        const vlist = listRef.current;
-        if (!vlist) return 0;
-        const targetOffset = vlist.getItemOffset(rowIndex + leadingRowCount);
-        return Math.abs(vlist.scrollOffset - itemOffsetDeltaRef.current - targetOffset);
-      },
-      [leadingRowCount]
-    );
-
     /**
-     * A jump into rows Virtua has never measured lands on ESTIMATED offsets.
-     * Virtua does re-issue internally as measurements arrive, but it gives up
-     * after 150ms of silence (`core/index.js`), and a React commit plus the
-     * ResizeObserver round trip for a screenful of message rows routinely takes
-     * longer than that — so a far jump settles a round short. Arriving is what
-     * measures the rows, so re-issuing once the scroll settles converges.
-     *
-     * While a jump is pending it also suppresses follow-output, so a jump upward
-     * out of a sticky conversation is not pulled straight back to the bottom.
-     * Tying suppression to this ref rather than to a render is deliberate: the
-     * release must not depend on a commit that React can skip.
+     * Jump to a round. The engine holds the round's row at the top as the rows
+     * around it are measured and hydrated, so one jump lands; no correction
+     * pass re-issues it (a stored row index goes stale as placeholders expand).
      */
     const handleOutlineJump = useCallback(
       (outlineIndex: number) => {
         const anchor = outlineAnchors.find((item) => item.outlineIndex === outlineIndex);
         if (!anchor) return;
-        pendingOutlineJumpRef.current = { rowIndex: anchor.rowIndex, attempts: 0 };
         scrollRowToTop(anchor.rowIndex);
-        // Clicking the round already at the top scrolls nowhere, so no
-        // `onScrollEnd` will arrive to clear the pending jump — and suppression
-        // would stay armed until some unrelated render happened to release it.
-        if (outlineJumpDrift(anchor.rowIndex) <= OUTLINE_JUMP_TOLERANCE_PX) {
-          pendingOutlineJumpRef.current = null;
-        }
         setActiveOutlineIndex(outlineIndex);
       },
-      [outlineAnchors, outlineJumpDrift, scrollRowToTop]
+      [outlineAnchors, scrollRowToTop]
     );
-
-    const handleStreamScrollEnd = useCallback(() => {
-      const pending = pendingOutlineJumpRef.current;
-      if (!pending) return;
-      if (
-        outlineJumpDrift(pending.rowIndex) <= OUTLINE_JUMP_TOLERANCE_PX ||
-        pending.attempts >= OUTLINE_JUMP_MAX_CORRECTIONS
-      ) {
-        // Not settling within the bound means the target simply cannot reach the
-        // top — the last rounds are shorter than the viewport, so the scroll
-        // clamps. Stop rather than retry against a wall.
-        pendingOutlineJumpRef.current = null;
-        return;
-      }
-      pendingOutlineJumpRef.current = {
-        rowIndex: pending.rowIndex,
-        attempts: pending.attempts + 1,
-      };
-      scrollRowToTop(pending.rowIndex);
-    }, [outlineJumpDrift, scrollRowToTop]);
-
-    // Any real input abandons the correction: a reader who starts scrolling
-    // must never be yanked back by a jump they have already moved on from.
-    useEffect(() => {
-      if (!scrollViewportElement) return undefined;
-      const abandon = () => {
-        pendingOutlineJumpRef.current = null;
-      };
-      const options = { passive: true } as const;
-      scrollViewportElement.addEventListener('wheel', abandon, options);
-      scrollViewportElement.addEventListener('touchstart', abandon, options);
-      scrollViewportElement.addEventListener('keydown', abandon, options);
-      return () => {
-        scrollViewportElement.removeEventListener('wheel', abandon);
-        scrollViewportElement.removeEventListener('touchstart', abandon);
-        scrollViewportElement.removeEventListener('keydown', abandon);
-      };
-    }, [scrollViewportElement]);
 
     // Desktop-only top fade: shown only when content has scrolled under the top
     // edge, so it reads as "more conversation above" without dimming the first
@@ -2411,7 +2329,6 @@ export const SessionChatStreamView = forwardRef<
                 suppressAutoScrollRef={autoScrollSuppressedRef}
                 onAtBottomChange={onAtBottomChange}
                 onScroll={handleStreamScroll}
-                onScrollEnd={handleStreamScrollEnd}
                 onStateChange={handleListStateChange}
                 layoutKey={String(conversationFontSize)}
                 // Keep x overflow explicit: overflow-y:auto otherwise computes

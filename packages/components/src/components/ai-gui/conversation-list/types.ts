@@ -60,7 +60,6 @@ export interface ConversationScrollerProps {
   suppressAutoScrollRef?: RefObject<boolean>;
   onAtBottomChange?: (atBottom: boolean) => void;
   onScroll?: (offset: number) => void;
-  onScrollEnd?: () => void;
   onStateChange: (state: ConversationScrollerState) => void;
   /** Conversation font setting; part of the engine's layout version. */
   layoutKey: string;

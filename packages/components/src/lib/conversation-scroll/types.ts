@@ -74,6 +74,9 @@ export interface CycleDiagnostic {
   passes: number;
   covered: boolean;
   pendingExternalMove: boolean;
+  /** The reading anchor's recorded row and the row it resolved to (ids only). */
+  anchorKey: string | null;
+  resolvedKey: string | null;
 }
 
 export interface SavedScrollState {

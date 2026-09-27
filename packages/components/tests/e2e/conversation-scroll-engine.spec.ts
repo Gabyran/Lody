@@ -150,3 +150,35 @@ test('switching away and back restores the reading position with no blank frame'
   expect(after?.key).toBe(before!.key);
   expect(Math.abs((after?.top ?? 0) - before!.top)).toBeLessThanOrEqual(2);
 });
+
+const WINDOWED =
+  '/iframe.html?id=sessions-conversationview--extreme-conversation-windowed&viewMode=story';
+
+test('outline jumps land their round at the top, far and near, while rows hydrate', async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1400, height: 900 });
+  await page.goto(WINDOWED);
+  await page.waitForSelector('[data-outline-index]', { timeout: 60_000 });
+  await settleFrames(page, 30);
+  // Far, then near (the rows around the first target are hydrating), then back.
+  for (const round of [400, 410, 1200, 1195, 10, 5]) {
+    await page.locator(`[data-outline-index="${round}"]`).evaluate((element) => {
+      (element as HTMLElement).click();
+    });
+    await settleFrames(page, 60);
+    const landed = await page.evaluate((index) => {
+      const viewport = document.querySelector('[data-message-selection-scroll]')!;
+      const row = document.querySelector(`[data-conversation-turn-id="v-user-${index}"]`);
+      const active = document.querySelector('[data-outline-index][aria-current]');
+      return {
+        distance: row
+          ? Math.abs(row.getBoundingClientRect().top - viewport.getBoundingClientRect().top)
+          : null,
+        active: active ? Number(active.getAttribute('data-outline-index')) : null,
+      };
+    }, round);
+    expect(landed, `round ${round}`).toEqual({ distance: expect.any(Number), active: round });
+    expect(landed.distance!, `round ${round}`).toBeLessThanOrEqual(1);
+  }
+});

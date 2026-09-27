@@ -79,7 +79,7 @@ Edit `AGENTS.md`, not its `CLAUDE.md` symlink. Ownership: [README.md](README.md)
 - Before changing the outline rail, its arrival intent, or any row-index-to-scroll
   conversion, read [conversation-outline.md](conversation-outline.md). It binds
   every caller: `scrollRowToTop` is the ONE such conversion, group toggles never
-  scroll, and follow-output suppression is owned by `pendingOutlineJumpRef`.
+  scroll, and a jump is issued once: the scroll engine holds its row at the top.
 
 ## Content Contracts
 

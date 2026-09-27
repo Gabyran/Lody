@@ -691,6 +691,7 @@ export class ScrollController {
       passes: tx.pass,
       covered,
       pendingExternalMove: this.pendingExternalMove,
+      ...this.anchorDiagnostic(),
     });
     if (!this.firstCycleComplete) {
       this.firstCycleComplete = true;
@@ -922,6 +923,16 @@ export class ScrollController {
     const row = this.rows[index];
     if (!row) return null;
     return anchorOfRow(row, 0);
+  }
+
+  private anchorDiagnostic(): { anchorKey: string | null; resolvedKey: string | null } {
+    if (this.intent.kind !== 'read') return { anchorKey: null, resolvedKey: null };
+    const anchor = this.intent.anchor;
+    const resolved = resolveAnchor(this.rows, anchor, this.geometry);
+    return {
+      anchorKey: anchor.kind === 'turn' ? anchor.rowKey : anchor.fixed,
+      resolvedKey: resolved ? (this.rows[resolved.index]?.key ?? null) : null,
+    };
   }
 
   private shrinkReplyRoom(scrollTop: number): void {

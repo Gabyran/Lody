@@ -114,7 +114,6 @@ export function EngineConversationScroller({
   suppressAutoScrollRef,
   onAtBottomChange,
   onScroll,
-  onScrollEnd,
   onStateChange,
   layoutKey,
   viewportClassName,
@@ -138,14 +137,8 @@ export function EngineConversationScroller({
   );
   const [revealed, setRevealed] = useState(false);
 
-  const latest = useRef({
-    onAtBottomChange,
-    onScroll,
-    onScrollEnd,
-    suppressAutoScrollRef,
-    layoutKey,
-  });
-  latest.current = { onAtBottomChange, onScroll, onScrollEnd, suppressAutoScrollRef, layoutKey };
+  const latest = useRef({ onAtBottomChange, onScroll, suppressAutoScrollRef, layoutKey });
+  latest.current = { onAtBottomChange, onScroll, suppressAutoScrollRef, layoutKey };
 
   const layoutVersion = (width: number) => `${Math.round(width)}|${latest.current.layoutKey}`;
 
@@ -383,7 +376,6 @@ export function EngineConversationScroller({
         intent: controller.savedIntent(),
         sizes: controller.geometry.snapshot(),
       });
-      latest.current.onScrollEnd?.();
     };
     const onWheel = (event: WheelEvent) => {
       if (event.deltaY >= 0 || event.ctrlKey) return;

@@ -239,6 +239,51 @@ describe('commands', () => {
     expectHealthy(sim);
   });
 
+  it('lands a jump that arrives while a transaction is still in flight', () => {
+    let rows = turnRows(
+      200,
+      (i) => 60 + (i % 5) * 30,
+      () => 50
+    );
+    const sim = new ScrollSim(rows, V);
+    sim.render();
+    sim.settle();
+    // A size change starts a transaction whose commit is still pending when an
+    // outline jump arrives in the same task.
+    rows = rows.map((row, i) => (i === 190 ? { ...row, height: row.height + 40 } : row));
+    sim.rows = rows;
+    sim.task(() => {
+      sim.controller.onRowsResized([{ key: 't190', height: rows[190]!.height }]);
+      sim.controller.jumpToIndex(20);
+    });
+    sim.settle();
+    expect(sim.screenTop('t20')).toBe(0);
+    expect(sim.controller.mode).toBe('read');
+    expectHealthy(sim);
+  });
+
+  it('keeps a jumped row at the top while the rows around it hydrate into several rows', () => {
+    let rows = turnRows(
+      200,
+      () => 100,
+      () => 60
+    );
+    const sim = new ScrollSim(rows, V);
+    sim.render();
+    sim.settle();
+    sim.task(() => sim.controller.jumpToIndex(100));
+    sim.settle();
+    expect(sim.screenTop('t100')).toBe(0);
+    // Placeholder turns on both sides become several rows, one after another.
+    for (const key of ['t95', 't98', 't99', 't103', 't90']) {
+      rows = expand(rows, key, 4, 80);
+      sim.render(rows);
+      sim.settle();
+      expect(sim.screenTop('t100')).toBe(0);
+    }
+    expectHealthy(sim);
+  });
+
   it('holds a sent message at the top with reply room, then follows once the reply fills it', () => {
     let rows = turnRows(30, () => 100);
     const sim = new ScrollSim(rows, V);

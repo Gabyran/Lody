@@ -766,6 +766,14 @@ collected after release, through the diagnostics below.
 - **Found while removing the old path.** A range starting at a zero-height row skipped
   the other zero-height rows on the same line, such as an empty leading Fragment. The
   range start now walks back over them.
+- **Outline jumps landed rounds past their target (found in staging testing).** The
+  Virtua-era correction loop in `view.tsx` was still running. On `scrollend` it
+  re-issued a jump by the row index stored at click time. Once placeholders around
+  the target had expanded, that index pointed at a different round: jumping from
+  round 400 to 410 landed on 420. The design already removes the loop, because the
+  reading anchor keeps the jumped row at the top. It is now deleted, together with
+  the follow suppression it carried. A Chromium spec clicks far, near and back and
+  checks each round lands within 1px, with the outline highlighting it.
 - **Tests that relied on the old path.**
   - The hydration e2e's cold-tail tests asserted that the viewport stays hidden until
     rows are measured. They now assert the tail, or the saved reading row, is in place
