@@ -11,6 +11,7 @@ import {
   type KeyboardEvent as ReactKeyboardEvent,
   memo,
   type MouseEvent as ReactMouseEvent,
+  type ReactElement,
   type ReactNode,
   useCallback,
   useContext,
@@ -52,7 +53,6 @@ import { usePostHog } from '@posthog/react';
 import { capturePostHogEvent, getAnalyticsFileKind } from '@/lib/posthog-analytics';
 import { getRpcDeliveredTurnKey, rpcDeliveredTurnsAtom } from '@/atoms/session-dispatch-delivery';
 import { selectAtom } from 'jotai/utils';
-import { Virtualizer, type VirtualizerHandle, type CustomItemComponentProps } from '@lody/virtua';
 import {
   type AgentConfigCliType,
   type ChatFailedCode,
@@ -95,7 +95,13 @@ import { scrollDebug } from '@/hooks/scroll-debug-log';
 import { readSessionTurnTokenUsage, type SessionTurnTokenUsage } from '@lody/shared/session-data';
 import { formatCompactNumber } from '@/lib/format-compact-number';
 import { toIntlLocaleOrEn } from '@/lib/intl-locale';
-import { useStickyScroll } from '@/hooks/use-sticky-scroll';
+import type { EngineRow } from '@/lib/conversation-scroll/types';
+import { EngineConversationScroller } from './conversation-list/engine-conversation-scroller';
+import type {
+  ConversationListHandle,
+  ConversationRowComponentProps,
+  ConversationScrollerState,
+} from './conversation-list/types';
 import { buildResendInputBlocks, isUndeliveredUserTurnEntry } from '@/lib/undelivered-user-turn';
 import { ConversationOutlineRail } from './conversation-outline-rail';
 import { useLatestRef } from '@/hooks/use-latest-ref';
@@ -209,7 +215,7 @@ import {
 import { cn } from '@/lib/utils';
 import { ConversationColumn } from '@/components/shared/conversation-column';
 import type { TurnIndexRow } from '@/lib/conversation-view';
-import { TurnPlaceholderRow } from './turn-placeholder-row';
+import { TurnPlaceholderRow, estimatePlaceholderHeight } from './turn-placeholder-row';
 import { CreatedSessionOperationCard } from './created-session-operation-card';
 import { OperationReplyCard } from './operation-reply-card';
 import type { SessionNavigationTarget } from '@/lib/session-navigation';
@@ -498,7 +504,7 @@ const NativeSelectionRowsContext = createContext<{
 const LEADING_ROW_KEY = '\u0000leading';
 const AGENT_ACTIVITY_ROW_KEY = '\u0000agent-activity';
 
-function ConversationVirtualRow({ index, ...props }: CustomItemComponentProps) {
+function ConversationVirtualRow({ index, ...props }: ConversationRowComponentProps) {
   const { rows, leading, held } = useContext(NativeSelectionRowsContext);
   const row = rows[index - leading];
   // Row tooltips, popovers and context menus mount on the first hover or focus
@@ -1365,15 +1371,150 @@ export const buildChatVirtualRows = ({
   return rows;
 };
 
+/** Heights the scroll engine assumes for a row it has not measured yet. */
+const ENGINE_ROW_ESTIMATE_PX = {
+  standard: 88,
+  content: 72,
+  compact: 36,
+  footer: 40,
+  plan: 120,
+  subagentTasks: 64,
+  leading: 48,
+  activity: 36,
+} as const;
+
+const toolCallIdOf = (content: unknown): string | null =>
+  content &&
+  typeof content === 'object' &&
+  (content as { type?: unknown }).type === 'tool_call' &&
+  typeof (content as { toolCallId?: unknown }).toolCallId === 'string'
+    ? (content as { toolCallId: string }).toolCallId
+    : null;
+
 /**
- * Chat virtual scroll using the keyed Virtua fork (`@lody/virtua`).
- *
- * Rows are keyed (`keyed`), not `shift`ed: sizes follow row keys, and rows
- * inserted anywhere above the viewport (placeholder turns hydrating) keep the
- * row at the viewport start in place.
- *
- * Sticky-to-bottom behavior (ResizeObserver, hysteresis, scroll position
- * caching) is encapsulated in the `useStickyScroll` hook.
+ * What the conversation scroll engine knows about a row: its turn, the item
+ * it renders (for reading anchors that survive row-key changes) and a size to
+ * assume before measuring it.
+ */
+const engineRowOf = (row: ChatVirtualRow): EngineRow => {
+  const base = {
+    key: row.key,
+    turnIndex: row.messageIndex,
+    itemIndex: null,
+    itemIdentity: null,
+    firstItemIndex: null,
+    placeholder: false,
+    fixed: null,
+  };
+  if (row.type === 'placeholder') {
+    return {
+      ...base,
+      turnId: row.item.row.id,
+      placeholder: true,
+      // The placeholder's block plus its column's vertical padding.
+      estimate: estimatePlaceholderHeight(row.item.row) + 20,
+    };
+  }
+  if (row.type === 'standard') {
+    return {
+      ...base,
+      turnId: row.item.type === 'message' ? row.item.message.id : null,
+      estimate: ENGINE_ROW_ESTIMATE_PX.standard,
+    };
+  }
+  const turnId = row.item.message.id;
+  const content = row.content;
+  switch (content.kind) {
+    case 'content':
+      return {
+        ...base,
+        turnId,
+        itemIndex: row.itemIndex ?? null,
+        itemIdentity: toolCallIdOf(content.block.entry.content),
+        firstItemIndex: row.itemIndex ?? null,
+        estimate: ENGINE_ROW_ESTIMATE_PX.content,
+      };
+    case 'activity_detail':
+      return {
+        ...base,
+        turnId,
+        itemIndex: row.itemIndex ?? null,
+        itemIdentity: toolCallIdOf(content.entry.content),
+        firstItemIndex: row.itemIndex ?? null,
+        estimate: ENGINE_ROW_ESTIMATE_PX.compact,
+      };
+    case 'activity_group_header':
+      return {
+        ...base,
+        turnId,
+        firstItemIndex: content.block.entries[0]?.itemIndex ?? null,
+        estimate: ENGINE_ROW_ESTIMATE_PX.compact,
+      };
+    case 'worked_group_header':
+      return { ...base, turnId, estimate: ENGINE_ROW_ESTIMATE_PX.compact };
+    case 'plan':
+      return { ...base, turnId, estimate: ENGINE_ROW_ESTIMATE_PX.plan };
+    case 'subagent_tasks':
+      return { ...base, turnId, estimate: ENGINE_ROW_ESTIMATE_PX.subagentTasks };
+    case 'footer':
+      return { ...base, turnId, estimate: ENGINE_ROW_ESTIMATE_PX.footer };
+  }
+  return { ...base, turnId, estimate: ENGINE_ROW_ESTIMATE_PX.content };
+};
+
+const LEADING_ENGINE_ROW: EngineRow = {
+  key: LEADING_ROW_KEY,
+  turnId: null,
+  turnIndex: -1,
+  itemIndex: null,
+  itemIdentity: null,
+  firstItemIndex: null,
+  placeholder: false,
+  fixed: 'leading',
+  estimate: ENGINE_ROW_ESTIMATE_PX.leading,
+};
+
+const AGENT_ACTIVITY_ENGINE_ROW: EngineRow = {
+  key: AGENT_ACTIVITY_ROW_KEY,
+  turnId: null,
+  turnIndex: -1,
+  itemIndex: null,
+  itemIdentity: null,
+  firstItemIndex: null,
+  placeholder: false,
+  fixed: 'agent-activity',
+  estimate: ENGINE_ROW_ESTIMATE_PX.activity,
+};
+
+/**
+ * The conversation viewport's own style, shared by both scroller
+ * implementations. Browser scroll anchoring is off for the whole scroller, not
+ * only the rows container: the reply-room spacer and the selection overlay
+ * are its children too, and a browser anchoring on them would be a third
+ * writer of `scrollTop`.
+ */
+const CONVERSATION_VIEWPORT_STYLE = {
+  display: 'block',
+  overflowY: 'auto',
+  overflowAnchor: 'none',
+  contain: 'strict',
+  width: '100%',
+  height: '100%',
+  paddingTop: 'calc(var(--conversation-top-inset, 0px) + 1.5rem)',
+} as const;
+
+const INITIAL_SCROLLER_STATE: ConversationScrollerState = {
+  scrollElement: null,
+  revealed: false,
+  isSticky: true,
+};
+
+/**
+ * The conversation: a virtualized list of keyed rows, rendered and scrolled by
+ * the conversation scroll engine (`lib/conversation-scroll`,
+ * `conversation-list/engine-conversation-scroller.tsx`). The engine follows
+ * the end, restores the reading position by row and holds a sent message at
+ * the top; this view talks to it only through `ConversationListHandle`.
  */
 export const SessionChatStreamView = forwardRef<
   SessionChatStreamHandle,
@@ -1427,7 +1568,7 @@ export const SessionChatStreamView = forwardRef<
       [sessionId]
     );
     const showThoughts = useAtomValue(thoughtVisibilityAtom);
-    const vlistRef = useRef<VirtualizerHandle>(null);
+    const listRef = useRef<ConversationListHandle>(null);
     const messageSelection = useContext(MessageSelectionContext);
     const nativeTextSelectionActiveRef = useRef(false);
     const selectionLayoutsRef = useRef(new Map<string, SelectionTurnLayout>());
@@ -1607,8 +1748,7 @@ export const SessionChatStreamView = forwardRef<
      */
     const scrollRowToTop = useCallback(
       (rowIndex: number, smooth = false) => {
-        vlistRef.current?.scrollToIndex(rowIndex + leadingRowCount, {
-          align: 'start',
+        listRef.current?.scrollRowToTop(rowIndex + leadingRowCount, {
           smooth,
           offset: itemOffsetDeltaRef.current,
         });
@@ -1616,11 +1756,6 @@ export const SessionChatStreamView = forwardRef<
       [leadingRowCount]
     );
 
-    // Whether this render reaches the virtualized branch below. A session whose
-    // document is still being acquired renders the empty sentinel and returns
-    // before `Virtualizer` mounts, yet every hook above that return has already
-    // run — including the one that reads the stored row measurements.
-    const hasVirtualizedRows = virtualRows.length > 0;
     const placeholderRowCount = useMemo(
       () => virtualRows.reduce((count, row) => count + (row.type === 'placeholder' ? 1 : 0), 0),
       [virtualRows]
@@ -1635,29 +1770,35 @@ export const SessionChatStreamView = forwardRef<
       });
     }, [leadingContent, placeholderRowCount, virtualRows.length]);
 
+    // The viewport's scroll owner is the conversation scroll engine; everything
+    // below talks to it through `listRef` (see `conversation-list/types.ts`).
+    const [listState, setListState] = useState(INITIAL_SCROLLER_STATE);
+    const handleListStateChange = useCallback((next: ConversationScrollerState) => {
+      setListState((current) =>
+        current.scrollElement === next.scrollElement &&
+        current.revealed === next.revealed &&
+        current.isSticky === next.isSticky
+          ? current
+          : next
+      );
+    }, []);
     const {
-      scrollRef: scrollContainerRef,
-      spacerRef: bottomSpacerRef,
       scrollElement: scrollViewportElement,
       isSticky,
-      scrollToBottom: scrollStreamToBottom,
-      anchorToRow,
-      retargetAnchor,
-      initialScrollRestored,
-      initialVirtualizerCache,
-      persistVirtualizerCache,
-      handleScroll,
-    } = useStickyScroll({
-      sessionId,
-      initialContentReady: initialWindowReady,
-      vlistRef,
-      hasVirtualizedRows,
-      // `leadingContent` is a real first Virtua row, so it counts here — sticky
-      // scroll otherwise targets an index short of the true bottom.
-      itemCount: virtualRows.length + leadingRowCount + (shouldShowAgentActivityRow ? 1 : 0),
-      onAtBottomChange,
-      suppressAutoScrollRef: autoScrollSuppressedRef,
-    });
+      revealed: initialScrollRestored,
+    } = listState;
+    const scrollStreamToBottom = useCallback(() => listRef.current?.scrollToBottom(), []);
+    const anchorToRow = useCallback((index: number) => listRef.current?.anchorToRow(index), []);
+    const retargetAnchor = useCallback(
+      (index: number) => listRef.current?.retargetAnchor(index),
+      []
+    );
+    const engineRowMeta = useMemo(() => {
+      const meta = virtualRows.map(engineRowOf);
+      if (leadingContent != null) meta.unshift(LEADING_ENGINE_ROW);
+      if (shouldShowAgentActivityRow && agentActivityLabel) meta.push(AGENT_ACTIVITY_ENGINE_ROW);
+      return meta;
+    }, [agentActivityLabel, leadingContent, shouldShowAgentActivityRow, virtualRows]);
 
     /**
      * A sent message waiting for its row. The send path learns the turn id
@@ -1728,7 +1869,7 @@ export const SessionChatStreamView = forwardRef<
       sessionId,
       view: conversationView,
       viewport: scrollViewportElement,
-      virtualizer: vlistRef,
+      virtualizer: listRef,
       rows: selectableRows,
       leadingRowCount,
       activeRef: nativeTextSelectionActiveRef,
@@ -1826,7 +1967,7 @@ export const SessionChatStreamView = forwardRef<
     }, [scrollViewportElement]);
 
     const syncActiveOutlineIndex = useCallback(() => {
-      const vlist = vlistRef.current;
+      const vlist = listRef.current;
       if (!initialScrollRestored || !vlist || outlineAnchors.length === 0) {
         setActiveOutlineIndex(-1);
         return;
@@ -1870,7 +2011,7 @@ export const SessionChatStreamView = forwardRef<
     /** How far a pending jump still is from its target, in item-offset space. */
     const outlineJumpDrift = useCallback(
       (rowIndex: number): number => {
-        const vlist = vlistRef.current;
+        const vlist = listRef.current;
         if (!vlist) return 0;
         const targetOffset = vlist.getItemOffset(rowIndex + leadingRowCount);
         return Math.abs(vlist.scrollOffset - itemOffsetDeltaRef.current - targetOffset);
@@ -1909,8 +2050,6 @@ export const SessionChatStreamView = forwardRef<
     );
 
     const handleStreamScrollEnd = useCallback(() => {
-      // Scrolling measured more rows; keep them for the next open.
-      persistVirtualizerCache();
       const pending = pendingOutlineJumpRef.current;
       if (!pending) return;
       if (
@@ -1928,7 +2067,7 @@ export const SessionChatStreamView = forwardRef<
         attempts: pending.attempts + 1,
       };
       scrollRowToTop(pending.rowIndex);
-    }, [outlineJumpDrift, persistVirtualizerCache, scrollRowToTop]);
+    }, [outlineJumpDrift, scrollRowToTop]);
 
     // Any real input abandons the correction: a reader who starts scrolling
     // must never be yanked back by a jump they have already moved on from.
@@ -1962,7 +2101,7 @@ export const SessionChatStreamView = forwardRef<
     const onVisibleTurnRangeChangeRef = useLatestRef(onVisibleTurnRangeChange);
     const lastVisibleRangeRef = useRef<VisibleTurnRange | null>(null);
     const reportVisibleTurnRange = useCallback(() => {
-      const vlist = vlistRef.current;
+      const vlist = listRef.current;
       const report = onVisibleTurnRangeChangeRef.current;
       if (!vlist || !report) return;
       const rows = virtualRowsRef.current;
@@ -2006,13 +2145,12 @@ export const SessionChatStreamView = forwardRef<
 
     const handleStreamScroll = useCallback(
       (offset: number) => {
-        handleScroll(offset);
         setIsScrolledFromTop(offset > 0);
         syncHasContentBelow();
         syncActiveOutlineIndex();
         reportVisibleTurnRange();
       },
-      [handleScroll, reportVisibleTurnRange, syncActiveOutlineIndex, syncHasContentBelow]
+      [reportVisibleTurnRange, syncActiveOutlineIndex, syncHasContentBelow]
     );
 
     // Content also grows or shrinks without a scroll (a streaming reply under
@@ -2164,6 +2302,97 @@ export const SessionChatStreamView = forwardRef<
       );
     }
 
+    // Keyed rows in list order: the leading row, the conversation, the activity row.
+    const listRows = [
+      leadingContent == null ? null : (
+        <div key={LEADING_ROW_KEY} data-conversation-leading-content="">
+          {leadingContent}
+        </div>
+      ),
+      ...virtualRows.map((row, rowIndex) => {
+        if (row.type === 'placeholder') {
+          return <TurnPlaceholderRow key={row.key} row={row.item.row} />;
+        }
+        if (row.type === 'standard') {
+          // Standard rows are only ever system or user messages
+          // (assistant turns are flattened into `assistant` rows below),
+          // so they carry no per-turn file diffs or last-assistant
+          // quick actions.
+          return (
+            <MessageSelectionRow
+              key={row.key}
+              id={row.item.type === 'message' ? row.item.message.id : undefined}
+              first
+            >
+              <ChatItem
+                item={row.item}
+                renderMessageRow={renderMessageRow}
+                noMessagesLabel={noMessagesLabel}
+                emptyState={emptyState}
+              />
+            </MessageSelectionRow>
+          );
+        }
+
+        const canForkAssistantMessage =
+          row.item.message.finished === true &&
+          (row.item.message.id === lastCompletedAssistantMessageId ||
+            Boolean(row.item.message.acpTurnId));
+        const fileDiffOverride =
+          messageFileDiffEntriesByTurn === undefined
+            ? undefined
+            : (messageFileDiffEntriesByTurn[row.item.message.id] ?? EMPTY_EDITED_FILE_ENTRIES);
+        return (
+          <MessageSelectionRow
+            key={row.key}
+            id={row.item.message.id}
+            first={virtualRows[rowIndex - 1]?.messageIndex !== row.messageIndex}
+          >
+            <AssistantChatItem
+              row={row}
+              fileDiffOverride={fileDiffOverride}
+              assistantActions={resolveAssistantMessageActions(
+                row.item.message.id,
+                assistantActionsMessageId,
+                assistantActions
+              )}
+              onFork={canForkAssistantMessage ? onForkLastAssistant : undefined}
+              forkWorktreeAvailability={forkWorktreeAvailability}
+              onForkWorktreeMenuOpen={onForkWorktreeMenuOpen}
+              isForking={forkingAssistantMessageId === row.item.message.id}
+              onFileDiffClick={onFileDiffClick}
+              onFilePathClick={onFilePathClick}
+              onGroupExpandedChange={handleAssistantGroupExpandedChange}
+              onWorkedGroupExpandedChange={handleAssistantWorkedGroupExpandedChange}
+              isTurnHovered={hoveredAssistantMessageId === row.item.message.id}
+              onTurnHoverChange={handleAssistantTurnHoverChange}
+              conversationFontSize={conversationFontSize}
+              shimmerGroupHeader={row.key === liveGroupHeaderRowKey}
+              liveStatus={row.key === liveStatusRowKey ? liveTurnStatus : null}
+              liveStatusFollowsSurface={
+                row.key === liveStatusRowKey && assistantRowPaintsSurface(virtualRows[rowIndex - 1])
+              }
+            />
+          </MessageSelectionRow>
+        );
+      }),
+      shouldShowAgentActivityRow && agentActivityLabel ? (
+        <div
+          key={AGENT_ACTIVITY_ROW_KEY}
+          className="shrink-0 pt-1"
+          data-agent-activity-row-spacer=""
+        >
+          <AgentActivityRow
+            label={agentActivityLabel}
+            tone={agentActivityTone}
+            shimmer={agentActivityShimmer}
+            message={liveAgentActivityMessage}
+            conversationFontSize={conversationFontSize}
+          />
+        </div>
+      ) : null,
+    ].filter((row): row is ReactElement => row != null);
+
     return (
       <SessionChatActionContext.Provider value={chatActionContextValue}>
         <SessionImagePreviewContext.Provider value={imagePreviewContextValue}>
@@ -2171,151 +2400,41 @@ export const SessionChatStreamView = forwardRef<
             ref={scrollRootRef}
             className={cn('relative bg-background', className)}
           >
-            <div
-              ref={scrollContainerRef}
-              data-message-selection-scroll=""
-              data-window-session-stream-ready={
-                initialWindowReady && initialScrollRestored ? sessionId : undefined
-              }
-              // Keep x overflow explicit: overflow-y:auto otherwise computes
-              // the untouched x axis to auto too, letting any wide row pan the
-              // entire conversation instead of its own nested scroller.
-              className="chat-scrollbar relative h-full overflow-x-hidden py-5 sm:py-6"
-              // Mobile session page floats a frosted header over the list;
-              // `--conversation-top-inset` (set by session-detail's mobile
-              // branch) pads the scroll content so the first message clears the
-              // header at rest while later content scrolls under it and blurs.
-              // Unset elsewhere → falls back to py-6's 1.5rem, a no-op.
-              style={{
-                visibility: initialWindowReady && initialScrollRestored ? 'visible' : 'hidden',
-                display: 'block',
-                overflowY: 'auto',
-                contain: 'strict',
-                width: '100%',
-                height: '100%',
-                paddingTop: 'calc(var(--conversation-top-inset, 0px) + 1.5rem)',
-              }}
-            >
-              <NativeSelectionRowsContext.Provider value={nativeSelectionRows}>
-                <Virtualizer
-                  ref={vlistRef}
-                  item={ConversationVirtualRow}
-                  // Row heights measured the last time this session was open, so
-                  // the first layout is the real one instead of an estimate that
-                  // has to be corrected before the conversation can be shown.
-                  cache={initialVirtualizerCache}
-                  // Rows are identified by key: sizes follow their rows, and a
-                  // placeholder turn becoming several rows above the reader
-                  // leaves what they are reading in place.
-                  keyed
-                  onScroll={handleStreamScroll}
-                  onScrollEnd={handleStreamScrollEnd}
-                  // Pre-render extra items outside the viewport to reduce blank areas
-                  // during fast scrolling (especially on mobile). This is 4x Virtua's
-                  // default (200px) — generous, but deliberately not the previous 2000px:
-                  // an oversized buffer keeps a huge set of still-resizing rows mounted,
-                  // which widens the window where Virtua's offsets are mid-recompute and
-                  // rows can transiently overlap. 800 keeps ~2 viewports of headroom.
-                  bufferSize={CONVERSATION_OVERSCAN}
-                  keepMounted={nativeTextSelection.keepMounted}
-                >
-                  {leadingContent == null ? null : (
-                    <div key={LEADING_ROW_KEY} data-conversation-leading-content="">
-                      {leadingContent}
-                    </div>
-                  )}
-                  {virtualRows.map((row, rowIndex) => {
-                    if (row.type === 'placeholder') {
-                      return <TurnPlaceholderRow key={row.key} row={row.item.row} />;
-                    }
-                    if (row.type === 'standard') {
-                      // Standard rows are only ever system or user messages
-                      // (assistant turns are flattened into `assistant` rows below),
-                      // so they carry no per-turn file diffs or last-assistant
-                      // quick actions.
-                      return (
-                        <MessageSelectionRow
-                          key={row.key}
-                          id={row.item.type === 'message' ? row.item.message.id : undefined}
-                          first
-                        >
-                          <ChatItem
-                            item={row.item}
-                            renderMessageRow={renderMessageRow}
-                            noMessagesLabel={noMessagesLabel}
-                            emptyState={emptyState}
-                          />
-                        </MessageSelectionRow>
-                      );
-                    }
-
-                    const canForkAssistantMessage =
-                      row.item.message.finished === true &&
-                      (row.item.message.id === lastCompletedAssistantMessageId ||
-                        Boolean(row.item.message.acpTurnId));
-                    const fileDiffOverride =
-                      messageFileDiffEntriesByTurn === undefined
-                        ? undefined
-                        : (messageFileDiffEntriesByTurn[row.item.message.id] ??
-                          EMPTY_EDITED_FILE_ENTRIES);
-                    return (
-                      <MessageSelectionRow
-                        key={row.key}
-                        id={row.item.message.id}
-                        first={virtualRows[rowIndex - 1]?.messageIndex !== row.messageIndex}
-                      >
-                        <AssistantChatItem
-                          row={row}
-                          fileDiffOverride={fileDiffOverride}
-                          assistantActions={resolveAssistantMessageActions(
-                            row.item.message.id,
-                            assistantActionsMessageId,
-                            assistantActions
-                          )}
-                          onFork={canForkAssistantMessage ? onForkLastAssistant : undefined}
-                          forkWorktreeAvailability={forkWorktreeAvailability}
-                          onForkWorktreeMenuOpen={onForkWorktreeMenuOpen}
-                          isForking={forkingAssistantMessageId === row.item.message.id}
-                          onFileDiffClick={onFileDiffClick}
-                          onFilePathClick={onFilePathClick}
-                          onGroupExpandedChange={handleAssistantGroupExpandedChange}
-                          onWorkedGroupExpandedChange={handleAssistantWorkedGroupExpandedChange}
-                          isTurnHovered={hoveredAssistantMessageId === row.item.message.id}
-                          onTurnHoverChange={handleAssistantTurnHoverChange}
-                          conversationFontSize={conversationFontSize}
-                          shimmerGroupHeader={row.key === liveGroupHeaderRowKey}
-                          liveStatus={row.key === liveStatusRowKey ? liveTurnStatus : null}
-                          liveStatusFollowsSurface={
-                            row.key === liveStatusRowKey &&
-                            assistantRowPaintsSurface(virtualRows[rowIndex - 1])
-                          }
-                        />
-                      </MessageSelectionRow>
-                    );
-                  })}
-                  {shouldShowAgentActivityRow && agentActivityLabel && (
-                    <div
-                      key={AGENT_ACTIVITY_ROW_KEY}
-                      className="shrink-0 pt-1"
-                      data-agent-activity-row-spacer=""
-                    >
-                      <AgentActivityRow
-                        label={agentActivityLabel}
-                        tone={agentActivityTone}
-                        shimmer={agentActivityShimmer}
-                        message={liveAgentActivityMessage}
-                        conversationFontSize={conversationFontSize}
-                      />
-                    </div>
-                  )}
-                </Virtualizer>
-              </NativeSelectionRowsContext.Provider>
-              {/* Reply room below an anchored sent message; useStickyScroll
-                  owns its height. It must follow the Virtualizer: sticky scroll
-                  reads the virtualized content as the viewport's first child. */}
-              <div ref={bottomSpacerRef} aria-hidden data-conversation-reply-room="" />
-              <MessageSelectionOverlay />
-            </div>
+            <NativeSelectionRowsContext.Provider value={nativeSelectionRows}>
+              <EngineConversationScroller
+                sessionId={sessionId}
+                rows={listRows}
+                rowMeta={engineRowMeta}
+                item={ConversationVirtualRow}
+                keepMounted={nativeTextSelection.keepMounted}
+                initialWindowReady={initialWindowReady}
+                suppressAutoScrollRef={autoScrollSuppressedRef}
+                onAtBottomChange={onAtBottomChange}
+                onScroll={handleStreamScroll}
+                onScrollEnd={handleStreamScrollEnd}
+                onStateChange={handleListStateChange}
+                layoutKey={String(conversationFontSize)}
+                // Keep x overflow explicit: overflow-y:auto otherwise computes
+                // the untouched x axis to auto too, letting any wide row pan the
+                // entire conversation instead of its own nested scroller.
+                // Mobile session page floats a frosted header over the list;
+                // `--conversation-top-inset` (set by session-detail's mobile
+                // branch) pads the scroll content so the first message clears the
+                // header at rest while later content scrolls under it and blurs.
+                // Unset elsewhere → falls back to py-6's 1.5rem, a no-op.
+                viewportClassName="chat-scrollbar relative h-full overflow-x-hidden py-5 sm:py-6"
+                viewportStyle={CONVERSATION_VIEWPORT_STYLE}
+                trailing={<MessageSelectionOverlay />}
+                // Pre-render extra items outside the viewport to reduce blank areas
+                // during fast scrolling (especially on mobile). This is 4x Virtua's
+                // default (200px) — generous, but deliberately not the previous 2000px:
+                // an oversized buffer keeps a huge set of still-resizing rows mounted,
+                // which widens the window where Virtua's offsets are mid-recompute and
+                // rows can transiently overlap. 800 keeps ~2 viewports of headroom.
+                bufferSize={CONVERSATION_OVERSCAN}
+                handleRef={listRef}
+              />
+            </NativeSelectionRowsContext.Provider>
             {/* Top fade into the bg-background canvas above (desktop only),
                 hinting that the conversation continues past the top edge. */}
             {!isMobile && isScrolledFromTop ? (

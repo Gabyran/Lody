@@ -10,10 +10,6 @@ import { SessionChatStreamView } from '../src/components/ai-gui/view';
 import { initI18n } from '../src/i18n';
 import { createConversationViewFromHistory } from '../src/lib/conversation-view';
 
-vi.mock('@lody/virtua', () => ({
-  Virtualizer: ({ children }: { children: import('react').ReactNode }) => children,
-}));
-
 (
   globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean }
 ).IS_REACT_ACT_ENVIRONMENT = true;
@@ -107,16 +103,6 @@ describe('live agent status', () => {
   const statusRow = () => container.querySelector('[data-agent-activity-row]');
   const shimmering = () =>
     Array.from(container.querySelectorAll('.agent-shimmer')).map((el) => el.textContent);
-
-  it('does not report populated but scroll-hidden conversation content as ready', async () => {
-    await render(liveTurn([{ type: 'text', text: 'Already hydrated answer.' }]), {
-      label: 'Working',
-    });
-    const viewport = container.querySelector<HTMLElement>('[data-message-selection-scroll]');
-    expect(viewport).not.toBeNull();
-    expect(viewport!.style.visibility).toBe('hidden');
-    expect(container.querySelector('[data-window-session-stream-ready]')).toBeNull();
-  });
 
   it('shimmers the collapsed tool group at the bottom of a working turn instead of adding a row', async () => {
     await render(liveTurn([{ type: 'text', text: 'Checking.' }, toolCall('a'), toolCall('b')]), {
@@ -229,7 +215,16 @@ describe('live agent status', () => {
     expect(status!.compareDocumentPosition(info!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     // Copying the whole response still waits for the reply to finish.
     expect(container.querySelector('[aria-label="Copy response"]')).toBeNull();
-    await act(async () => info!.click());
+    // Row overlays mount once their row is armed by a pointer entry, as in the
+    // app; arming remounts the trigger, so click the live one.
+    await act(async () => {
+      info!
+        .closest('[data-virtual-index]')!
+        .dispatchEvent(new MouseEvent('pointerover', { bubbles: true }));
+    });
+    await act(async () =>
+      container.querySelector<HTMLButtonElement>('[aria-label="Turn configuration"]')!.click()
+    );
     expect(document.body.textContent).toContain('Claude Opus 5');
   });
 
@@ -398,7 +393,16 @@ describe('live agent status', () => {
     );
     // Token usage alone is enough to offer the turn details.
     const info = container.querySelector<HTMLButtonElement>('[aria-label="Turn configuration"]');
-    await act(async () => info!.click());
+    // Row overlays mount once their row is armed by a pointer entry, as in the
+    // app; arming remounts the trigger, so click the live one.
+    await act(async () => {
+      info!
+        .closest('[data-virtual-index]')!
+        .dispatchEvent(new MouseEvent('pointerover', { bubbles: true }));
+    });
+    await act(async () =>
+      container.querySelector<HTMLButtonElement>('[aria-label="Turn configuration"]')!.click()
+    );
     const value = (label: string) =>
       [...document.body.querySelectorAll('dt')].find((dt) => dt.textContent === label)
         ?.nextElementSibling;

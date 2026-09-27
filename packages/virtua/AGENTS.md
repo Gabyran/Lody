@@ -19,3 +19,6 @@ as source: `src/core` and `src/react`. Other framework bindings are not carried.
   rules); keep it close to upstream rather than restyling it. `tests/` is linted.
 - Tests use explicit ResizeObserver deliveries and scroll events, never real sleeps.
   Upstream's jsdom snapshot suites (real 50ms sleeps) and browser suites are not carried.
+- The conversation no longer uses this package; its keyed layout moved into the
+  conversation scroll engine (`packages/components/src/lib/conversation-scroll`). The
+  `keyed` changes here have no consumer and are due for removal.
