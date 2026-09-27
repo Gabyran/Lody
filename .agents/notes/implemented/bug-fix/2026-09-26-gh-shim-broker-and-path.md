@@ -38,13 +38,16 @@ Observed in a Claude Code session on a Linux host, before #1034:
 
 ## Decision
 
-`pinGhShimBinDirFirst` in `agent/setting.ts` moves the session's shim dir to the
-front in both `mergeLoginShellEnv` and `withDefaultAcpPathEntries`. Since #1034,
-shim dirs are per workspace broker (`gh-session-bin/<hash>`), so it matches any
-child of `getGhShimSessionBinRoot()`. It only moves an entry already present, so
-envs without a shim are unchanged. It lives in the merge functions because ACP
-spawn, ACP authentication, Session `buildShellEnv`, and the terminal PTY all compose
-them. The shim dir also holds the generated `git` transport, which benefits equally.
+`mergeLoginShellEnv` and `withDefaultAcpPathEntries` in `agent/setting.ts` keep a
+shim dir first when the base PATH leads with one (`getLeadingGhShimBinDir`).
+`prependGhShimBinDirToPath` puts the session's own dir there. Since #1034, shim dirs
+are per workspace broker (`gh-session-bin/<hash>`). A shim dir elsewhere in PATH may
+belong to another workspace: a daemon started inside a Lody agent inherits that
+agent's dir, and so does its login-shell PATH. An earlier revision promoted the first
+`gh-session-bin` entry found. Review showed this routed the session's `gh`/`git`
+through the other workspace's broker, so only a leading base entry now counts. The
+rule lives in the merge functions because ACP spawn, ACP authentication, Session
+`buildShellEnv`, and the terminal PTY all compose them. The shim dir also holds the generated `git` transport, which benefits equally.
 
 The branch originally also made the shim read `LODY_GIT_CRED_BROKER_STATE_FILE`
 first and print unreachable-broker errors. #1034 superseded both: the daemon bakes
@@ -56,7 +59,9 @@ The merge keeps `main`'s shim unchanged. #1034 also stopped injecting a startup
 ## Verification and limits
 
 - `tests/agent-setting.test.ts` composes `withDefaultAcpPathEntries(mergeLoginShellEnv(…))`
-  from a session PATH carrying a workspace broker's shim dir and asserts it comes first.
+  from a session PATH carrying a workspace broker's shim dir and asserts it comes first,
+  including when the login shell carries another workspace's shim dir, which stays in
+  place when the base PATH does not lead with it.
 - A login-shell rc file that prepends a directory containing its own `gh` inside
   Claude Code's snapshot could still shadow the shim; not observed.
 - The shim integration tests load the generated script as CommonJS. A

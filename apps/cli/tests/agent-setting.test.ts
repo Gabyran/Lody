@@ -794,6 +794,33 @@ describe('mergeLoginShellEnv', () => {
     ]);
   });
 
+  it("keeps the session's own shim first when the login shell carries another workspace's", () => {
+    // A daemon started from inside a Lody agent inherits that agent's shim dir, and the
+    // login-shell PATH is derived from the daemon's. Pinning the first shim dir found
+    // would route this session's gh/git through the other workspace's broker.
+    const ownShimDir = getGhShimHostBinDir(join(tmpdir(), 'broker-workspace-a.json'));
+    const foreignShimDir = getGhShimHostBinDir(join(tmpdir(), 'broker-workspace-b.json'));
+    const base = { PATH: [ownShimDir, foreignShimDir, '/usr/bin'].join(delimiter) };
+    const shell = { PATH: [foreignShimDir, '/usr/local/bin', '/usr/bin'].join(delimiter) };
+
+    const spawned = withDefaultAcpPathEntries(mergeLoginShellEnv(base, shell));
+
+    expect(splitPath(spawned.PATH)[0]).toBe(ownShimDir);
+  });
+
+  it('does not promote a shim dir the base PATH did not lead with', () => {
+    // Terminal PTYs merge onto the daemon env, which never deliberately leads with a shim.
+    const foreignShimDir = getGhShimHostBinDir(join(tmpdir(), 'broker-workspace-b.json'));
+    const base = { PATH: ['/usr/bin', foreignShimDir].join(delimiter) };
+    const shell = { PATH: ['/usr/local/bin', foreignShimDir, '/usr/bin'].join(delimiter) };
+
+    expect(splitPath(mergeLoginShellEnv(base, shell).PATH)).toEqual([
+      '/usr/local/bin',
+      foreignShimDir,
+      '/usr/bin',
+    ]);
+  });
+
   it('lets base win for non-PATH vars but fills in vars only the shell has', () => {
     const base = { PATH: '/usr/bin', CODEX_HOME: '/work/.codex', LODY_E2E: '1' };
     const shell = { PATH: '/usr/bin', CODEX_HOME: '/home/u/.codex', LANG: 'en_US.UTF-8' };

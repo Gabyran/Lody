@@ -35,11 +35,14 @@ shell 从未调用包装脚本；系统 `gh` 一直读会话启动时的安装 t
 
 ## 决定
 
-`agent/setting.ts` 的 `pinGhShimBinDirFirst` 在 `mergeLoginShellEnv` 和
-`withDefaultAcpPathEntries` 中都把本会话的包装脚本目录移到最前。#1034 之后包装脚本目录按
-工作区 broker 划分（`gh-session-bin/<hash>`），因此它匹配 `getGhShimSessionBinRoot()` 下的
-任意子目录。它只移动已存在的条目，没有包装脚本的 env 不受影响。之所以放在合并函数里，是
-因为 ACP 启动、ACP 认证、Session 的 `buildShellEnv` 和终端 PTY 都组合了这两个函数。该目录
+当基础 PATH 以包装脚本目录开头时，`agent/setting.ts` 中的 `mergeLoginShellEnv` 和
+`withDefaultAcpPathEntries` 会让该目录保持在最前（`getLeadingGhShimBinDir`）；
+`prependGhShimBinDirToPath` 正是把本会话自己的目录放在那里。#1034 之后，包装脚本目录按
+工作区 broker 划分（`gh-session-bin/<hash>`）。PATH 中其他位置的包装脚本目录可能属于另一个
+工作区：在 Lody Agent 内启动的 daemon 会继承那个 Agent 的目录，daemon 的登录 shell PATH
+也会带上它。早先的版本会提升找到的第一个 `gh-session-bin` 条目。评审发现这会让本会话的
+`gh`/`git` 走另一个工作区的 broker，因此现在只认基础 PATH 开头的条目。之所以放在合并函数
+里，是因为 ACP 启动、ACP 认证、Session 的 `buildShellEnv` 和终端 PTY 都组合了这两个函数。该目录
 也包含生成的 `git` 传输包装，同样受益。
 
 这个分支最初还让包装脚本优先读 `LODY_GIT_CRED_BROKER_STATE_FILE`，并在 broker 不可达时
@@ -50,7 +53,8 @@ shell 从未调用包装脚本；系统 `gh` 一直读会话启动时的安装 t
 ## 验证与局限
 
 - `tests/agent-setting.test.ts` 用带有某个工作区 broker 包装脚本目录的会话 PATH 组合
-  `withDefaultAcpPathEntries(mergeLoginShellEnv(…))`，断言该目录在最前。
+  `withDefaultAcpPathEntries(mergeLoginShellEnv(…))`，断言该目录在最前；登录 shell 带有
+  另一个工作区的包装脚本目录时也是如此，而基础 PATH 并非以它开头时它保持原位。
 - 如果登录 shell 的 rc 文件在 Claude Code 快照中前置了一个自带 `gh` 的目录，仍可能遮住
   包装脚本；尚未观察到。
 - 包装脚本集成测试按 CommonJS 加载生成的脚本。临时目录的祖先目录里若有

@@ -672,20 +672,30 @@ function normalizePathEntry(entry: string): string {
 }
 
 /**
- * Moves the session's `gh` shim dir to the front when present. The shim (and its
+ * Returns the base PATH's first entry when it is a `gh` shim dir. The shim (and its
  * sibling `git` transport) is what selects per-command GitHub credentials; a native
  * `gh` found earlier in PATH runs without them. Agent shells (Claude Code's shell
  * snapshot) inherit this order verbatim, so `BASH_ENV` alone cannot restore it.
- * Shim dirs are per workspace broker, so match any child of the shared root.
+ * Only a LEADING entry counts: `prependGhShimBinDirToPath` puts the session's own
+ * dir first, while a shim dir elsewhere may be another workspace's, inherited by a
+ * daemon started inside a Lody agent, and must never be promoted.
  */
-function pinGhShimBinDirFirst(parts: string[]): string[] {
-  const shimRoot = normalizePathEntry(getGhShimSessionBinRoot());
-  const index = parts.findIndex((entry) => dirname(normalizePathEntry(entry)) === shimRoot);
-  const shimEntry = parts[index];
-  if (index <= 0 || shimEntry === undefined) {
+function getLeadingGhShimBinDir(parts: string[]): string | undefined {
+  const first = parts[0];
+  if (first === undefined) {
+    return undefined;
+  }
+  return dirname(normalizePathEntry(first)) === normalizePathEntry(getGhShimSessionBinRoot())
+    ? first
+    : undefined;
+}
+
+function withLeadingEntry(parts: string[], leading: string | undefined): string[] {
+  if (leading === undefined) {
     return parts;
   }
-  return [shimEntry, ...parts.slice(0, index), ...parts.slice(index + 1)];
+  const normalized = normalizePathEntry(leading);
+  return [leading, ...parts.filter((entry) => normalizePathEntry(entry) !== normalized)];
 }
 
 export function getDefaultAcpPathEntries(homeDir = homedir(), agentType?: string): string[] {
@@ -714,9 +724,10 @@ export function withDefaultAcpPathEntries(
   const currentWithoutDefaults = currentParts.filter(
     (entry) => !defaultEntrySet.has(normalizePathEntry(entry))
   );
-  const nextPath = pinGhShimBinDirFirst([...defaultEntries, ...currentWithoutDefaults]).join(
-    delimiter
-  );
+  const nextPath = withLeadingEntry(
+    [...defaultEntries, ...currentWithoutDefaults],
+    getLeadingGhShimBinDir(currentParts)
+  ).join(delimiter);
 
   if (env[pathKey] === nextPath) {
     return env;
@@ -740,7 +751,8 @@ export function withDefaultAcpPathEntries(
  *   `~/.local/bin`/...). A GUI/daemon launch inherits a minimal PATH, so without
  *   this `opencode acp` & friends fail with ENOENT. Base-only entries (e.g.
  *   runtime-injected `node_modules/.bin`) are appended so nothing is lost. The
- *   one exception is the `gh` shim dir, which stays first (`pinGhShimBinDirFirst`).
+ *   one exception is a `gh` shim dir leading the base PATH, which stays first
+ *   (`getLeadingGhShimBinDir`).
  *
  * Hardcoding a few dirs (see `withDefaultAcpPathEntries`) was rejected: it cannot
  * cover the open-ended set of locations different users install tools into.
@@ -772,7 +784,7 @@ export function mergeLoginShellEnv(
   }
 
   if (ordered.length > 0) {
-    merged[pathKey] = pinGhShimBinDirFirst(ordered).join(delimiter);
+    merged[pathKey] = withLeadingEntry(ordered, getLeadingGhShimBinDir(baseParts)).join(delimiter);
   }
 
   return merged;
