@@ -598,6 +598,49 @@ describe('createWorkspaceRuntime meta recovery lifecycle', () => {
     expect(mocks.metaCheckpointDelete.mock.invocationCallOrder[1]).toBeLessThan(
       mocks.addTransport.mock.invocationCallOrder.at(-1) ?? 0
     );
+    // The local Meta binding synced long before; only the cloud binding's first
+    // sync after the delete ends the episode. A kept marker would delete the
+    // then-valid cloud checkpoint again on every later attach.
+    await flushPromises();
+    expect(window.localStorage.getItem(markerKey)).toBeNull();
+
+    await runtime.dispose();
+  });
+
+  it('does not let a replaced cloud Meta session clear the marker in dual mode', async () => {
+    const cloudFirstSync = Promise.withResolvers<void>();
+    const metaSub = createMetaSub(Promise.resolve());
+    const bindingFor = metaSub.subscription;
+    metaSub.subscription = vi.fn((transportId: string) => {
+      const binding = bindingFor(transportId) as object;
+      return transportId === 'cloud'
+        ? { ...binding, firstSyncedWithRemote: cloudFirstSync.promise }
+        : binding;
+    });
+    mocks.joinMetaRoom.mockResolvedValue(metaSub);
+    enableElectronLocalDataPlane();
+    markSuspectMetaCheckpoint();
+    const runtime = await createWorkspaceRuntime({
+      workspaceSlug: 'workspace',
+      workspaceId: 'workspace-1' as WorkspaceId,
+      apiBaseUrl: 'https://api.example.test',
+    });
+
+    await runtime.setAuthToken('auth-token');
+    expect(mocks.metaCheckpointDelete).toHaveBeenCalledTimes(1);
+    expect(cloudAttachCalls()).toHaveLength(1);
+
+    // That cloud session goes away before its first sync, and the next attach
+    // cannot delete the checkpoint yet.
+    await runtime.setAuthToken(null);
+    mocks.metaCheckpointDelete.mockRejectedValueOnce(
+      new Error('The database connection is closing.')
+    );
+    await expect(runtime.setAuthToken('auth-token')).rejects.toThrow('connection is closing');
+
+    cloudFirstSync.resolve();
+    await flushPromises();
+    expect(window.localStorage.getItem(markerKey)).not.toBeNull();
 
     await runtime.dispose();
   });

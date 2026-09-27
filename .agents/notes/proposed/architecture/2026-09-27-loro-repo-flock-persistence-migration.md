@@ -201,6 +201,11 @@ Separately, a real full disk makes the CLI daemon exit through an uncaught log-t
   - A web attach failure is now recorded explicitly, and `webAttachReconnectLoop` retries it under the shared backoff. That covers the token-change path and the meta-recovery restart path.
   - A same-token `setAuthToken`, network/visibility wake and the backstop also trigger the retry. Token change, offline and dispose stop it.
   - Regressions: same-token retry, backoff-only retry (delete strictly before attach, marker cleared after Meta sync), and no pending retry timer after dispose. Each fails when its mechanism is removed.
+- **Review fix (P1, dual marker).** The dual runtime watches its local Meta binding, which usually synced before the cloud plane attached, so the marker was never cleared. Every later cloud attach deleted a valid cloud checkpoint and bootstrapped again.
+  - In dual mode the marker is now cleared only by the cloud Meta binding's first sync, and only while that tracker is still current and the same cloud attach deleted the checkpoint.
+  - The local binding's success clears it only on the web.
+  - A detach, or a new suspicion marker, resets that per-attach proof.
+  - Regressions: delete, then cloud first sync, clears the marker. A replaced cloud session's late first sync, after a later attach failed to delete, keeps it. Each fails when its guard is removed.
 - **Merge gate for the web.** Mixed-version tabs need loro-dev/loro-repo#138. Electron runs one bundle for all windows, so it is exposed only on rollback.
 
 ### Phase 2: real CLI barriers (independent of upstream)

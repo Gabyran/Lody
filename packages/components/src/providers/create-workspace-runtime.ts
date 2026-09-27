@@ -526,6 +526,11 @@ export async function createWorkspaceRuntime(deps: RuntimeDeps): Promise<Workspa
   // Meta session that resumed from an undeleted suspect checkpoint can sync
   // "successfully" while still missing the prefix it skipped.
   let suspectMetaCheckpointDropped = false;
+  // Dual mode: whether the CURRENT cloud attach deleted the suspect Meta
+  // checkpoint. The dual runtime watches its local Meta binding, which usually
+  // synced before the cloud plane existed, so only the cloud binding's first
+  // sync after such a delete may clear the marker.
+  let cloudAttachDroppedSuspectCheckpoint = false;
   const metaSyncState = (): RoomSyncState => metaTracker?.getSyncState() ?? 'idle';
 
   // workspaceId is required and provided at initialization
@@ -651,6 +656,8 @@ export async function createWorkspaceRuntime(deps: RuntimeDeps): Promise<Workspa
   };
 
   const markMetaRemoteCursorBypass = (reason: string): void => {
+    // A new suspicion is not covered by a delete that happened before it.
+    cloudAttachDroppedSuspectCheckpoint = false;
     const storage = getBrowserLocalStorage();
     if (!storage) {
       return;
@@ -2908,6 +2915,12 @@ export async function createWorkspaceRuntime(deps: RuntimeDeps): Promise<Workspa
       .then(() => {
         if (cloudMetaTracker === currentCloudMetaTracker) {
           currentCloudMetaTracker.markFirstSynced();
+          // This binding's session started after the suspect checkpoint was
+          // deleted, so its first sync ends the recovery episode. A late
+          // success from a replaced tracker never reaches here.
+          if (cloudAttachDroppedSuspectCheckpoint) {
+            clearMetaRemoteCursorBypass();
+          }
         }
       })
       .catch(() => {
@@ -3037,11 +3050,13 @@ export async function createWorkspaceRuntime(deps: RuntimeDeps): Promise<Workspa
       }
       startPresenceTransport();
       createMachineRpcJsonStreamClient(provider, streamsBaseUrl);
+      cloudAttachDroppedSuspectCheckpoint = false;
       try {
         // addTransport joins routed rooms but does not await their catch-up
         // (per-room first sync stays observable on each cloud binding).
         if (isMetaRemoteCursorBypassActive()) {
           await dropSuspectMetaCheckpointBeforeAttach(streamsBaseUrl);
+          cloudAttachDroppedSuspectCheckpoint = true;
         }
         await repo.addTransport('cloud', createStreamsDurableTransport(provider, streamsBaseUrl), {
           ephemeral: true,
@@ -3083,6 +3098,7 @@ export async function createWorkspaceRuntime(deps: RuntimeDeps): Promise<Workspa
     cloudReconnectLoop?.stop();
     cloudMetaTracker?.dispose();
     cloudMetaTracker = null;
+    cloudAttachDroppedSuspectCheckpoint = false;
     await Promise.all([presenceTransport.stop(), machineMonitorTransport.stop()]);
     latestCloudPresenceStates = {};
     publishMergedPresence();
@@ -3183,7 +3199,9 @@ export async function createWorkspaceRuntime(deps: RuntimeDeps): Promise<Workspa
           initialMetaSyncCompleted = true;
           initialMetaSyncFailed = false;
           currentMetaTracker.markFirstSynced();
-          if (suspectMetaCheckpointDropped) {
+          // Dual watches its local binding here; its marker is cleared by the
+          // cloud Meta binding instead (attachCloudMetaHealthTracker).
+          if (suspectMetaCheckpointDropped && !electronLocalDataPlane) {
             clearMetaRemoteCursorBypass();
           }
           // Claim the single-outcome slot on success so a later transient

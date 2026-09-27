@@ -200,6 +200,11 @@ Lody 目前运行 0.20.0，外加一个上游已经吸收的补丁。因此 Lody
   - 现在会显式记录 Web 接入失败，由 `webAttachReconnectLoop` 按共享的退避策略重试。token 变化路径和 Meta 恢复的重启路径都已覆盖。
   - 相同 token 的 `setAuthToken`、网络恢复/页面唤醒以及兜底定时器也会触发重试；token 变化、离线和 dispose 会停止它。
   - 回归测试：相同 token 重试、只靠退避的重试（删除严格先于接入，Meta 同步后标记被清除），以及 dispose 后不留下待执行的重试计时器。去掉各自的机制后，对应测试都会失败。
+- **评审修复（P1，dual 标记）。** dual 运行时监听的是本地 Meta binding，而它通常在 cloud 接入之前就已同步完成，所以标记永远不会被清除。之后每次 cloud 接入都会删除一个有效的 cloud checkpoint 并重新 bootstrap。
+  - 现在 dual 模式下，只有 cloud Meta binding 的首次同步才会清除标记，并且要求该 tracker 仍是当前的、且正是这次 cloud 接入删除了 checkpoint。
+  - 本地 binding 的同步成功只在 Web 上清除标记。
+  - detach 或新的可疑标记都会重置这个“本次接入已删除”的证明。
+  - 回归测试：删除后 cloud 首次同步会清除标记；被替换的 cloud 会话迟到的首次同步（之后的接入删除失败）不会清除。去掉各自的保护后，对应测试都会失败。
 - **Web 端的合并条件。** 新旧版本标签页混用需要 loro-dev/loro-repo#138。Electron 所有窗口运行同一个包，只有回滚时才会受影响。
 
 ### 阶段 2：CLI 使用真正的屏障（不依赖上游）
