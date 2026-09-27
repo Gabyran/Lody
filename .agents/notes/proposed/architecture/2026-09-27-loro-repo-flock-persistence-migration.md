@@ -129,6 +129,11 @@ Evidence is from the loro-repo repository. Its design record is `docs/flock-pers
   - The IndexedDB database ended at version 4 with `replica-checkpoints`.
   - This supports the rollback claim above for data written without cursors. It does not cover mixed-version concurrent writers.
 - The large-workspace storage-growth observation is still open.
+- **Correction: strict durability already applies in Phase 0.**
+  - 0.20.3's `IndexedDBStorageAdaptor.openTransaction` requests `durability: "strict"` for every readwrite transaction that touches the meta or named Flock stores, whether or not cursors are replica-bound.
+  - The renderer's `onPersist*` → `repo.flush()` barrier therefore pays a strict commit per cloud sync event from Phase 0 on.
+  - The strict-transaction gate listed under Phase 1 must be measured before Phase 0 ships widely, not after.
+- **Journal memory under persistent storage failure:** while `storage.save` keeps rejecting (for example, an exceeded quota), the journal keeps every received payload copy. The three-attempt full-file fallback does not bound that growth if the fallback save also fails. Previously only a version vector was retained.
 
 ### Phase 1: renderer replica-bound checkpoints
 

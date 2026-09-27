@@ -128,6 +128,11 @@ Lody 目前运行 0.20.0，外加一个上游已经吸收的补丁。因此 Lody
   - IndexedDB 最终为 v4，并带有 `replica-checkpoints`。
   - 这支持上面"不涉及游标的数据可以安全回滚"的判断，但不覆盖新旧版本同时写入的情况。
 - 大工作区的存储增长观察仍未完成。
+- **更正：strict 持久化在阶段 0 就已生效。**
+  - 0.20.3 的 `IndexedDBStorageAdaptor.openTransaction` 对所有涉及 meta 或命名 Flock 存储的 readwrite 事务都使用 `durability: "strict"`，与游标是否 replica-bound 无关。
+  - 因此从阶段 0 起，渲染端 `onPersist*` → `repo.flush()` 的屏障在每次 cloud 同步事件上都要付出一次 strict 提交。
+  - 阶段 1 下列出的 strict 事务成本关，必须在阶段 0 大范围发布之前测量，而不是之后。
+- **存储持续失败时 journal 的内存：** 当 `storage.save` 一直失败（例如超出配额）时，journal 会保留每一份收到的负载副本。如果全量文件兜底也写不进去，三次重试后的兜底并不能限制这部分增长。以前只保留一个版本向量。
 
 ### 阶段 1：渲染端使用 replica-bound checkpoint
 
