@@ -16,8 +16,8 @@ Translation: current
 `runWake`。修复把 `scheduleWake` 变成唯一的唤醒入口（只能把唤醒提前，绝不能越过 gate），
 在解析凭据之前就用上一轮观测到的 `仓库 → 凭据 scope` 丢弃被 gate 住的批次，并把 scope
 级跳过日志限制为每个 gate 窗口一条。scope 映射刻意在十分钟后过期：按记住的 scope 做
-gate 只是一个快速否定判断，若不过期，一次长时间冻结会把一份新可用、且属于另一个健康
-scope 的凭据永远挡在外面。
+gate 只是一个快速否定判断，其有效期与凭据解析器自身 60 秒的 ambient 刷新周期一致；
+若不设此上限，一次长时间冻结会把切换到另一个健康 scope 的登录或账号变更挡在外面。
 
 ## 被否定的诊断，与成立的诊断
 
@@ -71,9 +71,15 @@ gate 开启时刻。由于 `scheduleWakeAt` 只会把唤醒提前，外部触发
 
 scope 由凭据决定，因此"不解析凭据就跳过某个 scope"必然使用上一次观测到的 scope。若不加
 界限，这是一个正确性隐患：ambient `gh` scope 上一小时的限流冻结，会在一份属于另一个健康
-scope 的托管凭据可用之后仍然抑制轮询。`SCOPE_MAPPING_TTL_MS`（10 分钟）为其设界——过期的
-映射会落到真正的 `resolveCredential`，后者重新打戳。剩余暴露是一份新凭据可能在长冻结后
-最多等待十分钟，这是可接受的：另一种选择——每次唤醒逐仓库解析凭据——正是本次修复的缺陷。
+scope 的托管凭据可用之后仍然抑制轮询。`SCOPE_MAPPING_TTL_MS` 为其设界——过期的映射会落到真正的
+`resolveCredential`，后者重新打戳。
+
+该上限最初是十分钟。rebase 到 #958（[用本机凭据做本地 PR 观测](../feature/2026-09-24-local-github-pr-observation.zh.md)）后前提变了：解析器现在每
+60 秒重新获取一次 ambient `gh` 凭据，使登录、登出和账号切换无需重启即可生效，草案 Spec
+[`local-github-pr-observation`](../../../../specs/local-github-pr-observation.zh.md) 也写明
+了这一保证。十分钟的映射会在 scope 被 gate 时悄悄覆盖这个周期。现在 TTL 取解析器导出的
+`AMBIENT_CREDENTIAL_REFRESH_MS`，因此记住的 scope 绝不会比其来源凭据更陈旧。代价是 gate 期间
+每个仓库每分钟一次真实凭据解析——日志中的场景为每分钟六次，修复前约为 88 次。
 
 曾考虑并否决的替代方案是把 `仓库 → scope` 持久化到 state store，使守护进程重启后无需一次
 未被 gate 的唤醒来学习它。每次启动多一次唤醒，不值得让一个契约明确为"可丢弃调度记忆"的
@@ -85,11 +91,12 @@ scope 的托管凭据可用之后仍然抑制轮询。`SCOPE_MAPPING_TTL_MS`（1
 `pr-poll-scheduler.test.ts`，采用扩充而非新建文件：共用一个已耗尽 scope 的三个仓库，在
 50 秒的 presence 心跳与无关元数据写入下，只产生三次凭据解析、一条 `Bucket empty`、以及
 有界的 skip 计数，随后在回填时刻完成轮询；冻结期间持续心跳的被查看 session 在解冻前无法
-派发；旧 scope 一小时冻结中的第十分钟，属于健康 scope 的替换凭据成功轮询。
+派发；旧 scope 一小时冻结期间，属于健康 scope 的替换凭据在一个刷新周期加一次封顶唤醒内成功轮询。
 
 每个机制都做了消融以确认测试确实会失败：移除循环前 gate、日志节流、`scheduleWake` 的
-gate、presence/metadata 改走 `scheduleWake` 的路由、以及映射 TTL，都会让一个或多个新测试
-失败；收窄签名则会让 `computePrPollMetaSignature` 的契约测试失败。
+gate、presence/metadata 改走 `scheduleWake` 的路由、以及映射 TTL（无限或原先的十分钟），
+都会让一个或多个新测试失败；收窄签名则会让 `computePrPollMetaSignature` 的契约测试失败。
+rebase 到 main 后重新做了全部消融。
 
 一个诚实的限制：仅消融调度器中的签名判断（把每次元数据写入都当作变更）时，所有测试仍然
 通过。唤醒被 gate 之后，多一次唤醒本身很廉价，无关写入的剩余代价是对全部 session 执行
@@ -99,11 +106,14 @@ gate、presence/metadata 改走 `scheduleWake` 的路由、以及映射 TTL，�
 ## 发现的文档缺口
 
 `specs/pr-status-reconciler.md` 被 `apps/cli/AGENTS.md`、`.agents/docs/cli-overview.md`、
-`apps/cli/src/lib/pr-poller/AGENTS.md` 引为规范，各纯模块也按章节名引用它，但它从未存在于
-本仓库——`git log --all` 找不到任何添加它的提交。因此本次改动涉及的唤醒语义无法以 `draft`
-形式修订 Spec。这些语义改为记录在本笔记，以及
-`apps/cli/src/lib/pr-poller/AGENTS.md` 的 invariant 中；若该文档存在于公开边界之外，仍欠
-一次 Spec 修订。
+一处 session-execution 注释引为规范，十个 pr-poller 源文件也按章节名引用它，但它从未存在于
+本仓库——`git log --all` 找不到任何添加它的提交。2026-09-27 rebase 后复查：仍不存在。#958
+把模块 `AGENTS.md` 改指向新的草案 Spec `local-github-pr-observation`，但该 Spec 讨论的是本地
+授权，并明确把"配额、重试与轮询节奏"交给 reconciler，因此它不是唤醒语义的归属。
+
+因此本次改动涉及的唤醒语义无法以 `draft` 形式修订 Spec，改为记录在本笔记以及
+`apps/cli/src/lib/pr-poller/AGENTS.md` 的 invariant 中。**仍欠一次 Spec 修订**：要么该
+reconciler Spec 存在于公开边界之外、需要在那里做这次修订，要么需要在本仓库写出来。
 
 ## 证据
 

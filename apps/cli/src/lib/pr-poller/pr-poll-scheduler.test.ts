@@ -599,7 +599,9 @@ describe('PrPollScheduler', () => {
       await advance(10_000);
     }
     expect(calls()).toHaveLength(0);
-    expect(workspace.resolveCredential).toHaveBeenCalledTimes(1);
+    // The remembered scope is re-verified once per credential refresh window
+    // (60 s), never per heartbeat: two real resolves across 110 s.
+    expect(workspace.resolveCredential).toHaveBeenCalledTimes(2);
     expect(debugLines('is frozen')).toHaveLength(1);
     // 11 heartbeats over 110 s; only the capped wakes (≤30 s) may skip.
     expect(scheduler.counters.skips).toBeLessThanOrEqual(5);
@@ -610,8 +612,8 @@ describe('PrPollScheduler', () => {
 
   it('a scope gate expires so a replacement credential on another scope is not locked out', async () => {
     // Long freeze on the scope the repo resolved to. Gating by the LAST known
-    // scope must not outlive its mapping, or a credential that would resolve to
-    // a healthy scope waits out the whole freeze.
+    // scope must not outlive the resolver's credential refresh cadence, or a
+    // login/account switch to a healthy scope waits out the whole freeze.
     stateStore = makeStateStore({
       ...emptyPrPollerState(),
       scopes: { 'managed:scope-1': { tokens: 20, updatedAtMs: T0, frozenUntilMs: T0 + 3_600_000 } },
@@ -631,8 +633,9 @@ describe('PrPollScheduler', () => {
       credentialScope: 'managed:scope-2',
     };
 
-    // Well inside the one-hour freeze on scope-1.
-    await advance(6 * 60_000);
+    // One refresh window (60 s) plus at most one capped wake (30 s) — not the
+    // remaining 55 minutes of the freeze on scope-1.
+    await advance(90_000);
     expect(calls()).toHaveLength(1);
     expect(calls()[0]?.token).toBe('token-2');
   });

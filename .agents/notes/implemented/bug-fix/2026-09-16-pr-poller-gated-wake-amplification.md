@@ -20,10 +20,10 @@ PRs — both of which called `runWake` directly. The fix makes `scheduleWake` th
 single wake entry point (it may only move a wake earlier, never past a gate),
 drops gated batches before credential resolution using the last observed
 `repository → credential scope`, and throttles scope-wide skip logs to one per
-gate window. The scope mapping deliberately expires after ten minutes: gating by
-a remembered scope is a fast negative only, and without expiry a long freeze
-would lock out a newly available credential belonging to a different, healthy
-scope.
+gate window. The scope mapping deliberately expires on the credential
+resolver's own 60-second ambient refresh cadence: gating by a remembered scope
+is a fast negative only, and without that bound a long freeze would lock out a
+login or account switch to a different, healthy scope.
 
 ## The diagnosis that was wrong, and the one that holds
 
@@ -89,11 +89,20 @@ A credential decides its scope, so skipping a scope without resolving the
 credential necessarily uses the scope observed last time. Left unbounded that is
 a correctness hazard: a one-hour rate-limit freeze on the ambient `gh` scope
 would suppress polling even after a managed credential on a different, healthy
-scope became available. `SCOPE_MAPPING_TTL_MS` (10 minutes) bounds it — a stale
-mapping falls through to a real `resolveCredential`, which re-stamps the
-mapping. The remaining exposure is that a new credential can wait up to ten
-minutes behind a long freeze, which is accepted: the alternative, resolving a
-credential per repository per wake, is the defect being fixed.
+scope became available. `SCOPE_MAPPING_TTL_MS` bounds it — a stale mapping
+falls through to a real `resolveCredential`, which re-stamps the mapping.
+
+The bound was first ten minutes. Rebasing onto #958 ([local PR observation with machine
+credentials](../feature/2026-09-24-local-github-pr-observation.md)) changed the premise: the resolver now re-harvests the
+ambient `gh` credential every 60 seconds so logins, logouts and account
+switches are observed without a restart, a guarantee the draft
+[`local-github-pr-observation`](../../../../specs/local-github-pr-observation.md)
+Spec states. A ten-minute mapping would have silently overridden that cadence
+whenever a scope was gated. The TTL is now `AMBIENT_CREDENTIAL_REFRESH_MS`,
+exported by the resolver, so a remembered scope is never staler than the
+credential it was learned from. The cost is one real credential resolution per
+repository per minute while gated — six a minute for the logged case, against
+roughly 88 before this change.
 
 An alternative considered and rejected was persisting `repository → scope` in
 the state store so a daemon restart would not need one ungated wake to learn it.
@@ -109,13 +118,14 @@ heartbeats and unrelated metadata writes with three credential resolutions, one
 `Bucket empty` line, and a bounded skip count, then poll at refill time; a
 viewed session heartbeating under a freeze cannot dispatch before the thaw; and
 a replacement credential on a healthy scope polls ten minutes into an hour-long
-freeze on the old scope.
+freeze on the old scope, within one refresh window plus one capped wake.
 
 Each mechanism was ablated to confirm the tests fail without it: removing the
 pre-loop gate, the log throttle, the `scheduleWake` gate, the routing of
-presence/metadata through `scheduleWake`, and the mapping TTL each fails one or
-more of the new tests, and narrowing the signature fails the
-`computePrPollMetaSignature` contract test.
+presence/metadata through `scheduleWake`, and the mapping TTL (infinite, or the
+original ten minutes) each fails one or more of the new tests, and narrowing
+the signature fails the `computePrPollMetaSignature` contract test. The
+ablations were repeated after rebasing onto main.
 
 One honest limit: ablating the signature check in the scheduler alone (treating
 every metadata write as changed) leaves all tests passing. Once the wake is
@@ -127,13 +137,19 @@ at its pure-function contract rather than through a mock tally.
 ## Documentation gap found
 
 `specs/pr-status-reconciler.md` is cited as normative by `apps/cli/AGENTS.md`,
-`.agents/docs/cli-overview.md`, and `apps/cli/src/lib/pr-poller/AGENTS.md`, and
-by section name throughout the pure modules, but it has never existed in this
-repository — `git log --all` finds no revision that added it. The wake semantics
-this change alters could therefore not be revised as a `draft` Spec. They are
-recorded here and as an invariant in `apps/cli/src/lib/pr-poller/AGENTS.md`
-instead; a Spec revision is still owed if the document exists outside the public
-boundary.
+`.agents/docs/cli-overview.md`, a session-execution comment, and by section name
+in ten pr-poller source files, but it has never existed in this repository —
+`git log --all` finds no revision that added it. Rechecked on 2026-09-27 after
+rebasing: still absent. #958 repointed the module `AGENTS.md` at the new draft
+`local-github-pr-observation` Spec, but that Spec covers local authorization and
+explicitly delegates "quotas, retry and polling cadence" to the reconciler, so
+it is not the home for wake semantics.
+
+The wake semantics this change alters could therefore not be revised as a
+`draft` Spec. They are recorded here and as an invariant in
+`apps/cli/src/lib/pr-poller/AGENTS.md` instead. **A Spec revision is still
+owed**: either the reconciler Spec exists outside the public boundary and needs
+this revision there, or it needs to be written here.
 
 ## Evidence
 

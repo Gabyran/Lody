@@ -99,7 +99,8 @@ Effect adapters: `pr-poller-workspace.ts` (Loro repo + presence + credentials
   point: it may move a wake earlier but never past a gate, so presence and
   metadata triggers defer to the scope's `availableAtMs`. `runWake` drops gated
   batches BEFORE resolving credentials, keyed by the last observed
-  `repo → scope` (which expires, so a new credential is never locked out);
+  `repo → scope`, trusted no longer than the resolver's ambient refresh
+  cadence so gating never delays a login or account switch;
   scope-wide skips log once per gate window; and a metadata write counts as a
   change only when `computePrPollMetaSignature` moves.
 - **No turn-end hook.** Post-turn freshness comes from the `lastMessageAt`

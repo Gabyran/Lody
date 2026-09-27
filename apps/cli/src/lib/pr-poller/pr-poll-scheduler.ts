@@ -37,7 +37,10 @@ import {
   type PrPollSessionEntry,
 } from './pr-poll-targets';
 import { planAssociation, planPullRequestMetaWrite } from './pr-poll-writeback';
-import type { ResolvedGitHubCredential } from './github-credential-resolver';
+import {
+  AMBIENT_CREDENTIAL_REFRESH_MS,
+  type ResolvedGitHubCredential,
+} from './github-credential-resolver';
 import type { PrPollMetaPatch, PrPollerWorkspaceHandle } from './pr-poller-workspace';
 
 /**
@@ -71,9 +74,11 @@ const CREDENTIAL_LOG_THROTTLE_MS = 10 * 60_000;
  * a fast negative before the credential must be resolved for real again. Scope
  * gating skips whole scopes without resolving credentials; this bound is what
  * stops a long freeze from locking out a NEWLY available credential that would
- * resolve to a different, ungated scope.
+ * resolve to a different, ungated scope. It equals the resolver's own ambient
+ * refresh cadence: a remembered scope must never be staler than the credential
+ * it was learned from, or gating would delay login/account changes past it.
  */
-const SCOPE_MAPPING_TTL_MS = 10 * 60_000;
+const SCOPE_MAPPING_TTL_MS = AMBIENT_CREDENTIAL_REFRESH_MS;
 /** Freeze when GitHub signals a limit without a usable resetAt. */
 const DEFAULT_RATE_LIMIT_FREEZE_MS = 10 * 60_000;
 /**
