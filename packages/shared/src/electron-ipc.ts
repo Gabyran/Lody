@@ -488,6 +488,8 @@ export type CheckForElectronUpdateResult = {
 export type QuitAndInstallElectronUpdateResult = {
   ok: boolean;
   error?: string;
+  /** The user kept changes storage refused instead of restarting; not an error. */
+  cancelled?: boolean;
 };
 
 export type NotificationPermissionState = 'default' | 'denied' | 'granted';

@@ -106,8 +106,13 @@ export type WindowTeardownKind = 'close' | 'reload' | 'sign-out' | 'clear-cache'
 export type WindowStorageBarrierOptions = {
   state: RendererStorageState;
   quitCheck: RendererStorageQuitCheckOptions;
-  /** The app is quitting: its own barrier already asked; let every window go. */
-  isQuitting: () => boolean;
+  /**
+   * A quit the user approved through the quit storage check is in progress:
+   * every window was asked already, so windows unload freely. Never the global
+   * "app is quitting" flag, which other code sets before any check and which a
+   * cancelled quit must not leave behind.
+   */
+  quitApproved: () => boolean;
   /** Asks whether to drop changes still unsaved after the window's final flush. */
   confirmDiscard: (since: number, kind: WindowTeardownKind) => Promise<boolean>;
   /** A renderer went away without an approved teardown (crash, forced destroy). */
@@ -145,7 +150,7 @@ export class WindowStorageBarrier {
    * (the caller then calls `event.preventDefault()` to override the renderer).
    */
   onUnloadPrevented(windowId: number): boolean {
-    if (this.options.isQuitting() || this.approved.has(windowId)) return true;
+    if (this.options.quitApproved() || this.approved.has(windowId)) return true;
     if (this.decisions.has(windowId)) return false;
     const intent = this.intents.get(windowId);
     this.intents.delete(windowId);
@@ -249,3 +254,47 @@ export async function tearDownWindows(options: {
 
 /** Auth error code when the user kept unsaved changes instead of signing out. */
 export const SIGN_OUT_CANCELLED_CODE = 'sign_out_cancelled_unsaved_storage';
+
+export type QuitCoordinator = {
+  /**
+   * Flushes and, if needed, asks before anything quits (menu, last window,
+   * updater). Idempotent while an approved quit is in progress.
+   */
+  approve: () => Promise<boolean>;
+  /** The quit did not go ahead (cancelled, install or stop failed): undo approval. */
+  abort: () => void;
+  isApproved: () => boolean;
+};
+
+/**
+ * The one owner of quit approval. A cancel resets the global "app is quitting"
+ * flag too: other code sets that flag before asking (updaters must, since
+ * Electron's updater closes windows before `before-quit`), and a flag left
+ * behind would let every later window close/reload skip the storage barrier.
+ */
+export function createQuitCoordinator(options: {
+  /** The earliest change a quit would lose, after a final flush; null if none. */
+  unsavedSince: () => Promise<number | null>;
+  confirmDiscard: (since: number) => Promise<boolean>;
+  setAppQuitting: (quitting: boolean) => void;
+}): QuitCoordinator {
+  let approved = false;
+  const abort = () => {
+    approved = false;
+    options.setAppQuitting(false);
+  };
+  return {
+    isApproved: () => approved,
+    abort,
+    approve: async () => {
+      if (approved) return true;
+      const since = await options.unsavedSince();
+      if (since !== null && !(await options.confirmDiscard(since).catch(() => false))) {
+        abort();
+        return false;
+      }
+      approved = true;
+      return true;
+    },
+  };
+}

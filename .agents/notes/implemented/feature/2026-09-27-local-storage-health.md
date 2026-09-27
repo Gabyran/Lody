@@ -195,6 +195,23 @@ and leaves the session, the CLI and every window alone. `signOut` itself approve
 again, in case a window became unsaved in between. A declined cache clear leaves the
 clear armed for the next load.
 
+**Quit approval has one owner.** The updater set the global "app is quitting" flag
+before the quit barrier asked anything. It has to set that flag because Electron's
+updater closes windows before `before-quit`. A cancelled quit never cleared the
+flag, and the window barrier trusted it, so after a cancelled update every window
+close or reload skipped the flush and the question. Review caught that as well.
+
+`createQuitCoordinator` now approves every quit: menu, last window, and all three
+updater paths.
+- It flushes the agent and the windows, and confirms what is still unsaved.
+- A cancel, an install failure or a failed stop aborts: approval and the quitting
+  flag are both cleared.
+- The window barrier trusts only the coordinator's approval, never the global flag.
+- The updater asks before it marks anything or starts the install; on Linux that is
+  before the password prompt and `app.relaunch()`.
+- A cancelled install returns `cancelled: true`, and the renderer treats it as no
+  error.
+
 The barrier code moved to the self-contained `@lody/shared/renderer-storage-barrier`,
 so Electron's `node --test` suite and the renderer's real-`LoroRepo` tests run the
 same code.
@@ -291,6 +308,10 @@ Automated, with injected clocks, manual timers and fault injection, no real slee
   - A crash is reported as a loss.
 
   Making the barrier approve without asking fails both barrier tests.
+- `desktop-exclusion.test.mjs` (quit coordinator): with the quitting flag preset as
+  the updater does, a cancelled quit clears it, and a later window close is flushed
+  and asked again. An approved quit lets the window go; an aborted one (failed
+  install) guards it again. Not clearing the flag on abort fails it.
 - `packages/components/tests/renderer-storage-episodes.test.ts` (sign-out across
   windows, real `LoroRepo`s): window B's meta is refused and window A signs out.
   - Cancel destroys nothing, and B's report and repo stay.

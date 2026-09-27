@@ -93,7 +93,27 @@ export class AppUpdaterService {
   private errorCount = 0
   private installInFlight = false
 
-  constructor(private readonly options: { enabled?: boolean } = {}) {}
+  constructor(
+    private readonly options: {
+      enabled?: boolean
+      /**
+       * The app's quit coordinator: `approve` runs the unsaved-storage check (and
+       * may ask the user) before anything quits; `abort` undoes an approval when
+       * the install does not go ahead. Installing must not mark the app as
+       * quitting before approval: Electron's updater closes windows first.
+       */
+      quit?: { approve: () => Promise<boolean>; abort: () => void }
+    } = {}
+  ) {}
+
+  private async approveQuit(): Promise<boolean> {
+    return (await this.options.quit?.approve()) ?? true
+  }
+
+  private abortQuit(): void {
+    if (this.options.quit) this.options.quit.abort()
+    else setAppQuitting(false)
+  }
 
   getState(): ElectronUpdaterState {
     return this.state
@@ -216,12 +236,13 @@ export class AppUpdaterService {
 
   async quitAndInstall(): Promise<QuitAndInstallElectronUpdateResult> {
     if (this.sparkleBridge) {
+      if (!(await this.approveQuit())) return { ok: false, cancelled: true }
       try {
         setAppQuitting(true)
         this.sparkleBridge.installUpdateNow()
         return { ok: true }
       } catch (error) {
-        setAppQuitting(false)
+        this.abortQuit()
         const message = formatUnknownError(error)
         this.setState({
           phase: 'error',
@@ -246,6 +267,8 @@ export class AppUpdaterService {
       downloadedFile: this.downloadedFile,
       appImagePath: process.env.APPIMAGE
     })
+    // Before the password prompt, and before anything is marked as quitting.
+    if (!(await this.approveQuit())) return { ok: false, cancelled: true }
     if (linuxPlan) return await this.installLinuxDeb(linuxPlan)
 
     try {
@@ -260,7 +283,7 @@ export class AppUpdaterService {
       // is no longer the signal: a downloaded package stays `downloaded` so the
       // user can retry.
       if (this.errorCount !== errorsBeforeInstall) {
-        setAppQuitting(false)
+        this.abortQuit()
         return {
           ok: false,
           error: this.state.error ?? 'update_install_failed'
@@ -268,7 +291,7 @@ export class AppUpdaterService {
       }
       return { ok: true }
     } catch (error) {
-      setAppQuitting(false)
+      this.abortQuit()
       const message = formatUnknownError(error)
       this.setState({
         phase: 'error',
@@ -293,6 +316,7 @@ export class AppUpdaterService {
     // The window stays interactive during the prompt, so a second click would
     // raise a second password prompt for the same install.
     if (this.installInFlight) {
+      // The first click's install (and its quit approval) is still running.
       return {
         ok: false,
         error: 'update_install_in_progress'
@@ -305,6 +329,7 @@ export class AppUpdaterService {
         spawn(command, args, { stdio: ['ignore', 'ignore', 'pipe'] })
       )
       if (!result.ok) {
+        this.abortQuit()
         this.recordError(result.error)
         return {
           ok: false,

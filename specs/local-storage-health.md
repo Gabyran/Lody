@@ -125,6 +125,10 @@ them a chance to unload, so both ask first: every window holding unsaved changes
 flushes, and whatever is still unsaved gets one confirmation. Cancel stops the
 sign-out or the clear, and nothing is closed or changed.
 
+Installing an update is a quit and asks the same question before anything starts
+quitting. Cancel keeps the app running, and every later close or reload is guarded
+again.
+
 ## Open questions
 
 - loro-repo still logs failed background saves to the console, and a first open after

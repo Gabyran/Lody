@@ -20,7 +20,6 @@ import {
 } from './window'
 import {
   getMainWindow,
-  isAppQuitting,
   productWindows,
   setAppQuitting,
   setWindowsTrayAvailable
@@ -31,6 +30,7 @@ import { createDesktopQuitBarrier } from './services/desktop-shutdown'
 import {
   RendererStorageState,
   WindowStorageBarrier,
+  createQuitCoordinator,
   resolveUnsavedBeforeQuit,
   type RendererStorageQuitCheckOptions,
   type WindowTeardownKind
@@ -266,10 +266,31 @@ export function startApplication(executionHost?: DesktopExecutionHost): void {
       })
       return response === 0
     }
+    // The one place a quit is approved, whoever starts it (menu, last window,
+    // updater): the agent and every window with unsaved storage get a final flush
+    // and the user confirms what is still unsaved. Approval lets windows unload
+    // freely; a cancelled or failed quit clears it, and the global quitting flag,
+    // so window close/reload is guarded again.
+    const quitCoordinator = createQuitCoordinator({
+      unsavedSince: async () => {
+        const cliIssue = cliService
+          .getCliState()
+          .runtime?.issues.find((issue) => issue.code === LOCAL_STORAGE_UNSAVED_ISSUE_CODE)
+        return await resolveUnsavedBeforeQuit({
+          cliUnsavedSince: cliIssue?.firstSeenAtMs ?? null,
+          renderer: rendererStorageState,
+          quitCheck: rendererQuitCheck
+        })
+      },
+      confirmDiscard: (since) => confirmStorageLoss(since, 'quit'),
+      setAppQuitting
+    })
+    const approveQuit = quitCoordinator.approve
+    const abortQuit = quitCoordinator.abort
     const windowStorageBarrier = new WindowStorageBarrier({
       state: rendererStorageState,
       quitCheck: rendererQuitCheck,
-      isQuitting: isAppQuitting,
+      quitApproved: quitCoordinator.isApproved,
       confirmDiscard: (since, kind) => confirmStorageLoss(since, kind),
       reportLost: (windowId, since) => {
         console.error(
@@ -299,7 +320,8 @@ export function startApplication(executionHost?: DesktopExecutionHost): void {
       enabled: shouldConstructUpdaterEnabled({
         localPlatform: isLocalPlatform(),
         forceEnable: process.env.LODY_ELECTRON_ENABLE_UPDATER === '1'
-      })
+      }),
+      quit: { approve: approveQuit, abort: abortQuit }
     })
     const notificationService = new NotificationService(() => getMainWindow())
     const windowsTrayService = new WindowsTrayService({
@@ -433,19 +455,8 @@ export function startApplication(executionHost?: DesktopExecutionHost): void {
     const quitBarrier = createDesktopQuitBarrier({
       // The local agent keeps changes in memory while its disk is full; stopping
       // it now drops whatever has not reached disk or the cloud.
-      // Windows whose own IndexedDB repo refused writes are asked to flush first.
-      confirmQuit: async () => {
-        const cliIssue = cliService
-          .getCliState()
-          .runtime?.issues.find((issue) => issue.code === LOCAL_STORAGE_UNSAVED_ISSUE_CODE)
-        const unsavedSince = await resolveUnsavedBeforeQuit({
-          cliUnsavedSince: cliIssue?.firstSeenAtMs ?? null,
-          renderer: rendererStorageState,
-          quitCheck: rendererQuitCheck
-        })
-        if (unsavedSince === null) return true
-        return await confirmStorageLoss(unsavedSince, 'quit')
-      },
+      // The agent and every window with unsaved storage are asked first.
+      confirmQuit: approveQuit,
       stop: async () => {
         setAppQuitting(true)
         setWindowsTrayAvailable(false)
@@ -464,6 +475,7 @@ export function startApplication(executionHost?: DesktopExecutionHost): void {
       },
       quit: () => app.quit(),
       reportFailure: (error) => {
+        abortQuit()
         // A timeout does not prove exit. Keep ownership until quit succeeds.
         console.error('[Electron] Quit blocked by the embedded CLI', error)
         dialog.showErrorBox(

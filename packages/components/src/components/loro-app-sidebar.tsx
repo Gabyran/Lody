@@ -3160,6 +3160,8 @@ export function LoroAppSidebar({
     }
 
     setIsInstallingUpdate(false);
+    // The user kept unsaved changes in the quit dialog; nothing failed.
+    if (result.cancelled) return;
     toast.error(
       result.error ??
         t('sidebar.updateReady.installFailed', 'Failed to restart and install update.')

@@ -8,6 +8,7 @@ import { createDesktopQuitBarrier } from './desktop-shutdown.ts'
 import {
   RendererStorageState,
   WindowStorageBarrier,
+  createQuitCoordinator,
   resolveUnsavedBeforeQuit
 } from '@lody/shared/renderer-storage-barrier'
 
@@ -205,7 +206,7 @@ const createBarrierHarness = (options = {}) => {
   let confirmAnswer = false
   const barrier = new WindowStorageBarrier({
     state,
-    isQuitting: () => options.quitting ?? false,
+    quitApproved: () => options.quitting ?? false,
     confirmDiscard: async (since, kind) => {
       confirms.push([since, kind])
       return confirmAnswer
@@ -290,6 +291,64 @@ void test('a discarded reload goes through; quitting and renderer loss are handl
   crashed.state.report(4, 7_000)
   crashed.barrier.documentGone(4)
   assert.deepEqual(crashed.lost, [[4, 7_000]])
+})
+
+void test('a cancelled quit clears a preset quitting flag, so window close is guarded again', async () => {
+  // An updater marks the app as quitting before it asks (its install closes windows first).
+  let appQuitting = true
+  const state = new RendererStorageState()
+  state.report(7, 1_000)
+  const asked = []
+  let quitAnswer = false
+  const coordinator = createQuitCoordinator({
+    unsavedSince: async () => state.earliestUnsaved(),
+    confirmDiscard: async (since) => {
+      asked.push(['quit', since])
+      return quitAnswer
+    },
+    setAppQuitting: (quitting) => {
+      appQuitting = quitting
+    }
+  })
+  const barrier = new WindowStorageBarrier({
+    state,
+    quitApproved: coordinator.isApproved,
+    confirmDiscard: async (since, kind) => {
+      asked.push([kind, since])
+      return false
+    },
+    quitCheck: {
+      timeoutMs: 3_000,
+      setTimer: () => null,
+      clearTimer: () => {},
+      send: (windowId, requestId) => {
+        queueMicrotask(() => state.handleQuitCheckResult(windowId, requestId, 1_000))
+        return true
+      }
+    }
+  })
+
+  // The user keeps the unsaved changes: the quit is cancelled and the flag cleared.
+  assert.equal(await coordinator.approve(), false)
+  assert.equal(appQuitting, false)
+  // Closing that window later is guarded again: it flushes and asks.
+  barrier.noteIntent(7, 'close', () => {})
+  assert.equal(barrier.onUnloadPrevented(7), false)
+  await barrier.whenDecided(7)
+  assert.deepEqual(asked, [
+    ['quit', 1_000],
+    ['close', 1_000]
+  ])
+
+  // An approved quit lets windows go; if the install then fails, they are guarded again.
+  quitAnswer = true
+  assert.equal(await coordinator.approve(), true)
+  assert.equal(barrier.onUnloadPrevented(7), true)
+  appQuitting = true
+  coordinator.abort()
+  assert.equal(appQuitting, false)
+  assert.equal(barrier.onUnloadPrevented(7), false)
+  await barrier.whenDecided(7)
 })
 
 void test('quit waits for execution exit, retains ownership on failure, and allows retry', async () => {

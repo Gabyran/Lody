@@ -139,7 +139,7 @@ describe('sign-out across windows', () => {
     const confirms: Array<[number, string]> = [];
     const barrier = new WindowStorageBarrier({
       state,
-      isQuitting: () => false,
+      quitApproved: () => false,
       reportLost: (windowId) => lost.push(windowId),
       confirmDiscard: async (since, kind) => {
         confirms.push([since, kind]);
