@@ -5,7 +5,11 @@ import test from 'node:test'
 import { acquireDesktopLease } from './desktop-exclusion.ts'
 import { createDesktopLaunchBuffer } from './desktop-launch-buffer.ts'
 import { createDesktopQuitBarrier } from './desktop-shutdown.ts'
-import { RendererStorageState, resolveUnsavedBeforeQuit } from './renderer-storage-state.ts'
+import {
+  RendererStorageState,
+  WindowStorageBarrier,
+  resolveUnsavedBeforeQuit
+} from './renderer-storage-state.ts'
 
 const loopback = { host: '127.0.0.1', port: 0 }
 
@@ -158,7 +162,7 @@ void test('quit warns for a window whose storage refused changes, even with a he
   assert.equal(stopCalls, 1)
 })
 
-void test('a window that does not answer keeps its last report; a destroyed one is forgotten', async () => {
+void test('a window that does not answer, or cannot be asked, keeps its last report', async () => {
   const renderer = new RendererStorageState()
   renderer.report(7, 1_000)
   let fire
@@ -174,21 +178,118 @@ void test('a window that does not answer keeps its last report; a destroyed one 
   fire()
   assert.equal(await silent, 1_000)
 
-  const gone = await renderer.checkBeforeQuit({
+  // Not being able to ask a window is not proof that it saved.
+  const unreachable = await renderer.checkBeforeQuit({
     timeoutMs: 3_000,
     setTimer: () => null,
     clearTimer: () => {},
     send: () => false
   })
-  assert.equal(gone, null)
+  assert.equal(unreachable, 1_000)
   assert.equal(
     await resolveUnsavedBeforeQuit({
       cliUnsavedSince: 2_000,
       renderer,
       quitCheck: { timeoutMs: 1, send: () => false }
     }),
-    2_000
+    1_000
   )
+})
+
+/** A window whose renderer answers `storage.quitCheck` with `answer.since`. */
+const createBarrierHarness = (options = {}) => {
+  const state = new RendererStorageState()
+  const answer = { since: 1_000 }
+  const confirms = []
+  const lost = []
+  let confirmAnswer = false
+  const barrier = new WindowStorageBarrier({
+    state,
+    isQuitting: () => options.quitting ?? false,
+    confirmDiscard: async (since, kind) => {
+      confirms.push([since, kind])
+      return confirmAnswer
+    },
+    reportLost: (windowId, since) => lost.push([windowId, since]),
+    quitCheck: {
+      timeoutMs: 3_000,
+      setTimer: () => null,
+      clearTimer: () => {},
+      send: (windowId, requestId) => {
+        queueMicrotask(() => state.handleQuitCheckResult(windowId, requestId, answer.since))
+        return true
+      }
+    }
+  })
+  return {
+    state,
+    barrier,
+    answer,
+    confirms,
+    lost,
+    setConfirm: (value) => {
+      confirmAnswer = value
+    }
+  }
+}
+
+void test('closing a window with unsaved storage changes flushes, asks, and keeps it on cancel', async () => {
+  const { state, barrier, answer, confirms } = createBarrierHarness()
+  state.report(7, 1_000)
+  let closes = 0
+  const close = () => {
+    closes++
+  }
+
+  // The renderer cancelled its unload; its final flush is still refused.
+  barrier.noteIntent(7, 'close', close)
+  assert.equal(barrier.onUnloadPrevented(7), false)
+  await barrier.whenDecided(7)
+  assert.deepEqual(confirms, [[1_000, 'close']])
+  assert.equal(closes, 0)
+  assert.equal(state.unsavedSince(7), 1_000)
+
+  // Space was freed: the next attempt's flush saves everything, so the close goes ahead.
+  answer.since = null
+  barrier.noteIntent(7, 'close', close)
+  assert.equal(barrier.onUnloadPrevented(7), false)
+  await barrier.whenDecided(7)
+  assert.equal(closes, 1)
+  assert.deepEqual(confirms, [[1_000, 'close']])
+  assert.equal(state.unsavedSince(7), null)
+  // The repeated close is let through, until the window's document goes away.
+  assert.equal(barrier.onUnloadPrevented(7), true)
+  barrier.documentGone(7)
+  assert.equal(barrier.onUnloadPrevented(7), false)
+})
+
+void test('a discarded reload goes through; quitting and renderer loss are handled', async () => {
+  const discard = createBarrierHarness()
+  discard.state.report(9, 5_000)
+  discard.answer.since = 5_000
+  discard.setConfirm(true)
+  let reloads = 0
+  discard.barrier.noteIntent(9, 'reload', () => {
+    reloads++
+  })
+  assert.equal(discard.barrier.onUnloadPrevented(9), false)
+  await discard.barrier.whenDecided(9)
+  assert.deepEqual(discard.confirms, [[5_000, 'reload']])
+  assert.equal(reloads, 1)
+  // The renderer still holds unsaved changes and cancels again; the user already chose.
+  assert.equal(discard.barrier.onUnloadPrevented(9), true)
+  discard.barrier.documentGone(9)
+  assert.deepEqual(discard.lost, [])
+
+  const quitting = createBarrierHarness({ quitting: true })
+  quitting.state.report(3, 1_000)
+  assert.equal(quitting.barrier.onUnloadPrevented(3), true)
+
+  // A crash is not an approved teardown: the loss is reported, not treated as saved.
+  const crashed = createBarrierHarness()
+  crashed.state.report(4, 7_000)
+  crashed.barrier.documentGone(4)
+  assert.deepEqual(crashed.lost, [[4, 7_000]])
 })
 
 void test('quit waits for execution exit, retains ownership on failure, and allows retry', async () => {

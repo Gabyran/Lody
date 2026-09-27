@@ -54,4 +54,7 @@ access without a new capability/security decision in the owning
 
 Quit asks before stopping when changes would be lost in the local agent OR in any
 window's own repo (`renderer-storage-state.ts`); each such window gets a final
-`storage.quitCheck` flush first. Spec: `specs/local-storage-health.md`.
+`storage.quitCheck` flush first. Closing or reloading one window goes through
+`WindowStorageBarrier` (`will-prevent-unload`); never drop a window's report on
+destroy, and never reload with a built-in menu role or a raw `webContents.reload()`
+that skips recording the intent. Spec: `specs/local-storage-health.md`.

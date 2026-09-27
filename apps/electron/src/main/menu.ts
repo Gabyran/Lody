@@ -27,10 +27,18 @@ type SetupApplicationMenuOptions = {
   appUpdaterService: AppUpdaterService
   getMainWindow: () => BrowserWindow | null
   openOrFocusMainWindow: () => BrowserWindow
+  /** Reloads through the window storage barrier (unsaved renderer changes). */
+  reloadWindow: (window: BrowserWindow, ignoreCache: boolean) => void
 }
 
 let currentLocale: SupportedLocale = 'en'
 let menuOptions: SetupApplicationMenuOptions | null = null
+
+function reloadFromMenu(target: Electron.BaseWindow | undefined, ignoreCache: boolean): void {
+  const window = target instanceof BrowserWindow ? target : BrowserWindow.getFocusedWindow()
+  if (!window || window.isDestroyed() || !menuOptions) return
+  menuOptions.reloadWindow(window, ignoreCache)
+}
 
 function sendMenuAction(action: string): void {
   if (!menuOptions) {
@@ -191,8 +199,17 @@ function buildAndSetMenu(): void {
     {
       label: t(locale, 'menu.view'),
       submenu: [
-        { role: 'reload', accelerator: 'CmdOrCtrl+R' },
-        { role: 'forceReload' },
+        // Not the built-in roles: those reload directly, past the storage barrier.
+        {
+          label: t(locale, 'menu.reload'),
+          accelerator: 'CmdOrCtrl+R',
+          click: (_item, window) => reloadFromMenu(window, false)
+        },
+        {
+          label: t(locale, 'menu.forceReload'),
+          accelerator: 'Shift+CmdOrCtrl+R',
+          click: (_item, window) => reloadFromMenu(window, true)
+        },
         { role: 'toggleDevTools' },
         { type: 'separator' },
         { role: 'resetZoom' },

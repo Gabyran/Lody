@@ -49,6 +49,20 @@ export class RendererStorageEpisodes {
     return earliest;
   }
 
+  /**
+   * `beforeunload` guard: closing, reloading or navigating this window would drop
+   * repos that still hold unsaved changes, so the unload is cancelled. Electron's
+   * main process then gets `will-prevent-unload`, asks this window to flush
+   * (`storage.quitCheck`), and repeats the action once it saved, or once the
+   * user chose to discard. A browser shows its own "leave site?" prompt.
+   */
+  handleBeforeUnload(event: Pick<BeforeUnloadEvent, 'preventDefault' | 'returnValue'>): void {
+    if (this.earliestUnsaved === null) return;
+    event.preventDefault();
+    // Legacy engines only honour a non-empty returnValue.
+    event.returnValue = 'unsaved';
+  }
+
   /** The quit-time answer: flush every repo holding unsaved changes, then report what is left. */
   async flushForQuit(): Promise<number | null> {
     const pending = [...this.episodes.values()].filter((episode) => episode.since !== null);
@@ -71,10 +85,18 @@ export const rendererStorageEpisodes = new RendererStorageEpisodes((since) => {
 
 let quitCheckInstalled = false;
 
-/** Answers Electron's quit barrier; idempotent, a no-op outside Electron. */
+/**
+ * Answers Electron's quit and window barriers, and guards this window's unload;
+ * idempotent.
+ */
 export const installRendererStorageQuitCheck = (): void => {
   if (quitCheckInstalled) return;
   quitCheckInstalled = true;
+  if (typeof window !== 'undefined') {
+    window.addEventListener('beforeunload', (event) =>
+      rendererStorageEpisodes.handleBeforeUnload(event)
+    );
+  }
   onIpcEvent('storage.quitCheck', ({ requestId }) => {
     void rendererStorageEpisodes.flushForQuit().then((since) => {
       sendIpc('storage.quitCheckResult', { requestId, since });

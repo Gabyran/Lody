@@ -46,22 +46,13 @@ export function registerIpcServices(deps: IpcServiceDeps) {
   setIpcServiceDeps(deps)
   installNativeThemeWatch()
 
-  const trackedStorageWindows = new Set<number>()
+  // A window's report is dropped only by the window storage barrier (approved
+  // teardown, new document, renderer gone), never merely because it closed.
   const parseSince = (value: unknown): number | null | undefined =>
     value === null ? null : typeof value === 'number' && Number.isFinite(value) ? value : undefined
-  const trackStorageWindow = (event: IpcMainEvent) => {
-    const windowId = event.sender.id
-    if (trackedStorageWindows.has(windowId)) return
-    trackedStorageWindows.add(windowId)
-    event.sender.once('destroyed', () => {
-      trackedStorageWindows.delete(windowId)
-      deps.rendererStorageState.forget(windowId)
-    })
-  }
   ipcMain.on(IPC_SEND_CHANNELS.storageRendererUnsaved, (event, payload: unknown) => {
     const since = parseSince((payload as { since?: unknown } | null)?.since)
     if (since === undefined) return
-    trackStorageWindow(event)
     deps.rendererStorageState.report(event.sender.id, since)
   })
   ipcMain.on(IPC_SEND_CHANNELS.storageQuitCheckResult, (event, payload: unknown) => {
@@ -71,7 +62,6 @@ export function registerIpcServices(deps: IpcServiceDeps) {
     }
     const since = parseSince(rawSince)
     if (typeof requestId !== 'string' || since === undefined) return
-    trackStorageWindow(event)
     deps.rendererStorageState.handleQuitCheckResult(event.sender.id, requestId, since)
   })
 

@@ -20,6 +20,7 @@ import {
 } from './window'
 import {
   getMainWindow,
+  isAppQuitting,
   productWindows,
   setAppQuitting,
   setWindowsTrayAvailable
@@ -27,7 +28,14 @@ import {
 import { CliService } from './services/cli-service'
 import type { DesktopExecutionHost } from './services/desktop-execution-host'
 import { createDesktopQuitBarrier } from './services/desktop-shutdown'
-import { RendererStorageState, resolveUnsavedBeforeQuit } from './services/renderer-storage-state'
+import {
+  RendererStorageState,
+  WindowStorageBarrier,
+  resolveUnsavedBeforeQuit,
+  type RendererStorageQuitCheckOptions,
+  type WindowTeardownKind
+} from './services/renderer-storage-state'
+import { setRendererReloadIntentHook } from './renderer-recovery'
 import { applyPendingDesktopLocalReset } from './services/local-reset-service'
 import { TerminalRelay } from './services/terminal-relay'
 import { LoroDataPlaneRelay } from './services/loro-data-plane-relay'
@@ -222,6 +230,65 @@ export function startApplication(executionHost?: DesktopExecutionHost): void {
     }
     const terminalRelay = new TerminalRelay(getLocalTerminalSocketPath(mainPlatformKind))
     const rendererStorageState = new RendererStorageState()
+    const rendererQuitCheck: RendererStorageQuitCheckOptions = {
+      timeoutMs: RENDERER_STORAGE_QUIT_CHECK_TIMEOUT_MS,
+      send: (windowId, requestId) => {
+        const target = webContents.fromId(windowId)
+        if (!target || target.isDestroyed()) return false
+        target.send(IPC_PUSH_CHANNELS.storageQuitCheck, { requestId })
+        return true
+      }
+    }
+    // One confirmation for every action that would drop changes held only in memory.
+    const confirmStorageLoss = async (
+      unsavedSince: number,
+      kind: 'quit' | WindowTeardownKind
+    ): Promise<boolean> => {
+      const proceed =
+        kind === 'quit'
+          ? translateMenu('desktop.quitUnsaved.quit', 'Quit Anyway')
+          : kind === 'close'
+            ? translateMenu('desktop.quitUnsaved.close', 'Close Anyway')
+            : translateMenu('desktop.quitUnsaved.reload', 'Reload Anyway')
+      const { response } = await dialog.showMessageBox({
+        type: 'warning',
+        buttons: [proceed, translateMenu('desktop.quitUnsaved.cancel', 'Cancel')],
+        defaultId: 1,
+        cancelId: 1,
+        message: translateMenu('desktop.quitUnsaved.title', 'Some changes are not saved'),
+        detail: translateMenu(
+          kind === 'quit' ? 'desktop.quitUnsaved.detail' : 'desktop.quitUnsaved.windowDetail',
+          kind === 'quit'
+            ? 'Storage is full, so changes since {{time}} exist only in memory. Quitting now loses them. Free some disk space and wait for the warning to clear before quitting.'
+            : 'Storage is full, so changes in this window since {{time}} exist only in memory. Continuing loses them. Free some disk space and wait for the warning to clear first.'
+        ).replace('{{time}}', new Date(unsavedSince).toLocaleString())
+      })
+      return response === 0
+    }
+    const windowStorageBarrier = new WindowStorageBarrier({
+      state: rendererStorageState,
+      quitCheck: rendererQuitCheck,
+      isQuitting: isAppQuitting,
+      confirmDiscard: (since, kind) => confirmStorageLoss(since, kind),
+      reportLost: (windowId, since) => {
+        console.error(
+          `[Electron] Renderer ${windowId} went away with storage changes unsaved since ${new Date(since).toISOString()}`
+        )
+      }
+    })
+    const reloadWindowGuarded = (window: BrowserWindow, ignoreCache = false): void => {
+      const reload = (): void => {
+        if (window.isDestroyed()) return
+        if (ignoreCache) window.webContents.reloadIgnoringCache()
+        else window.webContents.reload()
+      }
+      windowStorageBarrier.noteIntent(window.webContents.id, 'reload', reload)
+      reload()
+    }
+    setRendererReloadIntentHook((window, redo) => {
+      if (!window.isDestroyed())
+        windowStorageBarrier.noteIntent(window.webContents.id, 'reload', redo)
+    })
     const loroDataPlaneRelay = new LoroDataPlaneRelay(
       getLocalLoroDataPlaneSocketPath(mainPlatformKind)
     )
@@ -269,9 +336,29 @@ export function startApplication(executionHost?: DesktopExecutionHost): void {
       window.webContents.on('before-input-event', (event, input) => {
         if (isRendererReloadShortcut(input, process.platform)) {
           event.preventDefault()
-          window.webContents.reload()
+          reloadWindowGuarded(window)
         }
       })
+      // A window whose own repo holds unsaved changes cancels its unload; the
+      // barrier asks it to flush, confirms, and repeats the close or reload.
+      const contentsId = window.webContents.id
+      window.on('close', (event) => {
+        // After every close listener ran: a hidden (not closed) window keeps its renderer.
+        queueMicrotask(() => {
+          if (event.defaultPrevented || window.isDestroyed()) return
+          windowStorageBarrier.noteIntent(contentsId, 'close', () => {
+            if (!window.isDestroyed()) window.close()
+          })
+        })
+      })
+      window.webContents.on('will-prevent-unload', (event) => {
+        if (windowStorageBarrier.onUnloadPrevented(contentsId)) event.preventDefault()
+      })
+      window.webContents.on('did-navigate', () => windowStorageBarrier.documentGone(contentsId))
+      window.webContents.on('render-process-gone', () =>
+        windowStorageBarrier.documentGone(contentsId)
+      )
+      window.webContents.once('destroyed', () => windowStorageBarrier.documentGone(contentsId))
     })
 
     const completeOnboarding = (window: BrowserWindow): void => {
@@ -298,7 +385,8 @@ export function startApplication(executionHost?: DesktopExecutionHost): void {
     setupApplicationMenu({
       appUpdaterService,
       getMainWindow,
-      openOrFocusMainWindow: () => openOrFocusMainWindow({ icon })
+      openOrFocusMainWindow: () => openOrFocusMainWindow({ icon }),
+      reloadWindow: reloadWindowGuarded
     })
     const initialPath = getInitialDesktopPath()
     const loginItemSettings = getAutoLaunchInvocationStatus()
@@ -351,33 +439,10 @@ export function startApplication(executionHost?: DesktopExecutionHost): void {
         const unsavedSince = await resolveUnsavedBeforeQuit({
           cliUnsavedSince: cliIssue?.firstSeenAtMs ?? null,
           renderer: rendererStorageState,
-          quitCheck: {
-            timeoutMs: RENDERER_STORAGE_QUIT_CHECK_TIMEOUT_MS,
-            send: (windowId, requestId) => {
-              const target = webContents.fromId(windowId)
-              if (!target || target.isDestroyed()) return false
-              target.send(IPC_PUSH_CHANNELS.storageQuitCheck, { requestId })
-              return true
-            }
-          }
+          quitCheck: rendererQuitCheck
         })
         if (unsavedSince === null) return true
-        const since = new Date(unsavedSince).toLocaleString()
-        const { response } = await dialog.showMessageBox({
-          type: 'warning',
-          buttons: [
-            translateMenu('desktop.quitUnsaved.quit', 'Quit Anyway'),
-            translateMenu('desktop.quitUnsaved.cancel', 'Cancel')
-          ],
-          defaultId: 1,
-          cancelId: 1,
-          message: translateMenu('desktop.quitUnsaved.title', 'Some changes are not saved'),
-          detail: translateMenu(
-            'desktop.quitUnsaved.detail',
-            'Storage is full, so changes since {{time}} exist only in memory. Quitting now loses them. Free some disk space and wait for the warning to clear before quitting.'
-          ).replace('{{time}}', since)
-        })
-        return response === 0
+        return await confirmStorageLoss(unsavedSince, 'quit')
       },
       stop: async () => {
         setAppQuitting(true)

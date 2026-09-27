@@ -78,4 +78,42 @@ describe('RendererStorageEpisodes', () => {
     expect(published).toEqual([1_000, null]);
     await b.guard.close();
   });
+
+  it('cancels closing or reloading the window until its repo is saved', async () => {
+    const episodes = new RendererStorageEpisodes(() => {});
+    const store = createQuotaStore();
+    const runtime = await openRuntime(episodes, store.adapter, () => 1_000);
+    const unload = () => {
+      const event = { defaultPrevented: false, returnValue: '' as unknown };
+      episodes.handleBeforeUnload({
+        preventDefault: () => {
+          event.defaultPrevented = true;
+        },
+        get returnValue() {
+          return event.returnValue as never;
+        },
+        set returnValue(value) {
+          event.returnValue = value;
+        },
+      });
+      return event.defaultPrevented;
+    };
+    expect(unload()).toBe(false);
+
+    store.state.full = true;
+    await runtime.repo.upsertDocMeta('doc-a', { title: 'typed while full' });
+    await expect(runtime.repo.persistMetaNow()).rejects.toThrow();
+    // Close or reload now would drop the repo: the unload is cancelled.
+    expect(unload()).toBe(true);
+    // Main's window barrier asks for a flush first; still refused, so still cancelled.
+    await expect(episodes.flushForQuit()).resolves.toBe(1_000);
+    expect(unload()).toBe(true);
+
+    // Space returns: the barrier's flush saves the repo, and the window may go.
+    store.state.full = false;
+    await expect(episodes.flushForQuit()).resolves.toBeNull();
+    expect(store.state.saved.some((target) => target.startsWith('meta-'))).toBe(true);
+    expect(unload()).toBe(false);
+    await runtime.guard.close();
+  });
 });

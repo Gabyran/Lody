@@ -152,10 +152,33 @@ about the window.
 
 Before asking, main pushes `storage.quitCheck` to each such window. The window
 flushes every retained repo and answers with what is still unsaved. A window that
-does not answer within 3 s keeps its last report, and a destroyed window is
-forgotten, since its memory went with it. If asking fails, the answer counts as
-yes, so a broken dialog never traps the user. The first revision checked only the
-agent; review caught that too.
+does not answer within 3 s keeps its last report. If asking fails, the answer
+counts as yes, so a broken dialog never traps the user. The first revision checked
+only the agent; review caught that too.
+
+**Closing or reloading one window is guarded too.** The next revision still dropped a
+window's report when its `webContents` was destroyed, and closing a window (Linux,
+Windows without a tray, any auxiliary session window) or pressing Cmd/Ctrl+R
+destroyed the renderer's in-memory repo without a check. Review caught it; the
+revision's own Limits section had named it.
+
+Now the renderer registry cancels `beforeunload` while any of its repos holds
+unsaved changes. That covers close, reload, force reload, navigation and
+`location.reload()`. Electron reports each cancellation as `will-prevent-unload`, and
+`WindowStorageBarrier` (main) takes over:
+- It asks that window to flush (`storage.quitCheck`). If the answer is saved, it
+  repeats the action.
+- If changes are still unsaved, it shows the quit dialog's per-window variant
+  ("Close/Reload Anyway"). Cancel keeps the window, its repo and its report.
+- An approval lets the window's next unload through until its document is replaced.
+
+Main-initiated actions record what to repeat: window close, the Cmd/Ctrl+R shortcut,
+the View menu's Reload / Force Reload (now click items, since the built-in roles
+reload directly) and recovery reloads. A renderer-initiated navigation has nothing to
+repeat, so the user retries it. During app quit the quit barrier has already asked, so
+windows unload freely. A report is dropped only after approval or when the document
+is gone. A crash or unapproved destroy is logged as a loss, and failing to ask a
+window keeps its report.
 
 **Remote-sync persistence failures** are reported like every other write. The first
 revision also raised the Streams persist coalescer's failures from debug to a
@@ -238,8 +261,21 @@ Automated, with injected clocks, manual timers and fault injection, no real slee
   stays open and the next quit stops. With a healthy agent, a window whose storage
   refused changes is asked to flush: it still answers unsaved, so the user is warned
   and cancels. After space is freed, its answer is saved and the quit proceeds. A
-  silent window keeps its last report; a destroyed window is forgotten. Ignoring
-  renderer state fails the first case.
+  silent or unreachable window keeps its last report. Ignoring renderer state fails
+  the first case. `WindowStorageBarrier`:
+  - A close whose flush is still refused asks "Close Anyway", and Cancel keeps the
+    window and its report.
+  - After space is freed the same close goes through without asking and clears the
+    report.
+  - A discarded reload is repeated and let through.
+  - Quitting lets every window go.
+  - A crash is reported as a loss.
+
+  Making the barrier approve without asking fails both barrier tests.
+- `packages/components/tests/renderer-storage-episodes.test.ts` (unload guard, real
+  `LoroRepo`): after a quota refusal the window's `beforeunload` is cancelled, and
+  stays cancelled after a flush that is still refused. Once space returns the flush
+  saves the meta and the unload is released. Making the guard a no-op fails it.
 - `packages/shared/tests/storage-health.test.ts` (`RepoStorageGuard`): on a real
   `LoroRepo`, a doc refused with `QuotaExceededError` makes `close()` retain the
   repo. The quit-time flush still reports unsaved while full; once storage accepts
@@ -281,9 +317,9 @@ eye. They exposed a stray space between Chinese sentences, now a localized join 
   a schema upgrade still needs to write (loro-dev/loro-repo#139).
 - Restarting a workspace whose stopped repo still waits for space also waits, until
   space is freed or the process exits.
-- Closing one window (not quitting) while its own repo holds unsaved changes is not
-  intercepted; the window's memory goes with it and main forgets its report. A
-  reload has the same effect.
+- A renderer that is hung or crashed cannot run its unload guard or flush; a crash
+  loses its in-memory changes and is only logged. The hang watchdog's Reload is an
+  explicit user choice in that dialog.
 - `unsavedSince` covers repo writes only. Other stores (schedules, operation stores,
   the diff store) fail independently and are not tracked.
 - The quit dialog reads the runtime state Electron last polled, so a failure in the

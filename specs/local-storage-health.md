@@ -113,6 +113,13 @@ more and answer. A window that does not answer within 3 seconds keeps its last
 report; silence is not proof that it saved. The question names the earliest unsaved
 change. Quitting then loses changes not yet synced elsewhere.
 
+Closing or reloading a single window is held to the same rule, because the window's
+memory is where those changes live. While its own repo holds unsaved changes, the
+window refuses to unload. The desktop asks it to flush, and lets the close or reload
+through once everything is saved; otherwise it asks, and Cancel keeps the window.
+A window that closes or crashes without that approval is recorded as a loss, never
+as saved.
+
 ## Open questions
 
 - loro-repo still logs failed background saves to the console, and a first open after

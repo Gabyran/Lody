@@ -87,8 +87,21 @@ function loadTarget(window: BrowserWindow, target: ReloadTarget): Promise<void> 
   return window.loadFile(target.filePath, target.hash ? { hash: target.hash } : undefined)
 }
 
+let reloadIntentHook: ((window: BrowserWindow, redo: () => void) => void) | null = null
+
+/**
+ * Lets the window storage barrier learn what to repeat when a recovery reload
+ * is held back because the renderer's own repo still has unsaved changes.
+ */
+export function setRendererReloadIntentHook(
+  hook: ((window: BrowserWindow, redo: () => void) => void) | null
+): void {
+  reloadIntentHook = hook
+}
+
 export function requestRendererReload(window: BrowserWindow): void {
   if (window.isDestroyed()) return
+  reloadIntentHook?.(window, () => requestRendererReload(window))
   const state = getState(window)
   state.hasNotifiedMounted = false
   state.inRecovery = false
