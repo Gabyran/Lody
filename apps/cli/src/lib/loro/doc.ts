@@ -291,6 +291,8 @@ class ProxiedWebSocket extends WebSocketOriginal {
 import { readTimeoutEnv, withTimeout } from './timeout-utils';
 import { ConcurrentQueue } from '../concurrent-queue';
 import type { CliSqliteRepoStore } from './sqlite-repo-store';
+import type { StorageHealthMonitor } from '@/lib/storage-health';
+import { observeStorageAdapterWrites } from '@lody/shared';
 import type { CloudBillingPort, CloudStreamsTokenPort } from '@lody/platform';
 
 /**
@@ -330,10 +332,13 @@ export interface LoroDocumentManagerOptions {
   remoteStreamsAttached?: boolean;
   streamsTokens?: CloudStreamsTokenPort | null;
   cloudBilling?: CloudBillingPort | null;
+  storageHealth?: StorageHealthMonitor | null;
 }
 
 export type LoroRepoPersistReason =
   | 'session-local-base-ref'
+  /** Retrying writes that failed while the data disk was full. */
+  | 'storage-recovered'
   | 'session-fork-prepare'
   | 'session-fork-commit'
   | 'session-fork-rollback'
@@ -366,6 +371,7 @@ export class LoroDocumentManager {
   private remoteTransportOpQueue: Promise<unknown> = Promise.resolve();
   private readonly streamsTokens: CloudStreamsTokenPort | null;
   public readonly cloudBilling: CloudBillingPort | null;
+  private unregisterStorageFlushTarget: (() => void) | null;
 
   static async create(
     workspaceId: WorkspaceId,
@@ -380,6 +386,7 @@ export class LoroDocumentManager {
       documentCursorScope?: DocumentCursorScope;
       streamsTokens?: CloudStreamsTokenPort | null;
       cloudBilling?: CloudBillingPort | null;
+      storageHealth?: StorageHealthMonitor | null;
     } = {}
   ): Promise<LoroDocumentManager> {
     // Configure the CLI's global HTTP dispatcher once (proxy/H2/diagnostics). This
@@ -406,6 +413,17 @@ export class LoroDocumentManager {
       `[${workspaceId}] Initializing local-first Loro repo: storageDb=${cliSqliteRepoStore.dbPath}`
     );
 
+    // loro-repo only logs a failed background save, so the adapter is where
+    // storage-full failures (and the successes that end them) are observed.
+    const storageHealth = options.storageHealth ?? null;
+    const storageAdapter = storageHealth
+      ? observeStorageAdapterWrites(cliSqliteRepoStore.storageAdapter, {
+          onWriteFailed: (error, operation) => {
+            storageHealth.reportWriteFailure(error, `loro-repo ${operation} (${workspaceId})`);
+          },
+          onWriteSucceeded: () => storageHealth.reportWriteSuccess(),
+        })
+      : cliSqliteRepoStore.storageAdapter;
     let repo: LoroRepo | null = null;
     let manager: LoroDocumentManager | null = null;
     try {
@@ -417,7 +435,7 @@ export class LoroDocumentManager {
         async () =>
           await withTimeout(
             LoroRepo.create({
-              storageAdapter: cliSqliteRepoStore.storageAdapter,
+              storageAdapter: storageAdapter,
               metaDebounceCommitMs: 0,
               flockDocRetentionMs: getFlockDocRetentionMs,
             }),
@@ -430,7 +448,7 @@ export class LoroDocumentManager {
       // Presence is produced locally regardless of remote sync so local-first
       // renderers get machine/session liveness over the data plane; the cloud
       // Streams sink is attached later by the remote bridge.
-      const presenceRuntime = new CliPresenceRuntime({ workspaceId, logger });
+      const presenceRuntime = new CliPresenceRuntime({ workspaceId, logger, storageHealth });
       const machineMonitorRuntime = new CliMachineMonitorRuntime({ workspaceId, logger });
       // No transport is registered at startup: rooms stay pending/detached
       // while offline, and renderer↔CLI document sync is served out-of-band by
@@ -476,6 +494,7 @@ export class LoroDocumentManager {
         remoteStreamsAttached: false,
         streamsTokens: options.streamsTokens ?? null,
         cloudBilling: options.cloudBilling ?? null,
+        storageHealth,
       });
     } catch (error) {
       try {
@@ -540,6 +559,10 @@ export class LoroDocumentManager {
     this.remoteStreamsGeneration = this.remoteStreamsAttached ? 1 : 0;
     this.presenceRuntime = options.presenceRuntime ?? null;
     this.machineMonitorRuntime = options.machineMonitorRuntime ?? null;
+    this.unregisterStorageFlushTarget =
+      options.storageHealth?.registerFlushTarget(this.workspaceId, () =>
+        this.persistPendingChanges('storage-recovered')
+      ) ?? null;
     const initialTransportStatus = options.initialTransportStatus ?? 'disconnected';
     const initialMetaSyncPromise = options.initialMetaSyncPromise ?? Promise.resolve(false);
     const initialMetaSyncCompleted = options.initialMetaSyncCompleted ?? false;
@@ -1650,6 +1673,9 @@ export class LoroDocumentManager {
     this.machineExistenceWatcher = null;
     this.remoteStreamsStatusUnsubscribe?.();
     this.remoteStreamsStatusUnsubscribe = null;
+    // The repo is about to be destroyed; storage recovery must not flush it.
+    this.unregisterStorageFlushTarget?.();
+    this.unregisterStorageFlushTarget = null;
     await this.destroyRepo({ fast: options.fast });
   }
 

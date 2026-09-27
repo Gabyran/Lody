@@ -1331,6 +1331,8 @@ export type ChatFailedReason =
   | 'session_restore_failed'
   | 'session_not_found'
   | 'memory_pressure'
+  // The disk holding Lody's data is critically full; the turn was refused before it started.
+  | 'storage_critical'
   | 'acp_not_ready'
   | 'agent_disconnected'
   // The prompt returned normally but the agent never emitted a single ACP

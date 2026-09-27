@@ -659,6 +659,12 @@ export type SessionExecutionServiceDeps = {
   }) => Promise<string | undefined>;
   /** Evict idle sessions if system memory is under pressure */
   evictForMemoryPressure: (excludeSessionId?: SessionId) => Promise<MemoryPressureEvictionResult>;
+  /**
+   * Refusal message when the Lody data disk is critically full, else null. A
+   * turn creates worktrees, installs, attachments and history; refusing it up
+   * front beats failing it halfway. Spec: `specs/local-storage-health.md`.
+   */
+  checkStorageForTurnStart?: () => Promise<string | null>;
 };
 
 const shouldRedactEnvKey = (key: string): boolean => /token|secret|password|passwd|key/i.test(key);
@@ -5030,6 +5036,19 @@ export class SessionExecutionService {
       body: (ctx) =>
         Effect.gen(function* () {
           ctx.setUnhandledErrorContext(turnErrorContext);
+          const storageRefusal = yield* self.tryPromise(
+            async () => (await self.deps.checkStorageForTurnStart?.()) ?? null
+          );
+          if (storageRefusal) {
+            self.deps.logger.warn(`[${sessionId}] ${storageRefusal}`);
+            yield* self.recordKnownChatFailureAndHaltEffect({
+              sessionId,
+              sessionDoc,
+              userTurnId: executionUserTurnId,
+              reason: 'storage_critical',
+              message: storageRefusal,
+            });
+          }
           const memoryPressureResult = yield* self.tryPromise(() =>
             self.evictForTurnStart(sessionId)
           );
@@ -5360,6 +5379,19 @@ export class SessionExecutionService {
       }) =>
         Effect.gen(function* () {
           setUnhandledErrorContext(turnErrorContext);
+          const storageRefusal = yield* self.tryPromise(
+            async () => (await self.deps.checkStorageForTurnStart?.()) ?? null
+          );
+          if (storageRefusal) {
+            self.deps.logger.warn(`[${sessionId}] ${storageRefusal}`);
+            return yield* self.recordKnownChatFailureAndHaltEffect({
+              sessionId,
+              sessionDoc,
+              userTurnId,
+              reason: 'storage_critical',
+              message: storageRefusal,
+            });
+          }
           const memoryPressureResult = yield* self.tryPromise(() =>
             self.evictForTurnStart(sessionId)
           );

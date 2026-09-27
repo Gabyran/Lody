@@ -296,6 +296,14 @@ export const CliRuntimeIssueSchema = z
 
 export type CliRuntimeIssue = z.infer<typeof CliRuntimeIssueSchema>;
 
+/**
+ * Runtime issues the CLI raises for the disk holding its data
+ * (`specs/local-storage-health.md`). Electron's quit path reads
+ * `local_storage_unsaved` to warn before it stops the daemon.
+ */
+export const LOCAL_STORAGE_UNSAVED_ISSUE_CODE = 'local_storage_unsaved';
+export const LOCAL_STORAGE_LOW_ISSUE_CODE = 'local_storage_low';
+
 export const CliRuntimeStateSchema = z
   .object({
     schemaVersion: z.literal(1),

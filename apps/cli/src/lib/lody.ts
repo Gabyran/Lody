@@ -22,6 +22,7 @@ import type { LocalWorkspaceCatalogService } from '@/lib/local-workspace-catalog
 import type { MachineProcessLifecycleAction } from './machine-lifecycle';
 import { traceAsync } from '@/utils/trace-span';
 import type { MemoryPressureSnapshotSource } from '@/monitor/memory-pressure-sampler';
+import type { StorageHealthMonitor } from '@/lib/storage-health';
 import type { WorkspaceWatchCoordinatorApi } from '@/lib/code-collab/workspace-watch-coordinator';
 import type { CloudPort } from '@lody/platform';
 
@@ -40,6 +41,8 @@ interface LodyOptions {
   machineName: string;
   localWorkspaceCatalog?: LocalWorkspaceCatalogService;
   memoryPressure: MemoryPressureSnapshotSource;
+  /** Process-wide; absent outside the daemon. */
+  storageHealth?: StorageHealthMonitor;
   machineLifecycleCapability: MachineLifecycleCapability;
   closeSessionTerminals?: (sessionId: SessionId) => void;
   cleanupLocalProjectWorktreeSetupIfUnreferenced?: (
@@ -78,6 +81,7 @@ export class Lody {
           documentCursorScope: 'shared-durable',
           streamsTokens: options.cloudPort.streamsTokens,
           cloudBilling: options.cloudPort.billing,
+          storageHealth: options.storageHealth ?? null,
         })
     );
     return new Lody(options, manager);
@@ -128,6 +132,7 @@ export class Lody {
         onProcessLifecycleAction: options.onProcessLifecycleAction,
         workspaceWatchCoordinator: options.workspaceWatchCoordinator,
         cloudPort: options.cloudPort,
+        storageHealth: options.storageHealth ?? null,
       },
       logger: this.logger,
     });

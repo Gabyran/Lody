@@ -58,6 +58,12 @@ Concretely, for every ephemeral writer:
 A feature that does not fit these bounds is not made to fit by shrinking one payload. It belongs
 on the durable document transport, or it stays local and is never published at all.
 
+The machine heartbeat's optional `storage` field ([local storage health](local-storage-health.md))
+is written on the heartbeat's own key, so an extra write replaces an unsent heartbeat instead of
+queueing behind it. It changes only on a storage level transition: at worst one write per
+10-second sample plus one per recovery attempt (at least 5 seconds apart), each a fixed record of
+two enums and two numbers. A reader that cannot parse the field drops the field, not the heartbeat.
+
 ## Consequences for readers
 
 Reading liveness stays a three-state question. A fresh heartbeat means online; the absence of one

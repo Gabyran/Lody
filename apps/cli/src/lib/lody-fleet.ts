@@ -74,8 +74,14 @@ import type { CloudAccessSnapshot, CloudPort } from '@lody/platform';
 import type { MachineProcessLifecycleAction } from '@/lib/machine-lifecycle';
 import { traceAsync } from '@/utils/trace-span';
 import { MemoryPressureSampler } from '@/monitor/memory-pressure-sampler';
+import { StorageHealthMonitor, type StorageHealthSnapshot } from '@/lib/storage-health';
+import { getLodyDataDir } from '@lody/shared/node/installation-profile';
 import { makePrStatusPoller, type PrStatusPollerShape } from '@/lib/pr-poller/pr-status-poller';
-import { ACP_PLAN_PERMISSION_MODE_ID } from '@lody/shared';
+import {
+  ACP_PLAN_PERMISSION_MODE_ID,
+  LOCAL_STORAGE_LOW_ISSUE_CODE,
+  LOCAL_STORAGE_UNSAVED_ISSUE_CODE,
+} from '@lody/shared';
 import { createReviewAutomation } from '@/lib/review-automation/create-review-automation';
 import type { ReviewAutomationWorkspaceHandle } from '@/lib/review-automation/review-automation-workspace';
 import { GitHubCredentialResolver } from '@/lib/pr-poller/github-credential-resolver';
@@ -147,6 +153,7 @@ export class LodyFleet {
   private readonly runtimeStateReporter: CliRuntimeStateReporter;
   private readonly terminalPtyService: TerminalPtyServiceApi;
   private readonly memoryPressure: MemoryPressureSampler;
+  private readonly storageHealth: StorageHealthMonitor;
   private readonly onFatalAuthFailure?: (error: Error) => void;
   private readonly localPlatform: boolean;
   private readonly localFirstBootstrap: boolean;
@@ -216,6 +223,12 @@ export class LodyFleet {
     this.onFatalAuthFailure = options.onFatalAuthFailure;
     this.localWorkspaceCatalog = options.localWorkspaceCatalog ?? makeLocalWorkspaceCatalog();
     this.memoryPressure = new MemoryPressureSampler(this.logger);
+    this.storageHealth = new StorageHealthMonitor({
+      dataDir: getLodyDataDir(),
+      logger: this.logger,
+      now: getServerNow,
+    });
+    this.storageHealth.subscribe((snapshot) => this.reportStorageHealthIssue(snapshot));
     this.remoteBridge = this.cloudPort.streamsTokens
       ? new RemoteBridge({
           logger: this.logger,
@@ -255,6 +268,7 @@ export class LodyFleet {
       initCliAnalytics();
     }
     this.memoryPressure.start();
+    void this.storageHealth.start();
     // Sync time once before any time-sensitive operations (heartbeats, unread
     // detection). Local platform: no time server; getServerNow() falls back to
     // the local clock.
@@ -600,6 +614,16 @@ export class LodyFleet {
         );
       }
     }
+    // Each runtime's cleanup ran its final flush; a storage-full failure there
+    // (or earlier, never recovered) leaves changes that exist only in memory.
+    const unsaved = this.storageHealth.getSnapshot().unsavedSince;
+    if (unsaved !== null) {
+      this.logger.warn(
+        `[storage] Stopping with local changes unsaved since ${new Date(unsaved).toISOString()}: ` +
+          'the disk holding Lody data is full. Changes not yet synced elsewhere are lost.'
+      );
+    }
+    this.storageHealth.stop();
     await this.workspaceWatchCoordinator.dispose();
     await this.cloudPort.dispose();
 
@@ -611,6 +635,33 @@ export class LodyFleet {
       }
     }
     this.terminalPtyService.closeAll();
+  }
+
+  /**
+   * Mirrors storage health into the runtime state Electron reads, where the
+   * quit path uses `local_storage_unsaved` to warn before stopping the daemon.
+   */
+  private reportStorageHealthIssue(snapshot: StorageHealthSnapshot): void {
+    if (snapshot.unsavedSince !== null) {
+      this.runtimeStateReporter.upsertIssue({
+        code: LOCAL_STORAGE_UNSAVED_ISSUE_CODE,
+        severity: 'error',
+        recoverable: true,
+        message: `Disk full: local changes unsaved since ${new Date(snapshot.unsavedSince).toISOString()}`,
+      });
+    } else {
+      this.runtimeStateReporter.clearIssue(LOCAL_STORAGE_UNSAVED_ISSUE_CODE);
+    }
+    if (snapshot.level === 'critical' && snapshot.reason === 'low-space') {
+      this.runtimeStateReporter.upsertIssue({
+        code: LOCAL_STORAGE_LOW_ISSUE_CODE,
+        severity: 'warning',
+        recoverable: true,
+        message: 'Disk almost full: new sessions, turns and uploads are paused',
+      });
+    } else {
+      this.runtimeStateReporter.clearIssue(LOCAL_STORAGE_LOW_ISSUE_CODE);
+    }
   }
 
   private async applyWorkspaceList(
@@ -782,6 +833,7 @@ export class LodyFleet {
           cloudPort: this.cloudPort,
           localWorkspaceCatalog: this.localWorkspaceCatalog,
           memoryPressure: this.memoryPressure,
+          storageHealth: this.storageHealth,
           machineLifecycleCapability: this.machineLifecycleCapability,
           closeSessionTerminals: (sessionId) => this.terminalPtyService.closeSession(sessionId),
           cleanupLocalProjectWorktreeSetupIfUnreferenced: (localProjectId) =>

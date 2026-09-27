@@ -87,7 +87,7 @@ import {
   addVisualAnnotationReferenceItem,
   toggleVisualAnnotationReferenceItem,
 } from '@/components/chat/visual-annotation-reference-state';
-import { SESSION_IMAGE_MAX_COUNT } from '@lody/shared';
+import { LODY_STORAGE_CRITICAL_ERROR_CODE, SESSION_IMAGE_MAX_COUNT } from '@lody/shared';
 import { cn } from '@/lib/utils';
 import { ConversationColumn } from '@/components/shared/conversation-column';
 import { useIsMobile } from '@/hooks/use-mobile';
@@ -763,6 +763,10 @@ export const SessionChatInputArea = memo(
       'sessions.fileUploadMissingAuth',
       'Missing workspace or auth token'
     );
+    const attachmentStoragePausedLabel = t(
+      'localStorage.attachmentPaused',
+      'Attachments are paused: the disk is almost full'
+    );
     const imageCountLimitLabel = t(
       'sessions.imageCountLimit',
       'At most {{count}} images are allowed',
@@ -1205,6 +1209,17 @@ export const SessionChatInputArea = memo(
               }));
               return;
             }
+            // The machine refused because its disk is nearly full; a cloud
+            // fallback would only move the same bytes back to that disk later.
+            if (outcome?.ok === false && outcome.error === LODY_STORAGE_CRITICAL_ERROR_CODE) {
+              updatePendingFile(targetSessionId, localId, (entry) => ({
+                ...entry,
+                status: 'failed',
+                progress: 0,
+                error: attachmentStoragePausedLabel,
+              }));
+              return;
+            }
           } catch {
             // Local handoff threw; fall back to the cloud upload path.
           }
@@ -1286,6 +1301,7 @@ export const SessionChatInputArea = memo(
         }
       },
       [
+        attachmentStoragePausedLabel,
         authToken,
         canSendFileLocally,
         fileUploadFailedLabel,

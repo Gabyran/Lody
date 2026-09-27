@@ -3021,6 +3021,11 @@ const ChatFailedNoticeView = ({
           'sessions.systemNotices.chatFailed.memoryPressure',
           'The machine is low on memory - free some memory and retry'
         );
+      case 'storage_critical':
+        return t(
+          'sessions.systemNotices.chatFailed.storageCritical',
+          'The disk is almost full - free some space and retry'
+        );
       case 'acp_auth_required':
         return t('sessions.systemNotices.chatFailed.acpAuthRequired', 'Authentication required');
       case 'acp_internal_error':

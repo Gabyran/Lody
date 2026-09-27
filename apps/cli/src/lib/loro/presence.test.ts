@@ -15,6 +15,7 @@ import {
 } from '@lody/shared';
 
 import type { Logger } from '@/utils/logger';
+import { StorageHealthMonitor } from '@/lib/storage-health';
 import { CliPresenceRuntime } from './presence';
 
 const createLogger = (): Logger =>
@@ -446,5 +447,44 @@ describe('CliPresenceRuntime local-origin plane payload', () => {
         (state) => state.kind === 'machine' && state.machineId === MACHINE_ID
       )
     ).toBe(true);
+  });
+});
+
+describe('CliPresenceRuntime storage health', () => {
+  it('publishes storage transitions on the machine entry and drops the field once healthy', async () => {
+    const storageHealth = new StorageHealthMonitor({
+      dataDir: '/lody-data',
+      logger: createLogger(),
+      now: () => 5_000,
+      readSpace: async () => ({ availableBytes: 50 * 1024 ** 3, totalBytes: 100 * 1024 ** 3 }),
+      setTimer: () => null,
+      clearTimer: () => {},
+    });
+    runtime = new CliPresenceRuntime({
+      workspaceId: 'workspace-presence-1' as WorkspaceId,
+      logger: createLogger(),
+      storageHealth,
+    });
+    const presence = runtime;
+    presence.setMachineOnline(MACHINE_ID);
+    const machineEntry = () =>
+      Object.values(decodeLocalOriginSnapshot(presence)).find((state) => state.kind === 'machine');
+    expect(machineEntry()).not.toHaveProperty('storage');
+
+    // The transition itself writes the heartbeat; no timer has to fire.
+    storageHealth.reportWriteFailure(
+      Object.assign(new Error('database or disk is full'), { code: 'SQLITE_FULL' }),
+      'test'
+    );
+    // Decoded through a real EphemeralStore, where an omitted optional comes back as null.
+    expect(machineEntry()).toMatchObject({
+      storage: { level: 'critical', reason: 'write-failed', unsavedSince: 5_000 },
+    });
+
+    storageHealth.registerFlushTarget('workspace-presence-1', async () => {});
+    storageHealth.reportWriteSuccess();
+    await storageHealth.settled();
+    expect(machineEntry()).not.toHaveProperty('storage');
+    storageHealth.stop();
   });
 });

@@ -11,6 +11,7 @@ import { MobileWorkspaceLayout } from './mobile/mobile-workspace-layout';
 import { WebWorkspaceLayout } from './web-workspace-layout';
 import { BugReportDialogContainer } from './bug-report/bug-report-dialog-container';
 import { JoinCommunityDialogContainer } from './settings/join-community-dialog-container';
+import { LocalStorageBannerContainer } from './local-storage-banner';
 import { StuckConnectionBannerContainer } from './stuck-connection-banner';
 import { DesktopSettingsModal } from './settings/desktop-settings-modal';
 import { PromptShortcutProvider } from '../providers/prompt-shortcut-provider';
@@ -92,6 +93,7 @@ export function MainLayout({
           {workspaceReady ? <BugReportDialogContainer /> : null}
           <JoinCommunityDialogContainer />
           <StuckConnectionBannerContainer />
+          {workspaceReady ? <LocalStorageBannerContainer /> : null}
           {workspaceReady ? <DesktopSettingsModal /> : null}
         </WorkspaceRuntimeShell>
       </PromptShortcutProvider>

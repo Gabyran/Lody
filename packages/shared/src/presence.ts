@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import type { MachineId, SessionId } from './index';
 import type { SessionStatus } from './schema';
+import { LodyMachineStorageHealthSchema, type LodyMachineStorageHealth } from './storage-health';
 
 /**
  * The workspace liveness channel. It is a SHARED, SERIAL delivery budget: one ephemeral
@@ -28,6 +29,12 @@ export type LodyMachinePresenceState = {
   machineId: MachineId;
   instanceId: LodyPresenceInstanceId;
   updatedAt: number;
+  /**
+   * Local storage health of the machine's data directory; absent while healthy.
+   * Rides the heartbeat under the same key, so a change replaces an unsent
+   * heartbeat instead of queueing behind it.
+   */
+  storage?: LodyMachineStorageHealth;
 };
 
 export type LodySessionPresenceState = {
@@ -115,6 +122,15 @@ const PresenceMachineStateSchema = z.object({
     .transform((value) => value as MachineId),
   instanceId: PresenceInstanceIdSchema,
   updatedAt: z.number().finite(),
+  // A Loro roundtrip turns an omitted optional into null; see omitNullValues. A
+  // value this reader does not understand (say, a level added later) drops only
+  // the field: rejecting the entry would read a live machine as offline.
+  storage: z
+    .preprocess(
+      (value) => (value === null ? undefined : omitNullValues(value)),
+      LodyMachineStorageHealthSchema.optional()
+    )
+    .catch(undefined),
 });
 
 const PresenceSessionStateSchema = z.object({

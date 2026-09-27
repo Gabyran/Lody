@@ -84,6 +84,8 @@ export * from './loro-streams-auth';
 export * from './rpc-secret';
 export * from './streams-snapshot-codec';
 export * from './presence';
+export * from './storage-health';
+export * from './observed-storage-adapter';
 export * from './machine-monitor';
 export * from './machine-protocol-capabilities';
 export * from './pi-extensions';

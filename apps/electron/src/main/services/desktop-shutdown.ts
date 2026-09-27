@@ -1,26 +1,43 @@
-/** Prevent quit (and OS lease release) until owned execution has confirmed exit. */
+/**
+ * Prevent quit (and OS lease release) until owned execution has confirmed exit.
+ *
+ * `confirmQuit` runs first and may cancel the quit, for example while the
+ * local agent reports changes it could not save; a failure to ask counts as a
+ * yes, so a broken dialog never traps the user in the app.
+ *
+ * The returned promise settles once this attempt is back to running or stopped;
+ * `preventDefault` is always called synchronously, before the first await.
+ */
 export function createDesktopQuitBarrier(options: {
   stop: () => Promise<void>
   quit: () => void
   reportFailure: (error: unknown) => void
+  confirmQuit?: () => Promise<boolean>
 }) {
   let state: 'running' | 'stopping' | 'stopped' = 'running'
-  return (event: { preventDefault: () => void }): void => {
+  return async (event: { preventDefault: () => void }): Promise<void> => {
     if (state === 'stopped') return
     event.preventDefault()
     if (state === 'stopping') return
     state = 'stopping'
-    void Promise.resolve()
-      .then(options.stop)
-      .then(
-        () => {
-          state = 'stopped'
-          options.quit()
-        },
-        (error: unknown) => {
-          state = 'running'
-          options.reportFailure(error)
-        }
-      )
+    let confirmed = true
+    try {
+      confirmed = (await options.confirmQuit?.()) ?? true
+    } catch {
+      confirmed = true
+    }
+    if (!confirmed) {
+      state = 'running'
+      return
+    }
+    try {
+      await options.stop()
+    } catch (error: unknown) {
+      state = 'running'
+      options.reportFailure(error)
+      return
+    }
+    state = 'stopped'
+    options.quit()
   }
 }

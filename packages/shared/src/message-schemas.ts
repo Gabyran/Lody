@@ -3227,6 +3227,7 @@ export const ChatFailedReasonSchema = z.enum([
   'session_restore_failed',
   'session_not_found',
   'memory_pressure',
+  'storage_critical',
   'acp_not_ready',
   'agent_disconnected',
   'agent_no_output',

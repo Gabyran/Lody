@@ -1,6 +1,8 @@
 import { waitForScheduleWriteSync, withScheduleWrite } from './schedule-write-sync';
 import {
   getScheduleRoomId,
+  isStorageFullError,
+  observeStorageAdapterWrites,
   scheduleDocSchema,
   scheduleDocumentFromMirrorState,
 } from '@lody/shared';
@@ -208,6 +210,13 @@ type RuntimeDeps = {
    * "machine offline" from "presence not flowing to this client".
    */
   onPresenceSyncStateChange?: (state: RoomSyncState) => void;
+  /**
+   * The repo's own IndexedDB store refused a write for lack of space (`since`
+   * is the first failure), or wrote successfully again (`null`). Drives the
+   * same storage banner as the local daemon's disk. Spec:
+   * `specs/local-storage-health.md`.
+   */
+  onLocalStorageFull?: (state: { since: number } | null) => void;
   /**
    * Forward analytics intents (meta-sync outcome, connection-state changes,
    * durable-transport init failures) to the PostHog-aware caller. Optional so
@@ -447,8 +456,24 @@ export async function createWorkspaceRuntime(deps: RuntimeDeps): Promise<Workspa
     | null = null;
   const repoStorage = new IndexedDBStorageAdaptor({ dbName: cacheIdentity.repoDbName });
   const openSessionWithSnapshot = createSessionSnapshotLoader(repoStorage);
+  // loro-repo only logs a failed background save, so the adapter is where a
+  // `quota` refusal is seen. A failed save stays dirty in memory and is retried
+  // by the next flush; the next successful write ends the episode.
+  let storageFullSince: number | null = null;
+  const observedRepoStorage = observeStorageAdapterWrites(repoStorage, {
+    onWriteFailed: (error) => {
+      if (storageFullSince !== null || !isStorageFullError(error)) return;
+      storageFullSince = Date.now();
+      deps.onLocalStorageFull?.({ since: storageFullSince });
+    },
+    onWriteSucceeded: () => {
+      if (storageFullSince === null) return;
+      storageFullSince = null;
+      deps.onLocalStorageFull?.(null);
+    },
+  });
   const repo = await LoroRepo.create({
-    storageAdapter: repoStorage,
+    storageAdapter: observedRepoStorage,
     metaDebounceCommitMs: 0,
     resolveRoomTransports: (room) =>
       resolveRoomTransportsImpl?.(room) ?? { transportIds: ['cloud'] },

@@ -42,13 +42,17 @@ import {
   WindowBadgeService,
   bindWindowBadgeToBrowserWindows
 } from './services/window-badge-service'
-import { setupApplicationMenu } from './menu'
+import { setupApplicationMenu, translateMenu } from './menu'
 import { isRendererReloadShortcut } from './reload-shortcut'
 import {
   flushElectronMainErrorReporting,
   installElectronMainErrorReporting
 } from './posthog-error-reporting'
-import { IPC_PUSH_CHANNELS, IPC_SEND_CHANNELS } from '@lody/shared/electron-ipc'
+import {
+  IPC_PUSH_CHANNELS,
+  IPC_SEND_CHANNELS,
+  LOCAL_STORAGE_UNSAVED_ISSUE_CODE
+} from '@lody/shared/electron-ipc'
 import { PublicBrowserService } from './services/public-browser-service'
 import { desktopInstallationProfile, isLocalPlatform } from './platform'
 import { mainPlatformKind } from './platform'
@@ -331,37 +335,61 @@ export function startApplication(executionHost?: DesktopExecutionHost): void {
       openOrFocusMainWindow({ icon })
     })
 
-    app.on(
-      'before-quit',
-      createDesktopQuitBarrier({
-        stop: async () => {
-          setAppQuitting(true)
-          setWindowsTrayAvailable(false)
-          windowsTrayService.stop()
-          windowBadgeService.reset()
-          terminalRelay.destroy()
-          loroDataPlaneRelay.destroy()
-          appUpdaterService.stop()
-          publicBrowserService.destroyAll()
-          const [cliResult] = await Promise.allSettled([
-            cliService.shutdownForQuit(),
-            flushElectronMainErrorReporting(),
-            stopDevbarDevframeService()
-          ])
-          if (cliResult.status === 'rejected') throw cliResult.reason
-        },
-        quit: () => app.quit(),
-        reportFailure: (error) => {
-          // A timeout does not prove exit. Keep ownership until quit succeeds.
-          console.error('[Electron] Quit blocked by the embedded CLI', error)
-          dialog.showErrorBox(
-            PRODUCT_NAME,
-            'The local agent has not confirmed that it stopped. Lody will stay open to prevent ' +
-              'another desktop from using its data. Wait for the agent to stop, then quit again.'
-          )
-        }
-      })
-    )
+    const quitBarrier = createDesktopQuitBarrier({
+      // The local agent keeps changes in memory while its disk is full; stopping
+      // it now drops whatever has not reached disk or the cloud.
+      confirmQuit: async () => {
+        const unsaved = cliService
+          .getCliState()
+          .runtime?.issues.find((issue) => issue.code === LOCAL_STORAGE_UNSAVED_ISSUE_CODE)
+        if (!unsaved) return true
+        const since = new Date(unsaved.firstSeenAtMs).toLocaleString()
+        const { response } = await dialog.showMessageBox({
+          type: 'warning',
+          buttons: [
+            translateMenu('desktop.quitUnsaved.quit', 'Quit Anyway'),
+            translateMenu('desktop.quitUnsaved.cancel', 'Cancel')
+          ],
+          defaultId: 1,
+          cancelId: 1,
+          message: translateMenu('desktop.quitUnsaved.title', 'Some changes are not saved'),
+          detail: translateMenu(
+            'desktop.quitUnsaved.detail',
+            'The disk holding Lody data is full, so changes since {{time}} exist only in memory. Quitting now loses them. Free some disk space and wait for the warning to clear before quitting.'
+          ).replace('{{time}}', since)
+        })
+        return response === 0
+      },
+      stop: async () => {
+        setAppQuitting(true)
+        setWindowsTrayAvailable(false)
+        windowsTrayService.stop()
+        windowBadgeService.reset()
+        terminalRelay.destroy()
+        loroDataPlaneRelay.destroy()
+        appUpdaterService.stop()
+        publicBrowserService.destroyAll()
+        const [cliResult] = await Promise.allSettled([
+          cliService.shutdownForQuit(),
+          flushElectronMainErrorReporting(),
+          stopDevbarDevframeService()
+        ])
+        if (cliResult.status === 'rejected') throw cliResult.reason
+      },
+      quit: () => app.quit(),
+      reportFailure: (error) => {
+        // A timeout does not prove exit. Keep ownership until quit succeeds.
+        console.error('[Electron] Quit blocked by the embedded CLI', error)
+        dialog.showErrorBox(
+          PRODUCT_NAME,
+          'The local agent has not confirmed that it stopped. Lody will stay open to prevent ' +
+            'another desktop from using its data. Wait for the agent to stop, then quit again.'
+        )
+      }
+    })
+    app.on('before-quit', (event) => {
+      void quitBarrier(event)
+    })
 
     process.on('exit', () => {
       setWindowsTrayAvailable(false)

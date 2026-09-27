@@ -29,12 +29,19 @@ import {
 } from '@lody/shared';
 import type { Logger } from '@/utils/logger';
 import { formatErrorMessage } from '@/utils/format-error';
+import type { StorageHealthMonitor } from '@/lib/storage-health';
 
 type StreamsAuthCallback = (context?: { reason: string }) => Promise<string | undefined>;
 
 export type CliPresenceRuntimeOptions = {
   workspaceId: WorkspaceId;
   logger: Logger;
+  /**
+   * Local storage health, published on the machine heartbeat. Its transitions
+   * are interval-bounded by the monitor, and each one rewrites the heartbeat's
+   * own key, so an unsent heartbeat is replaced rather than queued behind.
+   */
+  storageHealth?: Pick<StorageHealthMonitor, 'getPresenceField' | 'subscribe'> | null;
 };
 
 export type CliPresenceStreamsOptions = {
@@ -92,12 +99,17 @@ export class CliPresenceRuntime {
   private rejoinBackoffIndex = 0;
   private joinedOnce = false;
   private joinedWaiters: Array<(joined: boolean) => void> = [];
+  private readonly unsubscribeStorageHealth: () => void;
 
   constructor(private readonly options: CliPresenceRuntimeOptions) {
     this.machineTimer = setInterval(() => {
       this.writeMachineHeartbeat();
     }, LODY_PRESENCE_HEARTBEAT_MS);
     this.machineTimer.unref?.();
+    this.unsubscribeStorageHealth =
+      options.storageHealth?.subscribe(() => {
+        this.writeMachineHeartbeat();
+      }) ?? (() => {});
   }
 
   /**
@@ -353,6 +365,7 @@ export class CliPresenceRuntime {
     this.stopped = true;
     this.resolveJoinedWaiters(false);
     clearInterval(this.machineTimer);
+    this.unsubscribeStorageHealth();
     if (this.joinRetryTimer) {
       clearTimeout(this.joinRetryTimer);
       this.joinRetryTimer = null;
@@ -384,15 +397,17 @@ export class CliPresenceRuntime {
   writeMachineHeartbeat(): void {
     if (this.stopped || !this.machineId || !this.machineKey) return;
     const seq = ++this.machineHeartbeatSeq;
+    const storage = this.options.storageHealth?.getPresenceField();
     const state: LodyMachinePresenceState = {
       kind: 'machine',
       machineId: this.machineId,
       instanceId: this.instanceId,
       updatedAt: getServerNow(),
+      ...(storage ? { storage } : {}),
     };
     this.writeLocalOrigin(this.machineKey, state);
     this.options.logger.debug(
-      `[${this.options.workspaceId}] Loro presence machine heartbeat written (seq=${seq} updatedAt=${state.updatedAt})${this.describePresenceWriteQueue()}`
+      `[${this.options.workspaceId}] Loro presence machine heartbeat written (seq=${seq} updatedAt=${state.updatedAt}${storage ? ` storage=${storage.level}/${storage.reason}` : ''})${this.describePresenceWriteQueue()}`
     );
     this.observeHeartbeatDelivery(seq, state.updatedAt);
   }

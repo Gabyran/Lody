@@ -2,6 +2,8 @@ import { readSessionHistory } from '@lody/shared/session-data';
 import { readLatestTurn } from '@lody/shared/session-data';
 import { TurnTokenUsageLedger, turnTokenUsageFromUpdate } from './usage/turn-token-usage';
 import os from 'os';
+import { LODY_STORAGE_CRITICAL_ERROR_CODE, isStorageCriticalError } from '@lody/shared';
+import type { StorageHealthMonitor } from '@/lib/storage-health';
 import fs from 'fs';
 import path from 'path';
 import crypto from 'crypto';
@@ -576,6 +578,8 @@ export interface MessageHandlerConfig {
   onProcessLifecycleAction?: (action: MachineProcessLifecycleAction) => void;
   workspaceWatchCoordinator?: WorkspaceWatchCoordinatorApi;
   cloudPort: CloudPort;
+  /** Degraded-mode gate for disk-heavy work; absent outside the daemon. */
+  storageHealth?: Pick<StorageHealthMonitor, 'assertCanStartDiskHeavyWork'> | null;
 }
 
 export type MessageDispatchSource = 'runtime' | 'local';
@@ -772,6 +776,7 @@ export class MessageHandler {
   }
   private hasShownHappyCodingMessage = false;
   private readonly cloudPort: CloudPort;
+  private readonly storageHealth: MessageHandlerConfig['storageHealth'];
   private notificationService: CloudNotificationsPort | null;
   private usageTrackingService: CloudUsagePort | null;
   private readonly turnTokenUsage = new TurnTokenUsageLedger();
@@ -2634,6 +2639,19 @@ export class MessageHandler {
         error: access.outcome === 'denied' ? access.reason : access.error,
       };
     }
+    // Preparation is speculative: refusing it only means the first turn builds
+    // its worktree itself, and that turn is gated too.
+    const storageRefusal = await this.checkStorageForNewWork('worktree preparation');
+    if (storageRefusal) {
+      return {
+        type: 'session/prepare_response',
+        preparationId: spec.preparationId,
+        sessionId,
+        accepted: false,
+        disposition: 'error',
+        error: storageRefusal,
+      };
+    }
     return this.sessionManager.requestSessionPreparation(spec);
   }
 
@@ -2911,6 +2929,7 @@ export class MessageHandler {
       `[machine-lifecycle] launchMode=${this.machineLifecycleCapability.launchMode} canRestart=${this.machineLifecycleCapability.canRemoteRestart} canUpgrade=${this.machineLifecycleCapability.canRemoteUpgrade}`
     );
     this.cloudPort = config.cloudPort;
+    this.storageHealth = config.storageHealth ?? null;
     this.notificationService = this.cloudPort.notifications;
     this.usageTrackingService = this.cloudPort.usage;
     this.localProjectControlService = new LocalProjectControlService(this.logger);
@@ -3111,6 +3130,7 @@ export class MessageHandler {
         await resolveExpectedAcpCapabilitySourceVersion(input),
       evictForMemoryPressure: async (excludeSessionId) =>
         await this.evictForMemoryPressureFn(excludeSessionId),
+      checkStorageForTurnStart: async () => await this.checkStorageForNewWork('new agent turns'),
     });
     this.providerSetupManager = new ProviderSetupManager({
       repo: this.workspaceDocument.repo,
@@ -7453,6 +7473,17 @@ export class MessageHandler {
       return;
     }
 
+    const storageRefusal = await this.checkStorageForNewWork('attachment copies');
+    if (storageRefusal) {
+      respond({
+        success: false,
+        workspaceId: this.workspaceId,
+        error: LODY_STORAGE_CRITICAL_ERROR_CODE,
+        message: storageRefusal,
+      });
+      return;
+    }
+
     const uploadedAt = getServerNow();
     const localBlocks: SessionFilePayload[] = [];
     const failures: string[] = [];
@@ -9707,6 +9738,23 @@ export class MessageHandler {
     if (!this.store.has(sessionId)) return false;
     const state = this.store.get(sessionId);
     return state.turn.phase !== 'idle' || this.hasSessionActivePresence(sessionId);
+  }
+
+  /**
+   * Refusal message for new disk-heavy work while local storage is critical,
+   * else null. Other failures of the check itself never block work.
+   */
+  private async checkStorageForNewWork(operation: string): Promise<string | null> {
+    try {
+      await this.storageHealth?.assertCanStartDiskHeavyWork(operation);
+      return null;
+    } catch (error) {
+      if (isStorageCriticalError(error)) {
+        return formatErrorMessage(error);
+      }
+      this.logger.debug(`Storage health check failed: ${formatErrorMessage(error)}`);
+      return null;
+    }
   }
 
   /**

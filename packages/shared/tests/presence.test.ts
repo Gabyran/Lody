@@ -147,4 +147,23 @@ describe('presence helpers', () => {
     // is only asserted by machine heartbeats.
     expect(online.size).toBe(1);
   });
+
+  it('keeps a machine heartbeat whose storage field this reader cannot parse', () => {
+    const key = getLodyMachinePresenceKey(machineId, instanceId);
+    const heartbeat = { kind: 'machine', machineId, instanceId, updatedAt: 100 };
+    expect(
+      parseLodyPresenceStates({
+        [key]: {
+          ...heartbeat,
+          storage: { level: 'critical', reason: 'write-failed', unsavedSince: 90 },
+        },
+      })[key]
+    ).toMatchObject({ storage: { level: 'critical', reason: 'write-failed', unsavedSince: 90 } });
+    // A newer peer's level must not turn a live machine offline for this reader.
+    const parsed = parseLodyPresenceStates({
+      [key]: { ...heartbeat, storage: { level: 'emergency', reason: 'write-failed' } },
+    })[key];
+    expect(parsed).toMatchObject(heartbeat);
+    expect(parsed?.kind === 'machine' ? parsed.storage : 'not a machine').toBeUndefined();
+  });
 });
