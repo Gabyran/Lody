@@ -2711,25 +2711,21 @@ export async function createWorkspaceRuntime(deps: RuntimeDeps): Promise<Workspa
     }
   );
 
-  const teardownTransport = async (
-    options: {
-      stopPresence?: boolean;
-      stopRpcClients?: boolean;
-      resetStreamsClient?: boolean;
-      invalidateTokenProvider?: boolean;
-    } = {}
+  type TeardownTransportOptions = {
+    stopPresence?: boolean;
+    stopRpcClients?: boolean;
+    resetStreamsClient?: boolean;
+    invalidateTokenProvider?: boolean;
+  };
+
+  const teardownTransportSteps = async (
+    options: TeardownTransportOptions,
+    cloudAddWasInFlight: boolean
   ) => {
     const stopPresence = options.stopPresence ?? true;
     const stopRpcClients = options.stopRpcClients ?? true;
     const resetStreamsClient = options.resetStreamsClient ?? true;
     const invalidateTokenProvider = options.invalidateTokenProvider ?? true;
-    // Supersede any in-flight web attach synchronously: it may be blocked (for
-    // example on the suspect Meta checkpoint delete), so it is not awaited here;
-    // it checks the generation after every await and publishes nothing.
-    webAttachGeneration += 1;
-    // Captured with the generation bump: the attach runs synchronously from its
-    // last generation check into addTransport, so no add can start unseen.
-    const cloudAddWasInFlight = webCloudAddsInFlight.size > 0;
 
     // A runtime-wide teardown owns the mux lifecycle. Let an in-flight cloud
     // member attachment observe dispose/auth state and roll itself back before
@@ -2775,8 +2771,6 @@ export async function createWorkspaceRuntime(deps: RuntimeDeps): Promise<Workspa
     reconnectingStatusVisible = false;
     localReconnectLoop?.stop();
     cloudReconnectLoop?.stop();
-    webAttachReconnectLoop?.stop();
-    webTransportAttachPending = null;
 
     // Unsubscribe from meta room
     if (metaSub) {
@@ -2814,6 +2808,23 @@ export async function createWorkspaceRuntime(deps: RuntimeDeps): Promise<Workspa
     }
 
     emitControlConnectionState();
+  };
+
+  const teardownTransport = async (options: TeardownTransportOptions = {}) => {
+    // Everything that could start or resume a web attach is fenced before the
+    // first await: supersede in-flight attaches, then stop the retry loop and
+    // drop its pending attempt. Every retry path (loop, wake edge, same-token
+    // replay) requires a pending attempt, so none can start an attach on the
+    // provider this teardown is about to invalidate. An in-flight attach may be
+    // blocked (e.g. on the suspect Meta checkpoint delete), so it is not
+    // awaited; it checks the generation after every await and publishes nothing.
+    webAttachGeneration += 1;
+    // Captured with the generation bump: the attach runs synchronously from its
+    // last generation check into addTransport, so no add can start unseen.
+    const cloudAddWasInFlight = webCloudAddsInFlight.size > 0;
+    webAttachReconnectLoop?.stop();
+    webTransportAttachPending = null;
+    await teardownTransportSteps(options, cloudAddWasInFlight);
   };
 
   const startPresenceTransport = () => {

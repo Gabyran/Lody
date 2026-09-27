@@ -796,6 +796,49 @@ describe('createWorkspaceRuntime meta recovery lifecycle', () => {
     }
   );
 
+  it('does not start a retry attach while a token-change teardown is still running', async () => {
+    mocks.joinMetaRoom.mockResolvedValue(createMetaSub(Promise.resolve()));
+    markSuspectMetaCheckpoint();
+    mocks.metaCheckpointDelete.mockRejectedValueOnce(
+      new Error('The database connection is closing.')
+    );
+    const runtime = await createWorkspaceRuntime({
+      workspaceSlug: 'workspace',
+      workspaceId: 'workspace-1' as WorkspaceId,
+      apiBaseUrl: 'https://api.example.test',
+    });
+    // Token-1's attach fails and leaves a pending retry; stay offline so it
+    // does not run on its own.
+    (navigator as { onLine: boolean }).onLine = false;
+    await expect(runtime.setAuthToken('auth-token-1')).rejects.toThrow('connection is closing');
+
+    // Token-2's teardown is held inside its first await (presence stop).
+    const heldStop = Promise.withResolvers<void>();
+    mocks.presenceStop.mockImplementationOnce(async () => await heldStop.promise);
+    const heldAdd = Promise.withResolvers<void>();
+    mocks.addTransport.mockImplementationOnce(async () => await heldAdd.promise);
+    const secondToken = runtime.setAuthToken('auth-token-2');
+    await flushPromises();
+
+    // A wake edge during that window must not start an attach on the provider
+    // the teardown is about to invalidate.
+    (navigator as { onLine: boolean }).onLine = true;
+    dispatchWindowEvent('online');
+    await flushPromises();
+    expect(cloudAttachCalls()).toEqual([]);
+
+    heldStop.resolve();
+    await vi.waitFor(() => expect(cloudAttachCalls()).toHaveLength(1));
+    heldAdd.resolve();
+    await secondToken;
+    await flushPromises();
+
+    expect(cloudAttachCalls()).toHaveLength(1);
+    await expect(runtime.ensureDocStream('session-after-rotation')).resolves.toBeUndefined();
+
+    await runtime.dispose();
+  });
+
   it('stops a pending web attach retry when the runtime is disposed', async () => {
     const runtime = await createWebRuntimeWithSuspectMetaCheckpoint();
 
