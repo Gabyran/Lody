@@ -7,7 +7,7 @@ Translation: current
 
 ## 摘要
 
-loro-repo 0.20.0 把 Flock 版本向量当作"其下所有内容都已保存"的证据。Lody 自己还另有三处游标与数据不一致：CLI 在对应的 SQLite 写入之前就保存了 Streams 游标；一次性 CLI 命令会从 daemon 的游标行继续；Web 标签页共用同一个 repo 库和同一个游标库。每一处都可能让某个副本永久跳过远端数据。现在，Lody 把每个 Meta/Flock Streams checkpoint 绑定到加载它的副本，并与该副本的数据原子地存在一起：渲染端存在 IndexedDB，CLI 存在 SQLite。每次保存游标前都会先等真实的逐资源持久化屏障；LoroDoc 游标只在 daemon 中共享并持久化。改动分三个 PR 上线：库升级（#1049）、渲染端（#1058），以及基于 loro-repo 0.21.0 的 CLI（#1066）。没有迁移任何游标；每个 Meta/Flock 房间 bootstrap 一次，这也顺带修复了已经损坏的缓存。剩余局限有两点：持久性是用 fake-indexeddb、真实 Chromium 的事务顺序和注入的 SQLite 故障证明的，没有验证断电；LoroDoc 游标没有绑定到副本，所以一次性命令打开的每个文档都会 bootstrap 一次。
+loro-repo 0.20.0 把 Flock 版本向量当作"其下所有内容都已保存"的证据。Lody 自己还另有三处游标与数据不一致：CLI 在对应的 SQLite 写入之前就保存了 Streams 游标；一次性 CLI 命令会从 daemon 的游标行继续；Web 标签页共用同一个 repo 库和同一个游标库。每一处都可能让某个副本永久跳过远端数据。现在，Lody 把每个 Meta/Flock Streams checkpoint 绑定到加载它的副本，并与该副本的数据原子地存在一起：渲染端存在 IndexedDB，CLI 存在 SQLite。每次保存游标前都会先等真实的逐资源持久化屏障；LoroDoc 游标只在 daemon 中共享并持久化。改动分三个 PR 上线：库升级（#1049）、渲染端（#1058），以及基于 loro-repo 0.21.0 的 CLI（#1066）。没有迁移任何游标；每个 Meta/Flock 房间在首次用 0.21.0 打开时 bootstrap 一次，这也顺带修复了已经损坏的缓存；旧版本持续写入期间，受影响的房间可能再次 bootstrap。剩余局限有两点：持久性是用 fake-indexeddb、真实 Chromium 的事务顺序和注入的 SQLite 故障证明的，没有验证断电；LoroDoc 游标没有绑定到副本，所以一次性命令打开的每个文档都会 bootstrap 一次。
 
 ## 上游变化（0.20.0 → 0.20.3，`main` 位于 `5862a2b`）
 
@@ -301,7 +301,7 @@ loro-repo 0.20.0 把 Flock 版本向量当作"其下所有内容都已保存"的
 - **证据。**
   - 上文列出的阶段 0 模拟，以及阶段 1、阶段 3 的回归测试和消融。
   - 每个被合并的 head 都经过独立 Reviewer 复核，未发现遗留 P0/P1。
-  - #1066 的评审让 0.20.3 和 0.21.0 交替读写同一个 fake-indexeddb 库和同一个 SQLite 文件，没有丢数据。旧版本持续写入期间，每个受影响的资源最多多 bootstrap 一次。
+  - #1066 的评审让 0.20.3 和 0.21.0 交替读写同一个 fake-indexeddb 库和同一个 SQLite 文件，没有丢数据，checkpoint 也没有越过数据。但额外 bootstrap 的次数没有上限：旧版本每重写一次命名 Flock 队列，都会丢掉 lineage marker，于是该资源下一次用 0.21.0 打开时会再 bootstrap 一次。Meta 只有旧版本破坏性的 `meta-snapshot` 才会产生同样的效果。只要旧版本的写入方还在活动，这种情况就会反复发生（loro-dev/loro-repo#138，trade-offs 一节）。
   - 限制页数直到 SQLite 报 `SQLITE_FULL` 时，`saveMany` 会回滚全部行。
 - **待办。**
   - 升级后第一次打开数据库时，如果磁盘已满，仍会打开失败（loro-dev/loro-repo#139）。
