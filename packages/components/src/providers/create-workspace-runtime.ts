@@ -641,6 +641,9 @@ export async function createWorkspaceRuntime(deps: RuntimeDeps): Promise<Workspa
   // recovery). An attach belongs to the generation it started in; once that
   // generation is torn down it must not publish provider, transport or state.
   let webAttachGeneration = 0;
+  // loro-repo registers a transport synchronously when addTransport starts and
+  // only resolves after routing live rooms, so an in-flight add is already live.
+  let webCloudAddInFlight = false;
   let reconnectBackstopTimer: ReturnType<typeof setInterval> | null = null;
   let releaseIdleDocumentStoresBeforeReconnect: () => Promise<void> = async () => {};
   // Background eager-sync coordinator. Assigned once all of its port
@@ -2722,6 +2725,9 @@ export async function createWorkspaceRuntime(deps: RuntimeDeps): Promise<Workspa
     // example on the suspect Meta checkpoint delete), so it is not awaited here;
     // it checks the generation after every await and publishes nothing.
     webAttachGeneration += 1;
+    // Captured with the generation bump: the attach runs synchronously from its
+    // last generation check into addTransport, so no add can start unseen.
+    const cloudAddWasInFlight = webCloudAddInFlight;
 
     // A runtime-wide teardown owns the mux lifecycle. Let an in-flight cloud
     // member attachment observe dispose/auth state and roll itself back before
@@ -2783,8 +2789,12 @@ export async function createWorkspaceRuntime(deps: RuntimeDeps): Promise<Workspa
     eagerSyncWorkerClient?.cancelAll();
     // Remove both planes' transports (loro-repo keeps room leases; their
     // bindings report 'detached' until a later attach).
-    if (transportAttached) {
-      await repo.removeTransport('local', { close: true }).catch(() => undefined);
+    if (transportAttached || cloudAddWasInFlight) {
+      // An add still routing rooms is removed now, not when it resolves, so a
+      // sign-out never returns with the old credentials' transport registered.
+      if (transportAttached) {
+        await repo.removeTransport('local', { close: true }).catch(() => undefined);
+      }
       await repo.removeTransport('cloud', { close: true }).catch(() => undefined);
       transportAttached = false;
     }
@@ -2987,11 +2997,16 @@ export async function createWorkspaceRuntime(deps: RuntimeDeps): Promise<Workspa
 
       // Web routes every room to ['cloud'] (router non-localFirst path), so
       // the single transport must be registered under that id.
-      await repo.addTransport('cloud', transportAdapter, { ephemeral: true });
+      webCloudAddInFlight = true;
+      try {
+        await repo.addTransport('cloud', transportAdapter, { ephemeral: true });
+      } finally {
+        webCloudAddInFlight = false;
+      }
       if (options.generation !== webAttachGeneration) {
-        // Torn down while addTransport ran: the transport belongs to a dead
-        // provider, and the next generation attaches its own.
-        await repo.removeTransport('cloud', { close: true }).catch(() => undefined);
+        // Torn down while addTransport ran: that teardown already removed this
+        // transport. Removing 'cloud' again here could hit the next
+        // generation's transport of the same id.
         throw new SupersededAttachError();
       }
     } catch (error) {
@@ -3036,18 +3051,14 @@ export async function createWorkspaceRuntime(deps: RuntimeDeps): Promise<Workspa
   // under the shared backoff. Single-flight: concurrent callers share one attach.
   const attachWebDurableTransport = async (options: { startPresence: boolean }): Promise<void> => {
     const generation = webAttachGeneration;
-    // Share an attach only within one token generation. An older in-flight
-    // attach is left to notice its supersession and unwind first, so the new
-    // generation always builds its own provider and transport.
-    for (let inFlight = webTransportAttach; inFlight; inFlight = webTransportAttach) {
-      if (inFlight.generation === generation) {
-        await inFlight.promise;
-        return;
-      }
-      await inFlight.promise.catch(() => undefined);
-      if (generation !== webAttachGeneration) {
-        throw new SupersededAttachError();
-      }
+    // Share an attach only within one token generation. An older one is never
+    // awaited: it may be stuck (checkpoint delete, room routing), and the
+    // teardown that superseded it already fenced its generation and removed
+    // its transport, so it can only unwind. The new generation builds its own.
+    const inFlight = webTransportAttach;
+    if (inFlight?.generation === generation) {
+      await inFlight.promise;
+      return;
     }
     const pending = (async () => {
       try {

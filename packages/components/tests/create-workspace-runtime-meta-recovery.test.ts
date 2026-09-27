@@ -589,15 +589,18 @@ describe('createWorkspaceRuntime meta recovery lifecycle', () => {
 
     const firstToken = runtime.setAuthToken('auth-token-1');
     await vi.waitFor(() => expect(mocks.metaCheckpointDelete).toHaveBeenCalledTimes(1));
-    const secondToken = runtime.setAuthToken('auth-token-2');
-    // The rotation tears down token-1's provider while its attach is blocked.
-    await vi.waitFor(() => expect(mocks.tokenProviderInvalidate).toHaveBeenCalled());
-    blockedDelete.resolve();
-    await Promise.all([firstToken, secondToken]);
-
-    // Only token-2's attach publishes a transport, after its own delete.
+    // The rotation tears down token-1's provider and does not wait for its
+    // still-blocked delete: token-2 attaches on its own right away.
+    await runtime.setAuthToken('auth-token-2');
+    expect(mocks.tokenProviderInvalidate).toHaveBeenCalled();
     expect(cloudAttachCalls()).toHaveLength(1);
     expect(mocks.metaCheckpointDelete).toHaveBeenCalledTimes(2);
+
+    blockedDelete.resolve();
+    await firstToken;
+    await flushPromises();
+    // The superseded attach publishes nothing when it finally unblocks.
+    expect(cloudAttachCalls()).toHaveLength(1);
     await expect(runtime.ensureDocStream('session-after-rotation')).resolves.toBeUndefined();
 
     await runtime.dispose();
@@ -639,11 +642,16 @@ describe('createWorkspaceRuntime meta recovery lifecycle', () => {
     }
   );
 
+  const cloudRemovals = () =>
+    mocks.removeTransport.mock.calls.filter(([transportId]) => transportId === 'cloud');
+
   it.each(['dispose', 'sign-out'] as const)(
-    'rolls back a web attach torn down (%s) while addTransport is in flight',
+    'removes an in-flight web transport before %s returns',
     async (teardown) => {
       mocks.joinMetaRoom.mockResolvedValue(createMetaSub(Promise.resolve()));
       markSuspectMetaCheckpoint();
+      // loro-repo registers the transport when addTransport starts; the promise
+      // resolves only after routing live rooms, which is held here.
       const blockedAdd = Promise.withResolvers<void>();
       mocks.addTransport.mockImplementationOnce(async () => await blockedAdd.promise);
       const runtime = await createWorkspaceRuntime({
@@ -659,16 +667,15 @@ describe('createWorkspaceRuntime meta recovery lifecycle', () => {
       } else {
         await runtime.setAuthToken(null);
       }
-      const removalsBeforeRelease = mocks.removeTransport.mock.calls.length;
+      // Already unregistered when sign-out/dispose returns, before the add ends.
+      expect(cloudRemovals()).toHaveLength(1);
+
       blockedAdd.resolve();
       await attach;
       await flushPromises();
       await vi.advanceTimersByTimeAsync(120_000);
-
-      // The late transport is removed again, never joined, and never retried;
-      // the suspect-checkpoint marker is not cleared by it either.
-      expect(mocks.removeTransport.mock.calls.length).toBeGreaterThan(removalsBeforeRelease);
-      expect(mocks.removeTransport.mock.calls.at(-1)?.[0]).toBe('cloud');
+      // The late add neither re-removes nor joins, retries or clears the marker.
+      expect(cloudRemovals()).toHaveLength(1);
       expect(mocks.joinMetaRoom).not.toHaveBeenCalled();
       expect(cloudAttachCalls()).toHaveLength(1);
       expect(window.localStorage.getItem(markerKey)).not.toBeNull();
@@ -677,6 +684,35 @@ describe('createWorkspaceRuntime meta recovery lifecycle', () => {
       }
     }
   );
+
+  it("does not remove the next token's transport when a superseded add finishes late", async () => {
+    mocks.joinMetaRoom.mockResolvedValue(createMetaSub(Promise.resolve()));
+    const blockedAdd = Promise.withResolvers<void>();
+    mocks.addTransport.mockImplementationOnce(async () => await blockedAdd.promise);
+    const runtime = await createWorkspaceRuntime({
+      workspaceSlug: 'workspace',
+      workspaceId: 'workspace-1' as WorkspaceId,
+      apiBaseUrl: 'https://api.example.test',
+    });
+
+    const firstToken = runtime.setAuthToken('auth-token-1');
+    await vi.waitFor(() => expect(cloudAttachCalls()).toHaveLength(1));
+    await runtime.setAuthToken('auth-token-2');
+    // Token-1's transport was removed before token-2's was added.
+    expect(cloudRemovals()).toHaveLength(1);
+    expect(cloudAttachCalls()).toHaveLength(2);
+    expect(mocks.removeTransport.mock.invocationCallOrder.at(-1)).toBeLessThan(
+      mocks.addTransport.mock.invocationCallOrder.at(-1) ?? 0
+    );
+
+    blockedAdd.resolve();
+    await firstToken;
+    await flushPromises();
+    expect(cloudRemovals()).toHaveLength(1);
+    await expect(runtime.ensureDocStream('session-after-rotation')).resolves.toBeUndefined();
+
+    await runtime.dispose();
+  });
 
   it('stops a pending web attach retry when the runtime is disposed', async () => {
     const runtime = await createWebRuntimeWithSuspectMetaCheckpoint();
