@@ -8,6 +8,7 @@ import {
 } from '@lody/shared/local-loro-data-plane';
 import { LocalLoroDataPlaneServer } from '@lody/shared/local-loro-data-plane-server';
 import type { WorkspaceId } from '@lody/shared';
+import { InMemoryRemoteCursorStore } from '@loro-dev/streams-crdt';
 
 import type { Logger } from '../src/utils/logger';
 
@@ -372,6 +373,11 @@ describe('LoroDocumentManager.create degraded startup behavior', () => {
         compress: expect.any(Function),
         decompress: expect.any(Function),
       },
+    });
+    // One-shot commands do not pass a cursor scope: their LoroDoc progress must
+    // stay in this process's memory, never the daemon's shared SQLite cursors.
+    expect(mocks.transportOptions[0]).toMatchObject({
+      persistence: { documentRemoteCursorStore: expect.any(InMemoryRemoteCursorStore) },
     });
 
     await manager.cleanUp({ fast: true });

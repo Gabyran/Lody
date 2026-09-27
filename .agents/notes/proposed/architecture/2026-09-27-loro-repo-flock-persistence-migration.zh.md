@@ -282,6 +282,11 @@ Lody 目前运行 0.20.0，外加一个上游已经吸收的补丁。因此 Lody
   - 用共享游标的两参数工厂时，过期副本最终缺少 A；
   - 用只安排、不等待的屏障时，写入失败了同步却报告成功；
   - 用内存游标时，每次重启都会 bootstrap。
+- **评审修复（P1）：共享的 LoroDoc 游标只给 daemon 用。** loro-repo 并没有把 LoroDoc 游标与文档字节绑定，所以一次性命令如果在 daemon 推进某个文档之前就打开了它，会从 daemon 共享的 `remote_cursors` 行继续，并一直缺少 daemon 收到的数据。
+  - `LoroDocumentManager.create` 新增 `documentCursorScope` 选项。只有 daemon（`lib/lody.ts`）传 `shared-durable`；默认的 `process` 把 LoroDoc 进度保存在本进程内存里，所以一次性命令打开的每个文档都会 bootstrap 一次，并且永远不会写共享游标。
+  - 这样共享游标只会描述 daemon 自己的副本。一次性命令写入的数据可能领先于它，这只会导致重放。
+  - 回归测试：新增双进程 `syncDoc` 测试（一次性命令先加载空文档，daemon bootstrap 到 A 并推进共享游标，然后一次性命令同步，必须通过第二次 bootstrap 拿到 A）。若 LoroDoc 游标共享，一次性命令最终仍是空的。manager-create 测试断言一次性调用方默认得到内存游标库。
+  - 上游如果提供 LoroDoc 的 replica-bound checkpoint，可以省掉每条命令的 bootstrap，但这不是正确性所必需的。
 - **限制。** 升级后第一次打开会写入 checkpoint 表和触发器。如果那一刻磁盘恰好已满，工作区会打不开（loro-dev/loro-repo#139）。
 
 ## 备选方案

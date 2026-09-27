@@ -106,7 +106,12 @@ import { redactProxyUrl, sanitizeUrlForLogging } from '@/utils/log-sanitize';
 import { getProxyForUrl } from 'proxy-from-env';
 import { HttpsProxyAgent } from 'https-proxy-agent';
 import type { RateLimit } from 'acp-extension-core';
-import { createCliSqliteRepoStore } from './sqlite-repo-store';
+import type { RemoteCursorStore } from '@loro-dev/streams-crdt';
+import {
+  createCliSqliteRepoStore,
+  createDocumentRemoteCursorStore,
+  type DocumentCursorScope,
+} from './sqlite-repo-store';
 import { streamsRoomBinding, type StreamsRoomBinding } from './streams-room-binding';
 import { formatErrorMessage } from '@/utils/format-error';
 import {
@@ -320,6 +325,8 @@ export interface LoroDocumentManagerOptions {
   machineMonitorRuntime?: CliMachineMonitorRuntime | null;
   localLoroDataPlaneServer?: LocalLoroDataPlaneServer | null;
   sqliteRepoStore?: CliSqliteRepoStore | null;
+  /** LoroDoc Streams cursors for this process; see `DocumentCursorScope`. */
+  documentRemoteCursorStore?: RemoteCursorStore | null;
   remoteStreamsAttached?: boolean;
   streamsTokens?: CloudStreamsTokenPort | null;
   cloudBilling?: CloudBillingPort | null;
@@ -342,6 +349,7 @@ export class LoroDocumentManager {
   private readonly logger: Logger;
   private readonly localLoroDataPlaneServer: LocalLoroDataPlaneServer | null;
   private readonly sqliteRepoStore: CliSqliteRepoStore | null;
+  private readonly documentRemoteCursorStore: RemoteCursorStore | null;
   private remoteStreamsAttached: boolean;
   private remoteStreamsGeneration: number;
   private machineExistenceWatcher: RepoWatchHandle | null = null;
@@ -365,6 +373,11 @@ export class LoroDocumentManager {
     logger: Logger,
     options: {
       attachRemoteOnCreate?: boolean;
+      /**
+       * Only the daemon passes `shared-durable`; see `DocumentCursorScope`.
+       * The default keeps LoroDoc progress in this process's memory.
+       */
+      documentCursorScope?: DocumentCursorScope;
       streamsTokens?: CloudStreamsTokenPort | null;
       cloudBilling?: CloudBillingPort | null;
     } = {}
@@ -456,6 +469,10 @@ export class LoroDocumentManager {
         machineMonitorRuntime,
         localLoroDataPlaneServer,
         sqliteRepoStore: cliSqliteRepoStore,
+        documentRemoteCursorStore: createDocumentRemoteCursorStore(
+          cliSqliteRepoStore,
+          options.documentCursorScope ?? 'process'
+        ),
         remoteStreamsAttached: false,
         streamsTokens: options.streamsTokens ?? null,
         cloudBilling: options.cloudBilling ?? null,
@@ -516,6 +533,7 @@ export class LoroDocumentManager {
     this.logger = options.logger;
     this.localLoroDataPlaneServer = options.localLoroDataPlaneServer ?? null;
     this.sqliteRepoStore = options.sqliteRepoStore ?? null;
+    this.documentRemoteCursorStore = options.documentRemoteCursorStore ?? null;
     this.remoteStreamsAttached = options.remoteStreamsAttached ?? false;
     this.streamsTokens = options.streamsTokens ?? null;
     this.cloudBilling = options.cloudBilling ?? null;
@@ -598,7 +616,7 @@ export class LoroDocumentManager {
     if (this.remoteStreamsAttached) {
       return;
     }
-    if (!this.sqliteRepoStore) {
+    if (!this.sqliteRepoStore || !this.documentRemoteCursorStore) {
       throw new Error('sqlite_repo_store_unavailable');
     }
     if (!this.streamsTokens) {
@@ -609,7 +627,7 @@ export class LoroDocumentManager {
       workspaceId: this.workspaceId,
       tokenProvider: this.streamsTokens.createTokenProvider({ workspaceId: this.workspaceId }),
       repo: this.repo,
-      documentRemoteCursorStore: this.sqliteRepoStore.documentRemoteCursorStore,
+      documentRemoteCursorStore: this.documentRemoteCursorStore,
       logger: this.logger,
     });
     installStreamsDiagnostics(this.logger);

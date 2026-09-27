@@ -1,8 +1,9 @@
 /**
  * The daemon and one-shot CLI commands open the same `repo.sqlite3` with their
- * own in-memory replicas. Meta/Flock Streams progress must therefore belong to
- * the replica that loaded it: a process that hydrated before another process
- * advanced data and cursor has to bootstrap, not resume at that tail.
+ * own in-memory replicas. Streams progress must therefore belong to the replica
+ * that loaded it: a process that hydrated before another process advanced data
+ * and cursor has to bootstrap, not resume at that tail. Meta/Flock cursors are
+ * replica-bound; LoroDoc cursors are durable for the daemon only.
  *
  * Drives the real CLI composition (`createCliSqliteRepoStore` +
  * `createCliStreamsTransport` + `LoroRepo`) against a scripted Streams server.
@@ -12,12 +13,15 @@ import os from 'os';
 import path from 'path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { Flock } from '@loro-dev/flock-wasm';
+import { LoroDoc } from 'loro-crdt';
 import { getLoroMetaStreamId, type WorkspaceId } from '@lody/shared';
 import type { LoroStreamsTokenProvider } from '@lody/platform';
 import { LoroRepo } from 'loro-repo';
 import {
   createCliSqliteRepoStore,
+  createDocumentRemoteCursorStore,
   type CliSqliteRepoStore,
+  type DocumentCursorScope,
 } from '../src/lib/loro/sqlite-repo-store';
 import { createCliStreamsTransport } from '../src/lib/loro/streams-transport';
 import type { Logger } from '../src/utils/logger';
@@ -39,11 +43,14 @@ const tokenProvider = {
 
 const toArrayBuffer = (value: Uint8Array): ArrayBuffer => value.slice().buffer as ArrayBuffer;
 
-/** Meta stream holding `A` at offset 100; catch-up from 100 has nothing new. */
-function createMetaServer() {
+const metaSnapshotWithA = (): Uint8Array => {
   const server = new Flock('server');
   server.put(keyA, 'A');
-  const snapshot = server.exportFile();
+  return server.exportFile();
+};
+
+/** Streams serving `snapshot` at offset 100; catch-up from 100 has nothing new. */
+function createStreamsServer(snapshot: Uint8Array) {
   const requests: URL[] = [];
   vi.stubGlobal(
     'fetch',
@@ -91,20 +98,28 @@ function createMetaServer() {
   return { bootstraps };
 }
 
-type CliProcess = { store: CliSqliteRepoStore; repo: LoroRepo };
+type CliProcess = {
+  store: CliSqliteRepoStore;
+  repo: LoroRepo;
+  documentRemoteCursorStore: ReturnType<typeof createDocumentRemoteCursorStore>;
+};
 
 let dataDir: string;
 const openProcesses = new Set<CliProcess>();
 const originalDataDir = process.env.LODY_DATA_DIR;
 
 /** One daemon or one-shot command: its own connection and in-memory replica. */
-async function openCliProcess(): Promise<CliProcess> {
+async function openCliProcess(scope: DocumentCursorScope = 'shared-durable'): Promise<CliProcess> {
   const store = await createCliSqliteRepoStore(workspaceId);
   const repo = await LoroRepo.create({
     storageAdapter: store.storageAdapter,
     metaDebounceCommitMs: 0,
   });
-  const cliProcess = { store, repo };
+  const cliProcess = {
+    store,
+    repo,
+    documentRemoteCursorStore: createDocumentRemoteCursorStore(store, scope),
+  };
   openProcesses.add(cliProcess);
   return cliProcess;
 }
@@ -115,20 +130,29 @@ async function closeCliProcess(cliProcess: CliProcess): Promise<void> {
   cliProcess.store.sqliteStore.close();
 }
 
-async function syncMeta(cliProcess: CliProcess) {
+async function withTransport<T>(
+  cliProcess: CliProcess,
+  run: (adapter: Awaited<ReturnType<typeof createCliStreamsTransport>>['adapter']) => Promise<T>
+): Promise<T> {
   const { adapter } = await createCliStreamsTransport({
     workspaceId,
     tokenProvider,
     repo: cliProcess.repo,
-    documentRemoteCursorStore: cliProcess.store.documentRemoteCursorStore,
+    documentRemoteCursorStore: cliProcess.documentRemoteCursorStore,
     logger: silentLogger,
   });
   try {
-    return await adapter.syncMeta(cliProcess.repo.getMeta());
+    return await run(adapter);
   } finally {
     await adapter.close();
   }
 }
+
+const syncMeta = (cliProcess: CliProcess) =>
+  withTransport(cliProcess, (adapter) => adapter.syncMeta(cliProcess.repo.getMeta()));
+
+const syncDoc = (cliProcess: CliProcess, docId: string, doc: LoroDoc) =>
+  withTransport(cliProcess, (adapter) => adapter.syncDoc(docId, doc));
 
 beforeEach(async () => {
   dataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'lody-replica-checkpoints-'));
@@ -145,10 +169,10 @@ afterEach(async () => {
 
 describe('CLI Streams checkpoints are bound to the replica that loaded them', () => {
   it('bootstraps a process that hydrated before another process advanced the shared file', async () => {
-    const server = createMetaServer();
+    const server = createStreamsServer(metaSnapshotWithA());
     // The one-shot command opens first, while the file is still empty.
-    const oneShot = await openCliProcess();
-    const daemon = await openCliProcess();
+    const oneShot = await openCliProcess('process');
+    const daemon = await openCliProcess('shared-durable');
 
     expect((await syncMeta(daemon)).ok).toBe(true);
     expect(daemon.repo.getMeta().get(keyA)).toBe('A');
@@ -169,8 +193,30 @@ describe('CLI Streams checkpoints are bound to the replica that loaded them', ()
     expect(sharedRows.filter((row) => row.stream_url.endsWith(metaStreamSuffix))).toEqual([]);
   });
 
+  it('bootstraps a doc a one-shot command loaded before the daemon advanced it', async () => {
+    const docId = 'session-one-shot';
+    const remote = new LoroDoc();
+    remote.getText('t').insert(0, 'A');
+    const server = createStreamsServer(remote.export({ mode: 'snapshot' }));
+    // The one-shot command opens the session doc first, while it is still empty.
+    const oneShot = await openCliProcess('process');
+    const oneShotDoc = (await oneShot.repo.openPersistedDoc(docId)).doc;
+    const daemon = await openCliProcess('shared-durable');
+    const daemonDoc = (await daemon.repo.openPersistedDoc(docId)).doc;
+
+    expect((await syncDoc(daemon, docId, daemonDoc)).ok).toBe(true);
+    expect(daemonDoc.getText('t').toString()).toBe('A');
+    expect(server.bootstraps()).toBe(1);
+
+    // The shared file now holds A and the daemon's offset-100 doc cursor; the
+    // one-shot replica never loaded A and must not resume at that tail.
+    expect((await syncDoc(oneShot, docId, oneShotDoc)).ok).toBe(true);
+    expect(oneShotDoc.getText('t').toString()).toBe('A');
+    expect(server.bootstraps()).toBe(2);
+  });
+
   it('does not advance the checkpoint past data that failed to persist before a crash', async () => {
-    const server = createMetaServer();
+    const server = createStreamsServer(metaSnapshotWithA());
     const daemon = await openCliProcess();
     const storage = daemon.store.storageAdapter;
     const save = storage.save.bind(storage);
@@ -195,7 +241,7 @@ describe('CLI Streams checkpoints are bound to the replica that loaded them', ()
   });
 
   it('resumes from its own durable checkpoint after a restart instead of bootstrapping again', async () => {
-    const server = createMetaServer();
+    const server = createStreamsServer(metaSnapshotWithA());
     const daemon = await openCliProcess();
     expect((await syncMeta(daemon)).ok).toBe(true);
     await closeCliProcess(daemon);

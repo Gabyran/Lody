@@ -283,6 +283,11 @@ Separately, a real full disk makes the CLI daemon exit through an uncaught log-t
   - with the shared-cursor two-argument factory, the stale replica ends without A;
   - with a schedule-only barrier, the sync reports success while the write failed;
   - with ephemeral cursors, every restart bootstraps.
+- **Review fix (P1): LoroDoc cursors are daemon-only when shared.** loro-repo does not bind LoroDoc cursors to the doc bytes, so a one-shot command that opened a doc before the daemon advanced it would resume from the daemon's shared `remote_cursors` row and keep missing the daemon's data.
+  - `LoroDocumentManager.create` now takes `documentCursorScope`. Only the daemon (`lib/lody.ts`) passes `shared-durable`; the default `process` keeps LoroDoc progress in memory, so one-shot commands bootstrap each doc they open once and never write shared cursors.
+  - The shared cursors therefore only ever describe the daemon's own replica. Data written by one-shot commands can run ahead of them, which only replays.
+  - Regression: a two-process `syncDoc` test (one-shot hydrates an empty doc, the daemon bootstraps A and advances the shared cursor, then the one-shot syncs and must receive A through a second bootstrap). With shared LoroDoc cursors the one-shot ends empty. The manager-create test asserts one-shot callers get an in-memory store by default.
+  - A LoroDoc replica-bound checkpoint upstream would remove the per-command bootstrap; it is not required for correctness.
 - **Limit.** The first open after this upgrade writes the checkpoint table and triggers. If the disk is already full at that moment, the workspace fails to open (loro-dev/loro-repo#139).
 
 ## Alternatives
