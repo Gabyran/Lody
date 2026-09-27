@@ -7,6 +7,7 @@ import type { GlobalShortcutsService } from '../services/global-shortcuts-servic
 import type { LoroDataPlaneRelay } from '../services/loro-data-plane-relay'
 import type { NotificationService } from '../services/notification-service'
 import type { PublicBrowserService } from '../services/public-browser-service'
+import type { RendererStorageState } from '../services/renderer-storage-state'
 import type { TerminalRelay } from '../services/terminal-relay'
 import type { WindowBadgeService } from '../services/window-badge-service'
 
@@ -19,6 +20,7 @@ export type IpcServiceDeps = {
   terminalRelay: TerminalRelay
   publicBrowserService: PublicBrowserService
   loroDataPlaneRelay: LoroDataPlaneRelay
+  rendererStorageState: RendererStorageState
   windowBadgeService: WindowBadgeService
   globalShortcutsService: GlobalShortcutsService
   getMainWindow: () => BrowserWindow | null

@@ -4420,7 +4420,7 @@
   "archive.leave": "退出归档",
   "common.copyTable": "复制表格",
   "desktop.quitUnsaved.cancel": "取消",
-  "desktop.quitUnsaved.detail": "Lody 数据所在的磁盘已满，自 {{time}} 起的更改只保存在内存中。现在退出会丢失这些更改。请先释放磁盘空间，等提示消失后再退出。",
+  "desktop.quitUnsaved.detail": "存储空间已满，自 {{time}} 起的更改只保存在内存中。现在退出会丢失这些更改。请先释放磁盘空间，等提示消失后再退出。",
   "desktop.quitUnsaved.quit": "仍然退出",
   "desktop.quitUnsaved.title": "有未保存的更改",
   "sidebar.thisDevice": "当前设备",

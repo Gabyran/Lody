@@ -41,6 +41,8 @@ export type IpcPushMap = {
   'app.windowTarget': ElectronWindowTarget;
   'app.prepareWindowTarget': PreparedWindowTarget;
   'app.activatePreparedWindow': PreparedWindowTarget;
+  /** Main asks a window with unsaved repo changes to flush now before quitting. */
+  'storage.quitCheck': { requestId: string };
 };
 
 export type IpcSendMap = {
@@ -55,6 +57,10 @@ export type IpcSendMap = {
   'app.windowReady': null;
   'app.windowContentReady': ElectronWindowTarget;
   'app.preparedWindowState': PreparedWindowTarget & { ready: boolean };
+  /** This window's earliest repo change refused for lack of space, or null when all saved. */
+  'storage.rendererUnsaved': { since: number | null };
+  /** Answer to `storage.quitCheck`, after the window's final flush attempt. */
+  'storage.quitCheckResult': { requestId: string; since: number | null };
 };
 
 export const IPC_PUSH_CHANNELS = {
@@ -77,6 +83,7 @@ export const IPC_PUSH_CHANNELS = {
   appWindowTarget: 'app.windowTarget',
   appPrepareWindowTarget: 'app.prepareWindowTarget',
   appActivatePreparedWindow: 'app.activatePreparedWindow',
+  storageQuitCheck: 'storage.quitCheck',
 } as const satisfies { [K: string]: keyof IpcPushMap };
 
 export const IPC_SEND_CHANNELS = {
@@ -91,6 +98,8 @@ export const IPC_SEND_CHANNELS = {
   appWindowReady: 'app.windowReady',
   appWindowContentReady: 'app.windowContentReady',
   appPreparedWindowState: 'app.preparedWindowState',
+  storageRendererUnsaved: 'storage.rendererUnsaved',
+  storageQuitCheckResult: 'storage.quitCheckResult',
 } as const satisfies { [K: string]: keyof IpcSendMap };
 
 const PUSH_CHANNEL_VALUES: readonly string[] = Object.values(IPC_PUSH_CHANNELS);

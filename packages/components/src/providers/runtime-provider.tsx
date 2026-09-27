@@ -14,7 +14,6 @@ import {
   setLodyPresenceStatesAtom,
   setLodyPresenceSyncStateAtom,
 } from '@/atoms/presence';
-import { rendererStorageFullAtom } from '@/atoms/local-storage-health';
 import {
   localAgentEnabledAtom,
   localProbeAttemptedAtom,
@@ -90,7 +89,6 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
   const setPresenceStates = useSetAtom(setLodyPresenceStatesAtom);
   const setPresenceNowMs = useSetAtom(setLodyPresenceNowMsAtom);
   const setPresenceSyncState = useSetAtom(setLodyPresenceSyncStateAtom);
-  const setRendererStorageFull = useSetAtom(rendererStorageFullAtom);
   const visibleMachineIndex = useVisibleMachineMetas({
     includeMachineFlock: false,
     syncMachineFlock: false,
@@ -318,12 +316,6 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
             }
             setPresenceSyncState(state);
           },
-          onLocalStorageFull: (state) => {
-            if (disposed) {
-              return;
-            }
-            setRendererStorageFull(state);
-          },
         });
         if (disposed) {
           try {
@@ -371,7 +363,6 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
       setRuntimeInitializing(true);
       clearDocMetaCache();
       clearPresenceStates();
-      setRendererStorageFull(null);
       if (workspaceRuntime) {
         void workspaceRuntime.dispose().catch((error: unknown) => {
           logRuntimeOperationError('cleanup dispose', error);
@@ -388,7 +379,6 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
     setRuntime,
     setPresenceStates,
     setPresenceSyncState,
-    setRendererStorageFull,
     store,
     telemetryEnabled,
     workspaceSlug,

@@ -1,8 +1,7 @@
 import { waitForScheduleWriteSync, withScheduleWrite } from './schedule-write-sync';
 import {
   getScheduleRoomId,
-  StorageFullRecovery,
-  observeStorageAdapterWrites,
+  RepoStorageGuard,
   scheduleDocSchema,
   scheduleDocumentFromMirrorState,
 } from '@lody/shared';
@@ -12,6 +11,10 @@ import {
   createSessionSnapshotLoader,
   readSessionBootstrapSnapshot,
 } from './local-window-bootstrap';
+import {
+  installRendererStorageQuitCheck,
+  rendererStorageEpisodes,
+} from '@/lib/renderer-storage-episodes';
 import { jotaiStore } from '@/lib/utils';
 import { desktopWindowId } from '@/lib/desktop-window';
 import { navigationSidebarHiddenAtom } from '@/atoms/layout-state';
@@ -210,13 +213,6 @@ type RuntimeDeps = {
    * "machine offline" from "presence not flowing to this client".
    */
   onPresenceSyncStateChange?: (state: RoomSyncState) => void;
-  /**
-   * The repo's own IndexedDB store refused a write for lack of space (`since`
-   * is the first failure), or wrote successfully again (`null`). Drives the
-   * same storage banner as the local daemon's disk. Spec:
-   * `specs/local-storage-health.md`.
-   */
-  onLocalStorageFull?: (state: { since: number } | null) => void;
   /**
    * Forward analytics intents (meta-sync outcome, connection-state changes,
    * durable-transport init failures) to the PostHog-aware caller. Optional so
@@ -457,30 +453,24 @@ export async function createWorkspaceRuntime(deps: RuntimeDeps): Promise<Workspa
   const repoStorage = new IndexedDBStorageAdaptor({ dbName: cacheIdentity.repoDbName });
   const openSessionWithSnapshot = createSessionSnapshotLoader(repoStorage);
   // loro-repo only logs a failed background save, so the adapter is where a
-  // `quota` refusal is seen. A failed save stays dirty in memory; a later
-  // successful write of some other resource does not prove it was saved, so the
-  // episode ends only when a full repo flush succeeds (see StorageFullRecovery).
-  let flushRepoForStorageRecovery: (() => Promise<void>) | null = null;
-  const storageFullRecovery = new StorageFullRecovery({
-    flush: async () => {
-      if (!flushRepoForStorageRecovery) throw new Error('repo not ready');
-      await flushRepoForStorageRecovery();
-    },
-    onChange: (state) => deps.onLocalStorageFull?.(state),
-  });
-  const observedRepoStorage = observeStorageAdapterWrites(repoStorage, {
-    onWriteFailed: (error) => {
-      storageFullRecovery.reportWriteFailed(error);
-    },
-    onWriteSucceeded: () => storageFullRecovery.reportWriteSucceeded(),
+  // `quota` refusal is seen. A failed save stays dirty in memory; the guard
+  // ends the episode only after a full repo flush succeeds, and a dispose while
+  // changes are unsaved keeps the repo open until they are saved. The episode
+  // is registered window-wide so the banner and the quit barrier outlive this
+  // runtime (see RepoStorageGuard, renderer-storage-episodes).
+  installRendererStorageQuitCheck();
+  const storageEpisode = rendererStorageEpisodes.register(() => repoStorageGuard.flushNow());
+  const repoStorageGuard = new RepoStorageGuard(repoStorage, {
+    onUnsavedChange: (since) => storageEpisode.report(since),
+    onClosed: () => storageEpisode.release(),
   });
   const repo = await LoroRepo.create({
-    storageAdapter: observedRepoStorage,
+    storageAdapter: repoStorageGuard.adapter,
     metaDebounceCommitMs: 0,
     resolveRoomTransports: (room) =>
       resolveRoomTransportsImpl?.(room) ?? { transportIds: ['cloud'] },
   });
-  flushRepoForStorageRecovery = () => repo.flush();
+  repoStorageGuard.attach(repo);
   // Liveness invariant: opening a workspace must never wait forever on rebuildable
   // local cache. Loro Streams cursors are checkpoints, not source-of-truth data, so
   // a broken IndexedDB cursor store must fail open and let Streams bootstrap/catch up.
@@ -4756,11 +4746,11 @@ export async function createWorkspaceRuntime(deps: RuntimeDeps): Promise<Workspa
         }
       }
 
-      // No recovery flush may run against a repo that is being destroyed.
-      storageFullRecovery.dispose();
+      // Destroys the repo, unless changes are still unsaved: then it stays open
+      // (still registered window-wide) until recovery saves and destroys it.
       let destroyError: unknown = null;
       try {
-        await repo.destroy();
+        await repoStorageGuard.close();
       } catch (error) {
         if (!isDestroyedError(error)) {
           destroyError = error;

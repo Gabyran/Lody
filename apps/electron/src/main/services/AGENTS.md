@@ -51,3 +51,7 @@ access without a new capability/security decision in the owning
   `installNavigationGuard` in `window.ts`: `will-navigate` does not fire for a
   server-side 3xx, so a public page redirecting to loopback would otherwise
   commit here and never reach Managed Preview.
+
+Quit asks before stopping when changes would be lost in the local agent OR in any
+window's own repo (`renderer-storage-state.ts`); each such window gets a final
+`storage.quitCheck` flush first. Spec: `specs/local-storage-health.md`.

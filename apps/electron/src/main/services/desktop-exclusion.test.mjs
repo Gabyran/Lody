@@ -5,6 +5,7 @@ import test from 'node:test'
 import { acquireDesktopLease } from './desktop-exclusion.ts'
 import { createDesktopLaunchBuffer } from './desktop-launch-buffer.ts'
 import { createDesktopQuitBarrier } from './desktop-shutdown.ts'
+import { RendererStorageState, resolveUnsavedBeforeQuit } from './renderer-storage-state.ts'
 
 const loopback = { host: '127.0.0.1', port: 0 }
 
@@ -112,6 +113,82 @@ void test('quit asks first and stays open when the user cancels', async () => {
   await handler({ preventDefault() {} })
   assert.equal(stopCalls, 1)
   assert.equal(quitCalls, 1)
+})
+
+void test('quit warns for a window whose storage refused changes, even with a healthy agent', async () => {
+  const renderer = new RendererStorageState()
+  renderer.report(7, 1_000)
+  let windowAnswer = 1_000
+  const asked = []
+  const quitCheck = {
+    timeoutMs: 3_000,
+    setTimer: () => null,
+    clearTimer: () => {},
+    send: (windowId, requestId) => {
+      asked.push(windowId)
+      // The window runs its final flush, then answers with what is still unsaved.
+      queueMicrotask(() => renderer.handleQuitCheckResult(windowId, requestId, windowAnswer))
+      return true
+    }
+  }
+  const warnings = []
+  let stopCalls = 0
+  const handler = createDesktopQuitBarrier({
+    confirmQuit: async () => {
+      const since = await resolveUnsavedBeforeQuit({ cliUnsavedSince: null, renderer, quitCheck })
+      if (since === null) return true
+      warnings.push(since)
+      return false // the user cancels to free space first
+    },
+    stop: async () => {
+      stopCalls++
+    },
+    quit: () => {},
+    reportFailure: () => {}
+  })
+  await handler({ preventDefault() {} })
+  assert.deepEqual(asked, [7])
+  assert.deepEqual(warnings, [1_000])
+  assert.equal(stopCalls, 0)
+
+  // Space was freed: the window's final flush saves everything, so quitting proceeds.
+  windowAnswer = null
+  await handler({ preventDefault() {} })
+  assert.deepEqual(warnings, [1_000])
+  assert.equal(stopCalls, 1)
+})
+
+void test('a window that does not answer keeps its last report; a destroyed one is forgotten', async () => {
+  const renderer = new RendererStorageState()
+  renderer.report(7, 1_000)
+  let fire
+  const silent = renderer.checkBeforeQuit({
+    timeoutMs: 3_000,
+    setTimer: (callback) => {
+      fire = callback
+      return 1
+    },
+    clearTimer: () => {},
+    send: () => true
+  })
+  fire()
+  assert.equal(await silent, 1_000)
+
+  const gone = await renderer.checkBeforeQuit({
+    timeoutMs: 3_000,
+    setTimer: () => null,
+    clearTimer: () => {},
+    send: () => false
+  })
+  assert.equal(gone, null)
+  assert.equal(
+    await resolveUnsavedBeforeQuit({
+      cliUnsavedSince: 2_000,
+      renderer,
+      quitCheck: { timeoutMs: 1, send: () => false }
+    }),
+    2_000
+  )
 })
 
 void test('quit waits for execution exit, retains ownership on failure, and allows retry', async () => {

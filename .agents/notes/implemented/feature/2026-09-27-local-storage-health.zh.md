@@ -88,9 +88,22 @@ manager 保持 repo 打开并保留注册；监视器的恢复流程先 flush �
 优先显示本机而不是同事的机器。这是 #417 危机模式中的"提示"部分。失效连接的断路器、阻塞式恢复
 弹窗以及只操作文件系统的"管理存储"面板仍属于 #417。
 
+**有未保存更改时，渲染端 repo 比它的 runtime 活得更久。** shared 的 `RepoStorageGuard` 负责
+渲染端 repo 的存储生命周期。销毁 workspace runtime（切换或离开 workspace）时先做一次最终
+flush，只有没有未保存更改时才销毁 repo；否则 repo 保持打开，恢复流程继续重试，保存后再销毁。
+一个窗口级的登记表（`renderer-storage-episodes`）保存所有这样的一轮，包括 runtime 已经不在的，
+所以 provider 卸载时横幅不再被清掉。第一版在销毁时清掉横幅，并连同未保存的更改一起销毁了
+repo；评审发现了这个问题。
+
 **退出时警告。** `LodyFleet.shutdown` 在每个 runtime 都尝试过最终 flush 之后记录
-`unsavedSince`。Electron 的退出屏障新增了可选的 `confirmQuit` 步骤，它从运行时状态读取
-`local_storage_unsaved` 并询问用户。询问失败按"是"处理，以免坏掉的对话框把用户困在应用里。
+`unsavedSince`。Electron 的退出屏障新增了可选的 `confirmQuit` 步骤。当本地 Agent 上报
+`local_storage_unsaved`，*或*任何窗口通过 `storage.rendererUnsaved` 上报了渲染端未保存的更改
+时，它都会询问。Agent 的磁盘和窗口的 IndexedDB 是不同的存储，Agent 健康不能说明窗口的情况。
+
+询问之前，主进程向每个这样的窗口推送 `storage.quitCheck`。窗口 flush 所有被保留的 repo，并回复
+仍未保存的部分。3 秒内没有回复的窗口保留上一次的上报；已销毁的窗口会被忘记，因为它的内存已经
+随之消失。询问失败按"是"处理，以免坏掉的对话框把用户困在应用里。第一版只检查 Agent，评审也
+发现了这一点。
 
 **合并 flush 的失败**现在以警告记录，并写明这一连串失败从何时开始，至多每 5 分钟一次；
 flush 再次成功时记录一条 info。
@@ -142,7 +155,15 @@ flush 再次成功时记录一条 info。
 - `packages/components/tests/local-storage-banner.test.tsx`：横幅状态、在 presence 刷新时保持
   值的同一性，以及用 daemon 实际发布的负载分别以中英文渲染真实的容器组件。
 - `apps/electron/src/main/services/desktop-exclusion.test.mjs`：取消的退出保持应用打开，下一次
-  退出则正常停止。
+  退出则正常停止。Agent 健康时，存储拒绝过写入的窗口会被要求 flush：它仍回复未保存，于是用户
+  收到警告并取消；释放空间后它回复已保存，退出继续。沉默的窗口保留上一次的上报，已销毁的窗口
+  会被忘记。忽略渲染端状态会让第一个用例失败。
+- `packages/shared/tests/storage-health.test.ts`（`RepoStorageGuard`）：在真实 `LoroRepo` 上，
+  doc 被 `QuotaExceededError` 拒绝后 `close()` 会保留 repo。写满时退出前的 flush 仍报告未保存；
+  存储重新接受写入后，它保存 doc 和 meta，然后才销毁 repo。
+- `packages/components/tests/renderer-storage-episodes.test.ts`：写满时切换 workspace，旧
+  runtime 的这一轮仍与新 runtime 一起登记；`flushForQuit` 在空间恢复前保持未保存，之后保存并
+  释放它。让 `close()` 总是销毁会让这两个用例都失败。
 
 真实运行：在 256 MiB RAM 盘上，以干净环境和 `LODY_DATA_DIR=/Volumes/lodysh/lody` 运行一次性的
 `lody start`。运行的是本分支在本地合并 PR #1056 后的版本，因为没有 #1056 时 daemon 会在第一次
@@ -172,6 +193,8 @@ flush 再次成功时记录一条 info。
   （loro-dev/loro-repo#139）。
 - 若被清理的 repo 仍在等待空间时同一 workspace 又被启动，会在同一个 SQLite 文件上打开第二个
   repo；两者都追加 CRDT 更新，加载时合并。
+- 单独关闭一个窗口（而不是退出应用）时，即使它自己的 repo 持有未保存更改也不会被拦截；窗口的
+  内存随之消失，主进程也会忘记它的上报。重新加载窗口同理。
 - `unsavedSince` 只覆盖 repo 写入。其他存储（schedules、operation store、diff store）各自失败，
   未被跟踪。
 - 退出对话框读取 Electron 最近一次轮询到的运行时状态，最后几秒内发生的失败可能不会显示。

@@ -1,3 +1,5 @@
+import type { StorageAdapter } from 'loro-repo';
+import { observeStorageAdapterWrites } from './observed-storage-adapter';
 import { isStorageFullError } from './storage-health';
 
 export type StorageFullRecoveryOptions = {
@@ -91,6 +93,18 @@ export class StorageFullRecovery {
     if (this.timer === null) this.arm(wait);
   }
 
+  /**
+   * Flushes now, ignoring the rate limit (the app is about to quit and asks
+   * for a final answer). Resolves once that attempt settled.
+   */
+  async flushNow(): Promise<void> {
+    if (this.disposed || this.sinceMs === null) return;
+    await this.settled();
+    if (this.sinceMs === null) return;
+    this.cancelTimer();
+    await this.recover();
+  }
+
   /** Resolves once no recovery flush started by this object is running. */
   async settled(): Promise<void> {
     while (this.flushing) {
@@ -147,5 +161,96 @@ export class StorageFullRecovery {
     if (this.timer === null) return;
     this.clearTimer(this.timer);
     this.timer = null;
+  }
+}
+
+type GuardedRepo = { flush(): Promise<void>; destroy(): Promise<void> };
+
+export type RepoStorageGuardOptions = Omit<StorageFullRecoveryOptions, 'flush' | 'onChange'> & {
+  /** The episode's first unsaved failure, or null once everything was saved. */
+  onUnsavedChange: (since: number | null) => void;
+  /** The repo was destroyed; after a retained close, only once its changes were saved. */
+  onClosed?: () => void;
+};
+
+/**
+ * Owns one repo's storage lifecycle for a writer without a process-wide
+ * monitor (the renderer): it observes the adapter, runs {@link StorageFullRecovery},
+ * and closes the repo without dropping changes that did not reach storage.
+ */
+export class RepoStorageGuard {
+  readonly adapter: StorageAdapter;
+  private readonly recovery: StorageFullRecovery;
+  private repo: GuardedRepo | null = null;
+  private closing = false;
+  private closed = false;
+
+  constructor(
+    inner: StorageAdapter,
+    private readonly options: RepoStorageGuardOptions
+  ) {
+    const { onUnsavedChange: _onUnsavedChange, onClosed: _onClosed, ...timing } = options;
+    this.recovery = new StorageFullRecovery({
+      ...timing,
+      flush: async () => {
+        if (!this.repo) throw new Error('repo not ready');
+        await this.repo.flush();
+      },
+      onChange: (state) => {
+        options.onUnsavedChange(state?.since ?? null);
+        // A close that had to wait for space finishes as soon as recovery saved everything.
+        if (state === null && this.closing) void this.finishClose();
+      },
+    });
+    this.adapter = observeStorageAdapterWrites(inner, {
+      onWriteFailed: (error) => {
+        this.recovery.reportWriteFailed(error);
+      },
+      onWriteSucceeded: () => this.recovery.reportWriteSucceeded(),
+    });
+  }
+
+  attach(repo: GuardedRepo): void {
+    this.repo = repo;
+  }
+
+  get unsavedSince(): number | null {
+    return this.recovery.since;
+  }
+
+  /** Flushes now; resolves to the episode still open, or null once everything is saved. */
+  async flushNow(): Promise<number | null> {
+    await this.recovery.flushNow();
+    return this.recovery.since;
+  }
+
+  /**
+   * Final flush, then destroy. When changes are still unsaved (the flush was
+   * refused for lack of space, or an earlier episode never ended), the repo
+   * stays open and recovery keeps retrying; it is destroyed once saved.
+   */
+  async close(): Promise<'closed' | 'retained'> {
+    if (this.closing) return this.closed ? 'closed' : 'retained';
+    this.closing = true;
+    try {
+      await this.repo?.flush();
+    } catch (error) {
+      // A non-storage failure is not this guard's to hold on to; destroy reports it.
+      this.recovery.reportWriteFailed(error);
+    }
+    if (this.recovery.since !== null) return 'retained';
+    await this.finishClose();
+    return 'closed';
+  }
+
+  private async finishClose(): Promise<void> {
+    if (this.closed) return;
+    this.closed = true;
+    this.recovery.dispose();
+    try {
+      await this.repo?.destroy();
+    } finally {
+      this.options.onClosed?.();
+    }
   }
 }

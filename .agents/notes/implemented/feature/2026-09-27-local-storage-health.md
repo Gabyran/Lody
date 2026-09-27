@@ -115,10 +115,28 @@ write over low space, and the desktop's own machine over colleagues' machines. T
 crisis mode. The breaker for a dead connection, the blocking recovery modal and the
 filesystem-only "Manage storage" panel remain #417's.
 
+**The renderer's repo outlives its runtime while unsaved.** `RepoStorageGuard`
+(shared) owns the renderer repo's storage lifecycle. Disposing a workspace runtime
+(switching or leaving a workspace) runs a final flush and destroys the repo only if
+nothing is unsaved. Otherwise the repo stays open, recovery keeps retrying, and the
+repo is destroyed once saved. A window-wide registry (`renderer-storage-episodes`)
+keeps every such episode, including those of runtimes already gone, so the banner
+no longer clears when the provider unmounts. The first revision cleared the banner
+on dispose and destroyed the repo with its unsaved changes; review caught it.
+
 **Warn at exit.** `LodyFleet.shutdown` logs `unsavedSince` after every runtime's final
-flush was attempted. Electron's quit barrier gained an optional `confirmQuit` step
-that reads `local_storage_unsaved` from the runtime state and asks. If asking fails,
-the answer counts as yes, so a broken dialog never traps the user.
+flush was attempted. Electron's quit barrier gained an optional `confirmQuit` step.
+It asks when the local agent reports `local_storage_unsaved` *or* any window
+reported unsaved renderer changes over `storage.rendererUnsaved`. The agent's disk
+and a window's IndexedDB are different stores, and a healthy agent proves nothing
+about the window.
+
+Before asking, main pushes `storage.quitCheck` to each such window. The window
+flushes every retained repo and answers with what is still unsaved. A window that
+does not answer within 3 s keeps its last report, and a destroyed window is
+forgotten, since its memory went with it. If asking fails, the answer counts as
+yes, so a broken dialog never traps the user. The first revision checked only the
+agent; review caught that too.
 
 **Coalesced flush failures** now log a warning naming when the run of failures began,
 at most every 5 minutes, and an info line when a flush succeeds again.
@@ -179,7 +197,19 @@ Automated, with injected clocks, manual timers and fault injection, no real slee
   stability across presence ticks, and the real container rendered in English and
   Chinese from the exact payloads the daemon published.
 - `apps/electron/src/main/services/desktop-exclusion.test.mjs`: a cancelled quit
-  stays open and the next quit stops.
+  stays open and the next quit stops. With a healthy agent, a window whose storage
+  refused changes is asked to flush: it still answers unsaved, so the user is warned
+  and cancels. After space is freed, its answer is saved and the quit proceeds. A
+  silent window keeps its last report; a destroyed window is forgotten. Ignoring
+  renderer state fails the first case.
+- `packages/shared/tests/storage-health.test.ts` (`RepoStorageGuard`): on a real
+  `LoroRepo`, a doc refused with `QuotaExceededError` makes `close()` retain the
+  repo. The quit-time flush still reports unsaved while full; once storage accepts
+  writes, it saves the doc and meta and only then destroys the repo.
+- `packages/components/tests/renderer-storage-episodes.test.ts`: switching
+  workspaces while full keeps the old runtime's episode registered next to the new
+  runtime. `flushForQuit` stays unsaved until space returns, then saves and releases
+  it. Making `close()` always destroy fails both of these.
 
 Real run: a throwaway `lody start` with a clean environment and
 `LODY_DATA_DIR=/Volumes/lodysh/lody` on a 256 MiB RAM disk. It ran this branch merged
@@ -213,6 +243,9 @@ eye. They exposed a stray space between Chinese sentences, now a localized join 
   a schema upgrade still needs to write (loro-dev/loro-repo#139).
 - A workspace restarted while its torn-down repo is still waiting for space opens a
   second repo on the same SQLite file; both append CRDT updates and merge on load.
+- Closing one window (not quitting) while its own repo holds unsaved changes is not
+  intercepted; the window's memory goes with it and main forgets its report. A
+  reload has the same effect.
 - `unsavedSince` covers repo writes only. Other stores (schedules, operation stores,
   the diff store) fail independently and are not tracked.
 - The quit dialog reads the runtime state Electron last polled, so a failure in the

@@ -1,6 +1,11 @@
 import { LoroRepo, type StorageAdapter } from 'loro-repo';
 import { describe, expect, it } from 'vitest';
-import { StorageFullRecovery, classifyStorageFullError, observeStorageAdapterWrites } from '../src';
+import {
+  RepoStorageGuard,
+  StorageFullRecovery,
+  classifyStorageFullError,
+  observeStorageAdapterWrites,
+} from '../src';
 
 const withCode = (code: string) => Object.assign(new Error(code), { code });
 
@@ -215,5 +220,81 @@ describe('StorageFullRecovery over a real LoroRepo', () => {
     expect(recovery.since).toBe(1_000);
     expect(transitions).toEqual([1_000]);
     recovery.dispose();
+  });
+});
+
+describe('RepoStorageGuard over a real LoroRepo', () => {
+  /** Refuses every write while `full`, like an IndexedDB origin out of quota. */
+  const createQuotaStore = () => {
+    const state = { full: false, saved: [] as string[] };
+    const adapter: StorageAdapter = {
+      save: async (payload) => {
+        if (state.full) throw new DOMException('quota', 'QuotaExceededError');
+        state.saved.push('docId' in payload ? `${payload.type}:${payload.docId}` : payload.type);
+      },
+      loadDoc: async () => undefined,
+      loadMeta: async () => undefined,
+    };
+    return { state, adapter };
+  };
+
+  it('keeps a repo closed while full open, and destroys it only once recovery saved it', async () => {
+    const scheduler = createManualScheduler();
+    const store = createQuotaStore();
+    const unsaved: Array<number | null> = [];
+    let closed = 0;
+    const { promise: closedSignal, resolve: signalClosed } = Promise.withResolvers<void>();
+    const guard = new RepoStorageGuard(store.adapter, {
+      onUnsavedChange: (since) => unsaved.push(since),
+      onClosed: () => {
+        closed += 1;
+        signalClosed();
+      },
+      now: scheduler.now,
+      setTimer: scheduler.setTimer,
+      clearTimer: scheduler.clearTimer,
+    });
+    const repo = await LoroRepo.create({ storageAdapter: guard.adapter, metaDebounceCommitMs: 0 });
+    guard.attach(repo);
+
+    store.state.full = true;
+    const handle = await repo.openPersistedDoc('doc-a');
+    handle.doc.getText('body').insert(0, 'only in memory');
+    handle.doc.commit();
+    await expect(repo.persistDocNow('doc-a', handle.doc)).rejects.toThrow();
+    await repo.upsertDocMeta('doc-a', { title: 'only in memory' });
+    expect(unsaved).toEqual([1_000]);
+
+    // The workspace is switched away (runtime disposed) while storage is still full.
+    await expect(guard.close()).resolves.toBe('retained');
+    expect(closed).toBe(0);
+    // The quit-time flush still cannot save it.
+    await expect(guard.flushNow()).resolves.toBe(1_000);
+
+    store.state.full = false;
+    await expect(guard.flushNow()).resolves.toBeNull();
+    await closedSignal;
+    expect(closed).toBe(1);
+    expect(unsaved).toEqual([1_000, null]);
+    expect(store.state.saved).toEqual(
+      expect.arrayContaining(['doc-update:doc-a', expect.stringMatching(/^meta-/)])
+    );
+  });
+
+  it('closes at once when nothing is unsaved', async () => {
+    const store = createQuotaStore();
+    let closed = 0;
+    const guard = new RepoStorageGuard(store.adapter, {
+      onUnsavedChange: () => {},
+      onClosed: () => {
+        closed += 1;
+      },
+    });
+    const repo = await LoroRepo.create({ storageAdapter: guard.adapter, metaDebounceCommitMs: 0 });
+    guard.attach(repo);
+    await repo.upsertDocMeta('doc-a', { title: 'saved' });
+    await expect(guard.close()).resolves.toBe('closed');
+    expect(closed).toBe(1);
+    expect(store.state.saved.some((target) => target.startsWith('meta-'))).toBe(true);
   });
 });

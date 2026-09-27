@@ -4420,7 +4420,7 @@
   "archive.leave": "Leave Archive",
   "common.copyTable": "Copy table",
   "desktop.quitUnsaved.cancel": "Cancel",
-  "desktop.quitUnsaved.detail": "The disk holding Lody data is full, so changes since {{time}} exist only in memory. Quitting now loses them. Free some disk space and wait for the warning to clear before quitting.",
+  "desktop.quitUnsaved.detail": "Storage is full, so changes since {{time}} exist only in memory. Quitting now loses them. Free some disk space and wait for the warning to clear before quitting.",
   "desktop.quitUnsaved.quit": "Quit Anyway",
   "desktop.quitUnsaved.title": "Some changes are not saved",
   "sidebar.thisDevice": "This device",

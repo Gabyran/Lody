@@ -94,15 +94,22 @@ The renderer's own IndexedDB repo shows the same banner when a write fails with
 `quota`. A later successful write of some other resource does not clear it: it only
 triggers a full repo flush, at most every 5 seconds, and failed flushes retry on a
 bounded backoff. The banner clears once such a flush succeeds with no newer
-refusal in between. The renderer's crisis handling
+refusal in between. Leaving a workspace does not end this: a runtime disposed with
+unsaved changes keeps its repo open and still counts toward the banner, until
+recovery saves the repo and closes it. The renderer's crisis handling
 for a connection that stops working (`unavailable`) is tracked separately in
 issue #417.
 
 ## Exit
 
 Stopping the daemon while changes are unsaved logs a warning naming `unsavedSince`.
-The desktop asks before quitting in that state: quitting then loses changes not yet
-synced elsewhere.
+
+The desktop asks before quitting whenever changes would be lost: the local agent's,
+or any window's own repo. Each window reports its earliest unsaved change to the
+main process. On quit, every window holding unsaved changes is asked to flush once
+more and answer. A window that does not answer within 3 seconds keeps its last
+report; silence is not proof that it saved. The question names the earliest unsaved
+change. Quitting then loses changes not yet synced elsewhere.
 
 ## Open questions
 

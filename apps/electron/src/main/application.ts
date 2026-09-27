@@ -1,6 +1,6 @@
 import { handleWindowContentReady } from './window-target'
 import { installLocalFileResourceProtocol } from './services/local-file-resource-protocol'
-import { app, BrowserWindow, dialog, ipcMain, safeStorage } from 'electron'
+import { app, BrowserWindow, dialog, ipcMain, safeStorage, webContents } from 'electron'
 import { electronApp, optimizer } from '@electron-toolkit/utils'
 import dns from 'node:dns'
 import { writeHeapSnapshot } from 'node:v8'
@@ -27,6 +27,7 @@ import {
 import { CliService } from './services/cli-service'
 import type { DesktopExecutionHost } from './services/desktop-execution-host'
 import { createDesktopQuitBarrier } from './services/desktop-shutdown'
+import { RendererStorageState, resolveUnsavedBeforeQuit } from './services/renderer-storage-state'
 import { applyPendingDesktopLocalReset } from './services/local-reset-service'
 import { TerminalRelay } from './services/terminal-relay'
 import { LoroDataPlaneRelay } from './services/loro-data-plane-relay'
@@ -72,6 +73,8 @@ const PRODUCT_NAME = desktopInstallationProfile.desktopProductName
 const DESKTOP_FILE_NAME = `${desktopInstallationProfile.desktopAppId}.desktop`
 const DEEP_LINK_DEBUG_PREFIX = '[electron-auth-debug]'
 const IS_E2E = !app.isPackaged && process.env.LODY_E2E === '1'
+/** How long quit waits for a window to answer its final storage flush. */
+const RENDERER_STORAGE_QUIT_CHECK_TIMEOUT_MS = 3_000
 declare const __LODY_DESKTOP_BUILD_JSON__: string | null
 
 type E2EBootDiagnostic = { stage: string; error?: string }
@@ -218,6 +221,7 @@ export function startApplication(executionHost?: DesktopExecutionHost): void {
       })
     }
     const terminalRelay = new TerminalRelay(getLocalTerminalSocketPath(mainPlatformKind))
+    const rendererStorageState = new RendererStorageState()
     const loroDataPlaneRelay = new LoroDataPlaneRelay(
       getLocalLoroDataPlaneSocketPath(mainPlatformKind)
     )
@@ -283,6 +287,7 @@ export function startApplication(executionHost?: DesktopExecutionHost): void {
       terminalRelay,
       publicBrowserService,
       loroDataPlaneRelay,
+      rendererStorageState,
       windowBadgeService,
       globalShortcutsService,
       getMainWindow,
@@ -338,12 +343,26 @@ export function startApplication(executionHost?: DesktopExecutionHost): void {
     const quitBarrier = createDesktopQuitBarrier({
       // The local agent keeps changes in memory while its disk is full; stopping
       // it now drops whatever has not reached disk or the cloud.
+      // Windows whose own IndexedDB repo refused writes are asked to flush first.
       confirmQuit: async () => {
-        const unsaved = cliService
+        const cliIssue = cliService
           .getCliState()
           .runtime?.issues.find((issue) => issue.code === LOCAL_STORAGE_UNSAVED_ISSUE_CODE)
-        if (!unsaved) return true
-        const since = new Date(unsaved.firstSeenAtMs).toLocaleString()
+        const unsavedSince = await resolveUnsavedBeforeQuit({
+          cliUnsavedSince: cliIssue?.firstSeenAtMs ?? null,
+          renderer: rendererStorageState,
+          quitCheck: {
+            timeoutMs: RENDERER_STORAGE_QUIT_CHECK_TIMEOUT_MS,
+            send: (windowId, requestId) => {
+              const target = webContents.fromId(windowId)
+              if (!target || target.isDestroyed()) return false
+              target.send(IPC_PUSH_CHANNELS.storageQuitCheck, { requestId })
+              return true
+            }
+          }
+        })
+        if (unsavedSince === null) return true
+        const since = new Date(unsavedSince).toLocaleString()
         const { response } = await dialog.showMessageBox({
           type: 'warning',
           buttons: [
@@ -355,7 +374,7 @@ export function startApplication(executionHost?: DesktopExecutionHost): void {
           message: translateMenu('desktop.quitUnsaved.title', 'Some changes are not saved'),
           detail: translateMenu(
             'desktop.quitUnsaved.detail',
-            'The disk holding Lody data is full, so changes since {{time}} exist only in memory. Quitting now loses them. Free some disk space and wait for the warning to clear before quitting.'
+            'Storage is full, so changes since {{time}} exist only in memory. Quitting now loses them. Free some disk space and wait for the warning to clear before quitting.'
           ).replace('{{time}}', since)
         })
         return response === 0
