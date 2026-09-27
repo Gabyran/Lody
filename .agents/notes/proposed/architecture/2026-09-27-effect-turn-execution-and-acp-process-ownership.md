@@ -16,9 +16,11 @@ flags, a dozen per-session registries, and five different kill implementations. 
 moves ownership into three Effect scopes (daemon → session resource → turn): the session
 resource scope acquires and releases the process and ACP connection; the turn scope owns raw
 ACP requests, steers, configuration calls and finalization; stop reasons reach finalizers as
-typed values; and every wait is bounded with explicit escalation. Delivery is six
-independently revertible phases that change neither Stop/steer semantics, history format, nor
-dispatch pointer rules. None of the expected benefits is measured yet, and two decisions —
+typed values; and every wait is bounded with explicit escalation. Delivery follows the bottom-up layering
+rule of the [migration roadmap](2026-09-27-effect-lifecycle-migration-roadmap.md): platform and
+process leaf first, then the ACP connection and the session resource. The turn layer finishes
+last, after the state layer it depends on. Stop/steer semantics, history format and dispatch
+pointer rules do not change. None of the expected benefits is measured yet, and two decisions —
 Windows process trees and whether to quarantine a session after failed termination — need
 human input.
 
@@ -318,7 +320,7 @@ inference in `awaitTurnFiber`:
   `successorReady` as a `Deferred`.
 - The rule that a steer wait does not end while a handoff verdict is outstanding is preserved
   unchanged (#817).
-- `steerMutationQueue` and `steerStatusQueue` stay on `ConcurrentQueue` for now. Phase 4 turns
+- `steerMutationQueue` and `steerStatusQueue` stay on `ConcurrentQueue` for now. L5 turns
   them into one `Semaphore(1)` per session inside the TurnSupervisor.
 
 **Other turn work:**
@@ -328,125 +330,150 @@ inference in `awaitTurnFiber`:
 - The watchdog calls `stop(InitStalled)` directly, which removes `raceFirst` and the
   `initializationStalled` flag.
 
-## Phased delivery
+## Layered delivery
 
-- **One PR per phase.** Each can be reverted on its own and changes no persisted format.
-- **The existing suite is the behavioural contract.** Every phase must pass
+- **Strictly bottom-up.** Each layer ships in one or two PRs. Each PR can be reverted alone and
+  changes no persisted format.
+- **Shared rules.** Layer definitions, the definition of done, and the temporary-facade rule
+  live in the [migration roadmap](2026-09-27-effect-lifecycle-migration-roadmap.md#layering-principle).
+- **The existing suite is the behavioural contract.** Every PR must pass
   `tests/session-execution-service.test.ts` (9322 lines) without changing its assertions. The
   only permitted change is replacing timer scaffolding with TestClock.
 
-### Phase 0: foundations (no behaviour change)
+### PR1: L0 platform + L1 ProcessService (directly targets #429)
 
-- Add `DaemonRuntime` and a test-runtime helper. `runVisibleSessionTurn` switches to
-  `runtime.runFork(program, { scope })`.
-- Fix the known misuses:
-  - `void runPromise(Fiber.interrupt)` becomes an interrupt fiber owned by the turn scope. The
-    RPC still returns immediately, and release is observed through `waitForTurnRelease`.
-  - `awaitTurnFiber` keeps the original error via `Cause.squash`.
-  - `Effect.promise(dispatchOptions.onTurnClaimed!)` becomes `tryPromise`.
-- The CLI `AGENTS.md` references `context/cli-effect-ts.md`, which is missing from the OSS
-  repository. Restore it as `.agents/docs/cli-effect-ts.md` with the boundary rules from
-  "Effect behaviour verified" above, and repair the link.
-- Decide whether to add `@effect/vitest` 0.26.x, which is compatible with effect 3.18 and
-  vitest 3.2.
+- **L0:**
+  - `DaemonRuntime`: a `ManagedRuntime` + root scope, disposed during shutdown.
+  - An Effect Logger bridged to the existing Logger, so the ~95 Logger test doubles are
+    untouched.
+  - A TestClock-based test-runtime helper.
+  - Restore `.agents/docs/cli-effect-ts.md` and repair the broken link in the CLI `AGENTS.md`.
+- **L1: `ProcessService`**, offering:
+  - `spawn(spec): Effect<ProcessHandle, SpawnFailed, Scope>`, whose release is
+    `terminateTree`;
+  - `exec`;
+  - `awaitExit`.
 
-Exit criteria: the full CLI suite passes, and `runtime.dispose()` at shutdown waits for every
-turn fiber.
+  Each platform strategy is its own Layer:
+  - **POSIX process group:** release **always** signals the group, even when the root already
+    exited, and treats ESRCH as exited.
+  - **Windows:** check the exit code of `taskkill /T` under a deadline, then fall back to `/F`.
+  - **Linux cgroup:** escalate to `cgroup.kill` after the grace period.
 
-### Phase 1: process-tree primitive (directly targets #429)
-
-- Add a process-tree module, initially under `apps/cli/src/lib/process/`, providing
-  `spawnScoped`, `terminateTree` and `awaitExit`. Its rules:
+  Rules for every strategy:
   - read both `exitCode` and `signalCode`;
-  - on POSIX, release **always** signals the process group, even when the root already exited,
-    and treats ESRCH as exited;
-  - send SIGKILL after the grace period; bound every wait and clear its timer when the wait
-    ends;
-  - on Windows, check the exit code of `taskkill /T` under a deadline, fall back to `/F`, and
-    return a typed failure if that also fails;
-  - on the Linux cgroup graceful path, escalate to `cgroup.kill` after the grace period;
-  - return termination failure as a typed error for the caller to decide on, never swallowed
-    at the bottom layer.
-- Replace these kill implementations:
-  - `Session.killAndWait`;
-  - `terminateChildProcess` in `acp-runner.ts`;
-  - the sandbox kill implementations;
-  - the `acp-authentication.ts` status-probe kill.
+  - bound every wait, and release its timer when the wait ends;
+  - return termination failure as a typed `TerminationFailed`, never swallowed at the bottom.
+- **Consumers migrated:**
+  - `Session`'s ACP agent process, replacing `killAndWait` and the sandbox kill paths;
+  - `acp-runner.ts` auxiliary ACP processes: capability probe, title generation, protocol auth;
+  - the `acp-authentication.ts` status probe.
 
-  `cli-supervisor`'s implementation migrates separately under the roadmap.
-- Make `Session.terminate` memoized and emit `terminated` exactly once with the correct
-  payload. A sandbox termination failure no longer reports success.
+  `Session.terminate` becomes memoized. `terminated` fires exactly once, carrying the agent's
+  exit information, and a sandbox termination failure no longer reports success.
+- **Not yet migrated:** `Session` itself stays a Promise class. It calls ProcessService through a
+  temporary `runtime.runPromise` facade, which L4 deletes.
+- **Tests:**
+  - Fake processes + TestClock cover the grace period, escalation, timeouts, `signalCode` exits,
+    and a root that exits before surviving group descendants.
+  - An injected platform and a fake `taskkill` cover the Windows branch.
+  - A real-process POSIX test has the child write its grandchild's PID to stdout as an explicit
+    readiness signal, then asserts the grandchild is gone after close. No sleeps.
+- **Exit criteria:** the full CLI suite passes, and `runtime.dispose()` at shutdown waits for
+  every turn fiber.
 
-Tests:
-- Fake processes plus TestClock cover the grace period, escalation, timeouts, `signalCode`
-  exits, and a root that exits before its surviving group descendants.
-- An injected platform and a fake `taskkill` cover the Windows branch.
-- A real-process test on POSIX has the child write its grandchild's PID to stdout as an
-  explicit readiness signal, then asserts the grandchild is gone after close. No sleeps.
+### PR2: the remaining L1 spawn callers
 
-### Phase 2: session resource scope and the agent-exit signal
+These move onto the same ProcessService:
+- git, including the diff and branch sync used by finalization;
+- the worktree setup runner, fixing a timeout that sends SIGTERM only to the shell and leaks its
+  descendants;
+- ACP terminals;
+- login-shell environment probing;
+- MCP, preview, and the rest.
 
-- `Session` holds a `CloseableScope`. The start gate, process and connection are acquired
-  inside it, and a new fiber watches `exited`.
-- `SessionManager` subscribes per instance. Creation becomes an interruptible fiber, and the
-  reaper and 300-second sentinel are removed.
-- MessageHandler's `terminated`/`exit`/`error` handlers finalize only when **no** turn owns
-  the session; when a turn owns it, that turn handles the exit as `AgentExited`. This step
-  changes MessageHandler and the execution service together.
-- Verify first:
-  - how the current SDK rejects prompts and extension requests after
-    `connection.close(error)`;
+After this, L1 meets the roadmap's definition of done.
+
+### L2: state and cloud (owned by the roadmap)
+
+The design of SessionDocuments, SessionHistory, SessionPresence and CloudPort, and the
+loro-repo/streams-crdt decision, are in the
+[roadmap](2026-09-27-effect-lifecycle-migration-roadmap.md#l2-and-the-loro-sync-stack). The
+turn layer depends on them. This proposal's L5 therefore starts only after L2 is done, at least
+in its version on the temporary `LoroRepo` Layer.
+
+### L3: AcpConnection
+
+- **Split `AgentClient`** into a protocol connection and domain operations.
+- **AcpConnection:**
+  - A connection-level `FiberSet` holds every raw request: prompt, steer extension request, and
+    `set_config_option`.
+  - Each request is wrapped in `Effect.uninterruptible`. Only an ACP response or a connection
+    close can end it.
+  - It exposes `awaitIdle` and `isIdle`.
+  - A `closed: Deferred` and a notification `Stream` replace callbacks.
+  - The SDK is the only third-party boundary wrapped in this layer.
+- **Delete** the promise bookkeeping in `pendingPrompts`, `pendingPromptCompletion` and
+  `steerApplicationWaiters`. Steer verdicts become `Deferred<SteerOutcome>`, with the three-state
+  semantics unchanged.
+- **Verify first:**
+  - how the current SDK rejects prompts and extension requests after `connection.close(error)`;
   - what happens when an adapter grandchild holds stdout.
 
-Tests:
-- The agent exits mid-prompt, during a steer wait, and during initialization.
-- A late exit from an old instance does not affect its replacement, reusing the
-  bounded-initialization case with real `Session`s in production order.
-- The process is released after a create is abandoned.
+### L4: AgentSession and AgentSessionPool
 
-### Phase 3: turn scope and TurnSupervisor (core)
+- **`AgentSession` is a scope.** It acquires, in order:
+  - the start-gate permit: `Semaphore(2)`, keeping `LODY_MAX_CONCURRENT_ACP_SESSION_STARTS`;
+  - the ProcessService process;
+  - the AcpConnection;
+  - ACP terminals;
+  - the sandbox.
+
+  An `exited` watcher fiber closes the connection explicitly and notifies the owning turn with
+  `AgentExited`.
+- **`AgentSessionPool`** replaces `SessionManager`'s `sessions`, `pendingSessionCreates` and
+  `pendingTerminationPromises`.
+  - It is a per-sessionId `RcMap`, or a `FiberMap` with explicit interrupt-and-await, because
+    `FiberMap` replacement does not await the old fiber.
+  - Creation is interruptible. Abandoning a create interrupts it, and the scope releases any
+    process already acquired. This removes the reaper and the 300-second sentinel.
+  - Lifecycle events are subscribed per instance and never deleted by id.
+- **Dependencies:** managed runtime download and ACP login, and worktrees/file locks, must
+  first be finished per the roadmap.
+- **Cleanup:** delete the facade PR1 left on `Session`.
+
+### L5: turn scope and TurnSupervisor (core)
 
 - Introduce `TurnHandle`, `TurnStopReason` and `TurnPhase`, and delete the flags and promise
   chains listed above.
-- `AgentClient` switches to a connection-level `FiberSet` plus `awaitIdle`. The drain moves
-  into release and escalates as described above.
-- Each `finalizeTurn` stage becomes an Effect step, using `tryPromise` with the signal.
-- Initialization stall, agent exit and daemon shutdown all go through `stop(reason)`.
-- Wrap in `Effect.uninterruptible` any CRDT write sequence that must complete as a unit, for
-  example:
-  - the cancellation mark before the terminal assistant entry;
-  - the tombstone and clearing steer state.
+- **Drain moves into the turn scope's release:**
+  - run `AcpConnection.awaitIdle` with a five-second bound, placing the bound on the waiter;
+  - on overrun, close the AgentSession with `DrainTimeout`, then wait once more, with a bound;
+  - a termination failure enters an observable `release-blocked` state.
+- **Finalization stages:** each `finalizeTurn` stage becomes an Effect step over L1 Git and L2
+  SessionHistory. Write sequences that must be atomic go through
+  `SessionHistory.commit(batch)`.
+- **One stop path:** initialization stall, agent exit and daemon shutdown all go through
+  `stop(reason)`. Presence is held by a `SessionPresence.hold` lease.
+- **Registry and cancelSession:**
+  - Merge `currentTurnBySession`, `turnRuntimeBySession`, `canceledTurnBySession`,
+    `turnReleaseWaiters` and `initializationStallWaiters` into `TurnRegistry`.
+  - `cancelSession` becomes: subagent-control branch → registry lookup →
+    `handle.stop(UserStop{...})`. An explicit orphan-turn repair path is kept.
+  - The steer queues become one `Semaphore(1)` per session.
+- **Tests:**
+  - the existing suite;
+  - a phase × reason matrix: Stop in `preparing`, `prompting` and `finalizing`; a steer already
+    submitted; a lagging handoff verdict; a drain timeout with successful or failed termination;
+    agent exit;
+  - ablation for each new mechanism.
 
-Tests:
-- The existing suite.
-- A new phase × reason matrix:
-  - Stop in `preparing`, `prompting` and `finalizing`;
-  - a steer already submitted;
-  - a lagging handoff verdict;
-  - a drain timeout with successful or failed termination;
-  - agent exit.
-- Ablation for each new mechanism: removing it must fail at least one test.
+### In parallel: extract machine-level ACP operations
 
-### Phase 4: single ownership registry and a simpler cancelSession
-
-- Merge these registries into one `TurnRegistry`: `currentTurnBySession`,
-  `turnRuntimeBySession`, `canceledTurnBySession`, `turnReleaseWaiters` and
-  `initializationStallWaiters`. `waitForTurnRelease` becomes `Deferred.await(released)`.
-- `cancelSession` becomes three steps:
-  1. take the subagent-control branch;
-  2. look up `TurnRegistry`;
-  3. call `handle.stop(UserStop{...})`.
-
-  The stale-unfinished-turn repair for the no-runtime case stays, as an explicit orphan-repair
-  path.
-- The steer queues become one `Semaphore(1)` per session.
-
-### Phase 5: extract machine-level ACP operations
-
-- Move authentication, capability refresh and binary install (execution service around
-  :5897-6850) into their own service.
+- Authentication, capability refresh and binary install (execution service around
+  :5897-6850) move into their own service.
 - In-flight Maps become `RcMap`/`Deferred`.
-- This work is not coupled to turns, so it can run in parallel with phases 3/4 or later.
+- It depends on L1 and L3, and is not coupled to turns.
 
 ## Invariants to preserve
 
@@ -489,14 +516,18 @@ Before implementation, map each of these to a test. No phase may change them:
 - **Adapter differences.** Handoff (built-in Claude), same-turn steer (Codex) and synthetic
   compaction tool calls can only be fully verified against real adapters. Deterministic tests
   prove only the execution service's side of the ordering.
-- **Changing the two largest files together.** Phase 2 edits MessageHandler (9762 lines) and
-  the execution service at once, which is expensive to review. Splitting the work into phases
-  keeps each PR's size in check.
-- **Test-double fan-out.** Interface changes ripple into about 95 Logger doubles. Phase 0's
-  runtime injection must avoid adding new required dependencies.
+- **Changing the two largest files together.** L4 edits MessageHandler (9762 lines) and the
+  execution service at once, which is expensive to review. Layered PRs keep each PR's size in
+  check.
+- **Lingering temporary facades.** Bottom-up means upper layers use new services through
+  `runtime.runPromise` facades until they migrate.
+  - Each facade is registered in its layer's PR and deleted when that layer migrates.
+  - A facade must never appear inside a finished layer.
+- **Test-double fan-out.** Interface changes ripple into about 95 Logger doubles. PR1's runtime
+  injection must avoid adding new required dependencies.
 - **Rollback:**
   - No phase changes a persisted format, so each can be reverted alone.
-  - A switch keeping old and new execution paths for phase 3 is not recommended: maintaining
+  - A switch keeping old and new execution paths for L5 is not recommended: maintaining
     two copies of ~6000-line logic costs more than the risk it guards.
   - The existing suite, ablation and staged rollout by release channel replace it.
 
@@ -504,14 +535,19 @@ Before implementation, map each of these to a test. No phase may change them:
 
 1. **Windows process trees.** Is a verified `taskkill /T` enough, or should Lody adopt Job
    Objects? Job Objects need a native module or helper executable and affect packaging.
-   Phase 1 does only the former by default.
+   PR1 does only the former by default.
 2. **Ownership after failed termination.** Should the turn keep ownership until the raw
-   request ends (current semantics, and the phase 3 default)? Or should the session resource
+   request ends (current semantics, and the L5 default)? Or should the session resource
    be quarantined so a new process can continue? The latter is a behaviour change and needs a
    Spec draft.
 3. **Test tooling.** Should Lody adopt `@effect/vitest`, and move uniformly to TestClock in
    place of the current fake-only-`setInterval` pattern?
 4. **The `ancillary` finalization bound.** No measurements exist yet.
+5. **Where ProcessService lives.** Should it start in `apps/cli/src/platform/`, or go straight
+   into `packages/shared/src/node/` for reuse by cli-supervisor and Electron?
+   - Default: the CLI first, moving up when the supervisor migrates.
+   - Reason: Electron main's `node --test` has a known problem with extensionless imports from
+     shared.
 
 ## Verification limits
 

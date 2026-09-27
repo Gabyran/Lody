@@ -9,11 +9,12 @@ Translation: current
 
 Lody 的生命周期缺陷集中在少数几类手写机制上：定时器驱动的退避与 watchdog、代际计数器、
 手写 disposed 标志、按 key 的 promise 链和被吞掉的 `.catch`。仓库已依赖 effect 3.18，
-但只以"在类方法里构造 Effect、在边界 `runPromise`"的孤岛方式使用，没有贯穿模块的作用域。
-本路线图覆盖 [Turn 执行与 ACP 进程所有权](2026-09-27-effect-turn-execution-and-acp-process-ownership.zh.md)
-之外所有待迁移的部分，按缺陷密度与未关 issue 排定优先级，给出每块的目标设计、前置条件和不该
-用 Effect 的地方。排序依据是 2026-07 至 2026-09 的 fix 提交与 issue 分类，不是运行时测量；
-每一块开工时都需要自己的详细计划与 note。
+但只以"在类方法里构造 Effect、在边界 `runPromise`"的孤岛方式使用。本路线图确立自底向上的
+迁移原则：从平台层到入口层分为七层，一层只有在其全部依赖都已是 Effect 服务后才算完成；
+自己的 Promise 模块必须重写，只有真正的第三方 I/O 边界允许包装一次。按这一原则，Loro 同步
+栈的生命周期应在库内部解决：loro-repo 与 streams-crdt 在 Flock 持久化迁移之后改为 Effect
+内核，同时提供 Effect 与 Promise 两个入口。第一步是平台层与进程叶子层。排序依据是 fix 提交与
+issue 分类，不是运行时测量；各单元开工时需要各自的详细计划。
 
 ## 排序依据
 
@@ -22,159 +23,233 @@ Lody 的生命周期缺陷集中在少数几类手写机制上：定时器驱动
   `session-execution-service.ts`（43 个中 34 个）最高。
 - 非测试代码中手写机制的粗略计数（定时器 / 被吞的 catch / disposed 类标志）：
   `apps/cli/src/lib` 91 / 70 / 38，`packages/components/src/providers` 51 / 27 / 27，
-  `apps/electron/src/main` 32 / 10 / 8；renderer 有 83 个文件手写 `let cancelled/disposed = false`。
+  `apps/electron/src/main` 32 / 10 / 8；renderer 有 83 个文件手写 `let cancelled/disposed = false`；
+  `apps/cli/src` 中约 35 个文件直接使用 `child_process` 或 `cross-spawn`。
 - 现有 Effect 立足点：`apps/cli/src/lib/loro/connection-recovery.ts`（Queue + Fiber 串行事件循环）、
   `packages/components/src/providers/local-reconnect-loop.ts`（`Clock` + `Fiber`，可注入 TestClock）、
   `apps/cli/src/session/session-access-retry.ts`（`Schedule`）、`apps/cli/src/lib/pr-poller`（`Layer`）、
   `packages/components/src/lib/code-collab-file-index-cache.ts`（`ScopedCache`）。
 
-## 共享基础（由 Turn 提案的阶段 0/1 交付，后续各块复用）
+## 分层原则
 
-- 守护进程级 `ManagedRuntime` 与根作用域；测试用 `TestContext` 运行时。
-- 进程树原语：`spawnScoped` / `terminateTree` / `awaitExit`（同时看 `signalCode`、进程组、
-  有上限的升级、Windows 退出码检查）。
-- 边界规则：不在 Effect 内调用 `run*`；可拒绝的 promise 用带 signal 的 `tryPromise`；
-  中断必须被某个作用域持有或被等待；超时放在等待者上；finalizer 内的等待必须有上限；
-  `FiberMap` 替换不等待旧 fiber。
-- 这些规则落在 `.agents/docs/cli-effect-ts.md`（Turn 提案阶段 0 负责恢复该文档）。
+### 七层
 
-## 按优先级排列的迁移单元
+依赖只能向下。
 
-### 1. Dispatch watcher 与 MessageHandler 事件收尾
+| 层 | 内容 | 第三方边界（只在此包装一次） |
+| --- | --- | --- |
+| L6 入口适配 | MessageHandler RPC 处理器、dispatch watcher、MCP/Operation 投递；唯一允许调用 `runtime.run*` 的地方 | — |
+| L5 Turn | TurnService（注册表与停止控制）、TurnProgram、Steer、收尾阶段 | — |
+| L4 会话资源 | AgentSessionPool（按会话的 `RcMap`，可中断创建）、AgentSession（进程、连接、终端、sandbox 的作用域）、启动闸门、托管 runtime 解析 | — |
+| L3 ACP 连接 | AcpConnection（请求即 Effect、连接级原始工作集合、`closed` Deferred、通知 Stream）、AgentClient 操作、ACP 终端 | `@agentclientprotocol/sdk` |
+| L2 状态与云 | SessionDocuments、SessionHistory、SessionPresence、CloudPort；下接 `loro-repo/effect` | 见下文 Loro 同步栈 |
+| L1 OS 叶子 | ProcessService（spawn、exec、awaitExit、terminateTree 与平台策略）、Git、FileSystem、LoginShellEnv | `node:child_process`、`cross-spawn`、`node:fs` |
+| L0 平台 | DaemonRuntime（`ManagedRuntime` + 根作用域）、Clock/TestClock、Logger 桥接、Config、Tracing | winston、`process.env` |
 
-- 位置：`apps/cli/src/session/session-dispatch-watcher.ts`（2874 行）、`session-dispatch-logic.ts`、
-  `apps/cli/src/lib/message-handler.ts`（9762 行）。
-- 证据：#676（未合并的检查让 daemon 100% CPU 42 秒）、#166（过期 `latestUserMsgId` 误报投递失败）、
-  #1043/#1050（重复 turn 修复递归，开放 #1040 OOM）、#595、fe26b552（teardown 重复收尾覆盖 `endedAt`）；
-  开放 #939（用量 flush 被跳过且不重试）、#553（历史同步重叠报错）。
-- 现状机制：`enqueueSessionCheck` 约 110 行手写按 key 串行队列（探测记录、代际栅栏、合并搜索、
-  `setImmediate` 让步）；`finalizeACPState` 从约 8 处调用；`sessionManager.on(...)` 处理器是互相
-  竞争的 `void (async () => ...)()`。
-- 目标：每会话一个 worker fiber（`FiberMap` + sliding `Queue` 或"脏标记 + `Semaphore(1)`"），
-  合并、顺序与停止时中断由结构保证；会话事件改为实例作用域上的订阅，收尾只在无拥有者 turn 时发生
-  （Turn 提案阶段 2 先完成 turn 那一半）；用量 flush 用 `Schedule` 持久重试。
-- 前置：Turn 提案阶段 2–4。CRDT 指针与重复行仍需数据模型层面修复，不能靠 Effect。
-- 可能关闭：#939、#553（single-flight 改为加入进行中的那次）；#1040 仅进程内一半。
+### 完成判定
 
-### 2. 连接恢复、presence 与机器存活（CLI）
+一个模块只有同时满足以下条件才算 Effect 化完成：
 
-- 位置：`apps/cli/src/lib/loro/connection-recovery.ts`（1087 行）、`presence.ts`、`machine-monitor.ts`、
+- 公开 API 只返回 `Effect`，失败是带标签的错误类型；
+- 依赖全部出现在 `R` 中，由 `Layer` 提供，且这些依赖本身已完成；
+- 不使用 `setTimeout`/`setInterval`、`AbortController`、生命周期 `EventEmitter` 或模块级可变单例；
+- 资源只通过 `acquireRelease`、Scope、`RcMap` 获取；
+- 内部不调用 `run*`；
+- 测试通过替换 Layer 与 TestClock 断言可观察结果。
+
+### 自己的代码与第三方边界
+
+- 自己的 Promise 模块（例如 `LoroDocumentManager`、`SessionDocument`、`AgentClient`、`Session`）
+  必须按上述判定重写，不能只在外面套一层 `Effect.tryPromise`，否则生命周期仍无人管理。
+- 只有真正的 I/O 边界允许包装一次：Node 内建模块、第三方 SDK、数据库驱动、浏览器 API。
+- 纯同步计算（`loro-crdt`、`flock-wasm` 的编解码与合并，`history-actions.ts` 的 reducer）
+  保持普通函数，不进入 Effect。
+
+### 迁移期规则
+
+- 严格自底向上：下层完成前，上层不开始重写。
+- 尚未迁移的上层调用方经 `runtime.runPromise` 门面使用新服务；门面标注为临时，并在对应上层
+  迁移时删除。
+- 当依赖属于另一个仓库且尚未完成时，允许在本仓库先定义与其未来 Effect 接口一致的 Tag，
+  用临时 Layer 适配现有 Promise 版本；上游完成后只替换该 Layer。
+
+### 边界规则（落到 `.agents/docs/cli-effect-ts.md`，由 Turn 提案第一个 PR 恢复该文档）
+
+不在 Effect 内调用 `run*`；可拒绝的 promise 用带 signal 的 `tryPromise`；中断必须被某个作用域
+持有或被等待；超时放在等待者上；finalizer 内的等待必须有上限；`FiberMap` 替换不等待旧 fiber；
+作用域关闭必须记忆化，因为第二次 `Scope.close` 不等待第一次的 finalizer。
+
+## L2 与 Loro 同步栈
+
+### Lody 侧的四个服务
+
+| 服务 | Effect 概念 | 取代 |
+| --- | --- | --- |
+| SessionDocuments | `RcMap<SessionId, DocHandle>`，lookup 为 `acquireRelease(打开并加入 room, 先 unload 再 invalidate)`，带 idle TTL | `getOrCreateSessionDoc` 的 `sessions`、`pendingSessionDocs`、`withLocalDocOwnership`、`isDestroyed` 与手写 GC |
+| SessionHistory | 执行 `HistoryAction`/`MetaPatch` 值的写入器；`commit(batch)` 在一次提交、不可中断区域内完成必须原子的序列；变化以 `Stream` 暴露 | `sessionData.commands.applyHistoryAction` 等 Promise 写入与 `subscribeSessionChanges` 回调 |
+| SessionPresence | `hold(sessionId, phase)` 为 `acquireRelease` 租约，心跳为作用域内的 `Effect.repeat(Schedule.spaced)`；机器三态用 `SubscriptionRef` | 分散的 start/clear 调用与十个定时器 |
+| CloudPort | 能力接口，方法返回带标签错误的 Effect；超时与重试由调用方用 `timeout`/`Schedule` 组合；local 与 cloud 各一个 Layer | 接收 `timeoutMs` 的 Promise 方法 |
+
+turn 代码只产出 `HistoryAction`/`MetaPatch` 这类数据，看不到 `LoroDoc` 或 loro-repo；只有
+SessionHistory 与 SessionDocuments 的实现能接触 `LoroDoc`，handle 对外只暴露 Effect 方法。
+`packages/shared/src/session-data/history-actions.ts` 中 `applyHistoryAction(entries, action)`
+已是纯 reducer，可直接作为写入器与内存测试 Layer 的共同核心。
+
+### 决定：loro-repo 与 streams-crdt 改为 Effect 内核
+
+Lody 这一层的缺陷（#4 unload/invalidate 顺序、#774 join 永久停在 connecting、#399 watchdog 拆掉
+健康连接、#12 重连风暴）大多源于同步库没有交出生命周期，Lody 只能在外面用
+`connection-recovery.ts`（1087 行）与 `doc.ts` 的 room 管理补偿。只在外面包装无法让持久化与
+重连归 Effect 管理，因此决定深入库内部：
+
+- **范围**：loro-repo（本地 0.19.1 检出约 1.25 万行，12 处定时器、55 处 disposed/closed 标志、
+  42 处被吞的 catch）与其下层 `@loro-dev/streams-crdt`（本地 0.15.1 检出约 1 万行，重连与退避
+  状态机所在）一起改造。两个本地检出都落后于 Lody 使用的 0.20.3/0.16.0，数字只作量级参考。
+- **形态**：库内部全部用 Effect；对外同时提供 `loro-repo/effect`（Tag、Layer、需要 Scope 的
+  handle、Stream）与现有 Promise API。后者是基于 `ManagedRuntime` 的薄门面，使 bitnote、inkpeer、
+  lody-e2ee-core 等其他使用方不受影响。Lody 直接使用 Effect 入口。
+- **内部对应**：
+
+  | 现有部分 | Effect 化后 |
+  | --- | --- |
+  | Repo 创建与关闭 | `Layer.scoped`，释放顺序为 flush → 关 transport → 关 storage |
+  | `doc-manager` 缓存与 `unloadDoc` | `RcMap<DocId, DocHandle>`，消费方可在 handle 上挂 finalizer（Lody 的本地 room invalidate 由此结构化） |
+  | room join | 需要 Scope 的 `joinRoom`，每次尝试一个 fiber，被取代即中断，超时由调用方组合 |
+  | room 状态回调 | `SubscriptionRef<RoomStatus>` / `Stream` |
+  | streams-crdt 重连与退避 | 可注入的 `Schedule`（exponential、jittered、resetAfter） |
+  | `flock-debounce`、`meta-persister` | `Queue` + `Stream` 防抖，作用域关闭时 flush |
+  | `event-bus` | `PubSub` / `Stream` |
+  | sqlite / IndexedDB / 文件系统存储 | `Storage` Tag，各一个 Layer，句柄用 `acquireRelease` |
+  | streams / websocket / broadcast-channel 传输 | `Transport` Tag，各一个 Layer |
+
+- **约束**：
+  - 热路径（CRDT update 导入导出、按 token 流入的更新写入、单次 flock 写入）保持同步函数，
+    Effect 只接管打开、join、重连、持久化调度与关闭。
+  - `effect` 作为两个库的 peerDependency，与 Lody 共用同一份并对齐版本（当前 3.18.4）。
+  - Promise 门面必须让其他使用方的现有测试不改即通过，作为库侧 PR 的验收条件。
+- **顺序**：先完成 [loro-repo Flock 持久化迁移](2026-09-27-loro-repo-flock-persistence-migration.zh.md)，
+  再开始库的 Effect 改造，避免两项工作同时改写持久化层。库的改造在各自仓库立项、各自出计划。
+- **Lody 不被阻塞**：Lody 侧按 `loro-repo/effect` 的预期接口定义 `LoroRepo` Tag，先用临时 Layer
+  适配现有 Promise 版本并登记删除；库发布 Effect 入口后只替换该 Layer，SessionDocuments、
+  SessionHistory、SessionPresence 不变。
+
+## 迁移单元
+
+### L0 + L1：平台与进程叶子层
+
+由 [Turn 执行与 ACP 进程所有权](2026-09-27-effect-turn-execution-and-acp-process-ownership.zh.md)
+的第一、二个 PR 交付，是所有上层的共同前提。其余约 35 个直接 spawn 的文件（git、worktree
+setup runner、终端、登录 shell 环境、MCP、preview、code-collab 扫描等）在第二个 PR 起迁到
+同一个 ProcessService；setup 脚本超时只 SIGTERM shell、子孙泄漏的问题在此解决。
+
+### L2 与 Loro 同步栈
+
+见上一节。本地数据面 join/unload（`packages/shared/src/local-loro-data-plane-server.ts`、
+`local-loro-transport.ts`、`apps/cli/src/lib/local-loro-data-plane-server.ts`、`doc.ts`，证据
+#4、`0ec3656a`、`c1a502f7`、#774，开放 #485、#398）并入此单元：room 生命周期进入 RcMap，
+Flock 新鲜度同步用 `timeout` + `orElse` 回落本地副本。约束：**必须保持"先 unload 再 invalidate"**。
+
+### 连接恢复、presence 与机器存活（CLI）
+
+- 位置：`apps/cli/src/lib/loro/connection-recovery.ts`、`presence.ts`、`machine-monitor.ts`、
   `session-active-presence.ts`。
-- 证据：#12（重连扇出风暴，约 30 次/分钟全量重扫，事件循环延迟 6.4 秒）、#673（token 刷新信号丢失）；
-  开放 #399（watchdog 拆掉 transport 已连接、仅 meta room 仍在 join 的连接）、#484（unknown 当作离线）、
-  #1028（机器访问注册失败后不重试）。
-- 现状机制：三个手写 `setTimeout`、`setInterval` watchdog、手写指数退避与 jitter、
-  `streamsRecoveryGeneration`；presence 十个定时器与 `stopped` 标志；machine-monitor 每秒轮询。
-- 目标：退避用 `Schedule.exponential` + `jittered` + `resetAfter`（flap 窗口）；watchdog 与
-  heartbeat 用 `Effect.repeat(Schedule.spaced)`；节流用 `sleep` + 中断；lease 用 `RcRef`；
-  presence 三态 `unknown|online|offline` 用 `SubscriptionRef` 显式建模；机器访问注册为带
-  `Schedule` 的后台 fiber。
-- 约束：必须先读 [`.agents/docs/cli-lib-loro-presence.md`](../../../docs/cli-lib-loro-presence.md) 与
+- 证据：#12、#673；开放 #399、#484、#1028。
+- 拆分：presence 与机器存活属于 Lody 自己的 L2（SessionPresence 与机器三态），可在临时
+  `LoroRepo` Layer 上先行；连接恢复在 streams-crdt/loro-repo 以 `Schedule` 接管重连后收缩为
+  策略配置与健康信号，在此之前不重写，避免两次改写。机器访问注册改为带 `Schedule` 的后台
+  fiber 可独立先做（#1028）。
+- 约束：先读 [`.agents/docs/cli-lib-loro-presence.md`](../../../docs/cli-lib-loro-presence.md) 与
   [`cli-lib-local-loro-data-plane.md`](../../../docs/cli-lib-local-loro-data-plane.md)，并先调用
-  `lody-loro-sync-stack` skill；保留 `onStreamsOnline` 与 `onMetaRoomSynced` 的刻意拆分，
-  被节流的 emit 只能延后不能丢弃。
-- 前置：共享基础。与 Turn 提案耦合小，可作为验证模式的第一块。
+  `lody-loro-sync-stack` skill；保留 `onStreamsOnline` 与 `onMetaRoomSynced` 的刻意拆分，被节流的
+  emit 只能延后不能丢弃。
 
-### 3. Renderer workspace runtime
+### L3–L5：ACP 连接、会话资源与 Turn
 
-- 位置：`packages/components/src/providers/create-workspace-runtime.ts`（4731 行，单文件最大热点）、
-  `workspace-machine-rpc-facade.ts`、`atoms/runtime.ts`、`hooks/use-machine-flock-rows.ts`、
-  `hooks/use-session-doc.ts`、`atoms/doc-meta.ts`、`providers/prompt-shortcut-provider.tsx`。
-- 证据：#449（meta 重连恢复无上限）、#898（Flock 首次同步失败被 `.catch(() => undefined)` 吞掉）、
-  #989（已 dispose 的 runtime 被复用）；开放 #480（有上限的重连仍发布空 presence 使本机显示离线）。
-- 现状机制：`disposePromise`、`cloudTransportAttachPromise`、`metaRoomJoinPromise` 充当状态闩；
-  多处闭包 `let disposed = false`；`await new Promise(r => setTimeout(r, 1000 * attempt))` 重试；
-  presence 在六处被 stop；session store 手写 acquire/release 引用计数且写了两遍。
-- 目标：按 transport（cloud、local、presence、monitor、rpc）拆成 `Layer.scoped`；attach 用
-  `acquireRelease`；子任务 `forkScoped`；presence 只在作用域真正关闭时清空；按 key 的资源用
-  `RcMap`（覆盖 #989 的复用问题）；重试用 `FiberMap` + `Schedule`。React 接缝保持 jotai，
-  组件通过 `useSyncExternalStore` 或 `atomEffect` 订阅 Effect 管理的 store；不引入 `@effect/atom`。
-- 约束：先读 `packages/components/src/providers/AGENTS.md`；该文件与多数 components 下的
-  `AGENTS.md` 已接近 8 KiB 上限，新增规则需要先转移内容。
-- 不适用 Effect 的部分（估计约占 renderer 生命周期缺陷的六成）：URL 与状态双向同步（#193，
-  以单一数据源修复）、派生状态冲突（#613、#496）、虚拟列表测量时序（#695、#896、#674）、
-  第三方库行为（#722）。这些继续用 React 规范与状态下沉解决。
+由 [Turn 执行与 ACP 进程所有权](2026-09-27-effect-turn-execution-and-acp-process-ownership.zh.md)
+负责。Turn 层依赖 L2，按分层原则最后完成。
 
-### 4. 本地 Loro 数据面 join/unload
+### L6：Dispatch watcher 与 MessageHandler
 
-- 位置：`packages/shared/src/local-loro-data-plane-server.ts`、`packages/shared/src/local-loro-transport.ts`、
-  `apps/cli/src/lib/local-loro-data-plane-server.ts`、`apps/cli/src/lib/loro/doc.ts`（3143 行）。
-- 证据：#4（unload 后 room 仍持有旧文档，同步被静默切断）、`0ec3656a`（Electron 重连崩溃）、`c1a502f7`（bootstrap
-  扇出无上限）、#774（join 永久停在 connecting）；开放 #485、#398（Flock 新鲜度同步硬失败）。
-- 目标：每次 join 一个 fiber，`Effect.timeout` 取代三重 requestId/generation 守卫，被取代时直接中断；
-  room 用 `RcMap`/`ScopedCache`，最后一个引用释放时执行 invalidate；Flock 新鲜度同步用
-  `timeout` + `orElse` 回落本地副本。
-- 约束：**必须保持"先 unload 再 invalidate"的顺序**（#4），否则重新引入静默断同步；
-  loro-repo 的 `reconnect`/`joinDocRoom`/`unloadDoc` 内部状态机不归我们管，Effect 只能包在外层。
-- 近期已有多轮修复，优先级低于 1–3。
+- 位置：`session-dispatch-watcher.ts`（2874 行）、`session-dispatch-logic.ts`、
+  `message-handler.ts`（9762 行）。
+- 证据：#676、#166、#1043/#1050（开放 #1040）、#595、fe26b552；开放 #939、#553。
+- 目标：每会话一个 worker fiber（`FiberMap` + sliding `Queue` 或"脏标记 + `Semaphore(1)`"）；
+  会话事件改为实例作用域上的订阅，收尾只在无拥有者 turn 时发生；用量 flush 用 `Schedule` 持久
+  重试；删除各层留下的 `runtime.runPromise` 门面。
+- 约束：CRDT 指针与重复行仍需数据模型层面修复。
 
-### 5. 托管 runtime 下载与 ACP 登录
+### 托管 runtime 下载与 ACP 登录（L4 的依赖）
 
-- 位置：`apps/cli/src/agent/managed-agent-runtime.ts`（1588 行）、`acp-authentication.ts`（1168 行）、
-  `acp-binary-manager.ts`、`npx-cache.ts`、`abortable-zip.ts`。
-- 证据：#878（取消信号没传进下载）、#829（cancel 排在 start 后面，等 285 秒）、#881（缓存维护失败
-  中止启动）；开放 #828（登录取消与报错）、#505（登录卡住）。
-- 目标：中断自动向下传播，删除逐层 AbortSignal 传递；共享安装用 `RcMap` 或 `Deferred` +
-  消费者租约（最后一个释放时中断）；断点续传用 `Schedule`；scratch 与 partial 文件用 `acquireRelease`；
-  认证状态机的 `cancelled`/`timedOut`/`terminating` 标志改为单一原因值。
-- 约束：`apps/cli/src/agent/AGENTS.md` 的安装取消规则（独立消费者租约、等待被中止代际的清理、
-  ZIP 取消围绕 reader 真实 close 事件）必须逐条保留。
-- 前置：进程树原语（认证探测进程）。
+- 位置：`managed-agent-runtime.ts`、`acp-authentication.ts`、`acp-binary-manager.ts`、`npx-cache.ts`、
+  `abortable-zip.ts`。
+- 证据：#878、#829、#881；开放 #828、#505。
+- 目标：中断向下传播取代逐层 AbortSignal；共享安装用 `RcMap` 或 `Deferred` + 消费者租约；
+  续传用 `Schedule`；scratch 与 partial 文件用 `acquireRelease`；认证标志改为单一原因值。
+- 约束：`apps/cli/src/agent/AGENTS.md` 的安装取消规则逐条保留。须在 L4 的 RuntimeResolver 之前完成。
 
-### 6. Worktree、setup runner 与文件锁
+### Worktree 与文件锁（L4/L5 的依赖）
 
-- 位置：`apps/cli/src/session/worktree/worktree-manager.ts`（1830 行）、`speculative-worktree.ts`、
-  `worktree-setup-runner.ts`、`worktree-gc.ts`、`packages/shared/src/node/file-lock.ts`。
-- 证据：#76（被取代的准备迟到 dispose 删掉替代者的 worktree）、#6（同进程等待者争抢文件锁）；
-  开放 #296（可能已被 #620 修复，需核实）。setup 脚本超时只 SIGTERM shell，子孙（如 `pnpm install`）泄漏。
-- 目标：按 key 的 `Semaphore` 取代 `withSessionMarkerLock` promise 链；文件锁作为
-  `acquireRelease` 资源并用 `Schedule` 轮询；setup 脚本作为进程树原语管理的 scoped 进程；
-  GC 用挂在守护进程作用域上的 `Effect.repeat(Schedule.spaced)`。
+- 位置：`worktree-manager.ts`、`speculative-worktree.ts`、`worktree-gc.ts`、
+  `packages/shared/src/node/file-lock.ts`。
+- 证据：#76、#6；开放 #296（可能已被 #620 修复，需核实）。
+- 目标：按 key 的 `Semaphore` 取代 `withSessionMarkerLock` promise 链；文件锁为 `acquireRelease`
+  资源并用 `Schedule` 轮询；GC 为守护进程作用域上的 `Effect.repeat`。
 
-### 7. 编排投递
+### 编排投递
 
-- 位置：`apps/cli/src/orchestration/operation-coordinator.ts`（1560 行）、`operation-store.ts`（1595 行）。
-- 证据：#322（重放已完成投递）、#461（进度反馈循环）、#200（store 路径错误吞掉完成通知）；
-  开放 #675（Stop 后子任务结果仍唤醒会话并触发 Codex 自动压缩）。
-- 目标：按 operation 的 `FiberMap`；重试与期限用 `Schedule`；每个请求方会话一个作用域，
-  使 Stop 能取消挂起投递（依赖 Turn 提案的停止原因）。
-- 约束：SQLite store 的代际栅栏与插入触发器、跨进程 MCP host 不在 Effect 控制范围内。
+- 位置：`operation-coordinator.ts`、`operation-store.ts`。
+- 证据：#322、#461、#200；开放 #675。
+- 目标：按 operation 的 `FiberMap`、`Schedule` 重试与期限、每个请求方会话一个作用域，使 Stop
+  能取消挂起投递（依赖 Turn 层的停止原因）。SQLite store 的代际栅栏与跨进程 MCP host 不受
+  Effect 控制。
 
-### 8. Electron main 与内嵌 CLI、cli-supervisor
+### Renderer workspace runtime
+
+- 位置：`create-workspace-runtime.ts`（4731 行）、`workspace-machine-rpc-facade.ts`、`atoms/runtime.ts`、
+  `use-machine-flock-rows.ts`、`use-session-doc.ts`、`atoms/doc-meta.ts`、`prompt-shortcut-provider.tsx`。
+- 证据：#449、#898、#989；开放 #480。
+- 目标：按 transport 拆成 `Layer.scoped`；按 key 的资源用 `RcMap`；presence 只在作用域关闭时清空；
+  React 接缝保持 jotai，通过 `useSyncExternalStore` 或 `atomEffect` 订阅，不引入 `@effect/atom`。
+- 依赖：renderer 同样使用 loro-repo，应在 `loro-repo/effect` 可用后开始，避免先写临时适配。
+- 约束：components 下多数 `AGENTS.md` 接近 8 KiB 上限，新增规则前需要转移内容。
+- 不适用 Effect 的部分（约占 renderer 生命周期缺陷六成）：URL 与状态双向同步（#193）、派生
+  状态冲突（#613、#496）、虚拟列表测量时序（#695、#896、#674）、第三方库行为（#722）。
+
+### Electron main、内嵌 CLI 与 cli-supervisor
 
 - 位置：`apps/electron/src/main/services/cli-service.ts`、`loro-data-plane-relay.ts`、
   `packages/cli-supervisor/src/supervisor.ts`。
-- 证据：#849、#742；开放 #448（relay 在 dispose 竞态中同步抛错导致 main 退出）、#938（代理设置在
-  启动时冻结进 CLI 环境）、#1054（日志 transport ENOSPC 触发 uncaught 退出）。
-- 目标：CLI 子进程用进程树原语；每个 sender 一个作用域，`destroyed` 时关闭，send 包进 `Effect.try`；
-  代理设置放进 `SubscriptionRef`，变化时按明确语义重启 CLI；supervisor 的代际计数器与
-  `lifecycleQueue` 改为单个 supervisor fiber + `Schedule`，kill 实现迁到共享进程树原语
-  （需要把原语移到 `packages/shared/src/node` 之类可被 supervisor 依赖的位置）。
-- 约束：先读 `apps/electron/AGENTS.md`（已在 8 KiB 上限边缘）；electron main 测试用 `node --test`，
-  共享代码的 extensionless 导入会失败，可测逻辑放进 `packages/shared`。
+- 证据：#849、#742；开放 #448、#938、#1054。
+- 目标：CLI 子进程用 ProcessService（需要把它移到 supervisor 可依赖的位置）；每个 sender 一个
+  作用域；代理设置放进 `SubscriptionRef` 并定义重启语义；supervisor 改为单个 fiber + `Schedule`。
+- 约束：`apps/electron/AGENTS.md` 已在 8 KiB 上限边缘；electron main 的 `node --test` 对 shared
+  的无扩展名导入会失败。
 
-### 9. 低优先级
+### 低优先级
 
-preview 代理（#156 已修）、`packages/loro-streams-rpc`（近期无 fix）、PR poller（#758 根因是配额策略）、
-Electron updater（#278 的根因是第三方事件式 API）。只在触及时顺带样板化。
+preview 代理、`packages/loro-streams-rpc`、PR poller、Electron updater：只在触及时顺带迁移。
 
 ## 不需要等 Effect 的独立修复
 
 - #1054：给 `DailyRotateFile` 挂 `error` 监听，ENOSPC 时降级到 stderr 而不是 uncaught 退出。
 - #448：relay 的 `send` 包 try，并在 `destroyed` 后停止回调。
-- #553：历史同步 single-flight 改为加入进行中的那一次，而不是抛出 "already running"。
-- 核实后关闭：#296（可能已被 #620 修复）、#828 的下载部分（已被 #878 修复）。
+- #553：历史同步 single-flight 改为加入进行中的那一次。
+- 核实后关闭：#296、#828 的下载部分。
 
 ## 建议顺序
 
-1. Turn 提案阶段 0–1（共享基础 + 进程树，修 #429）。
-2. 连接恢复与 presence（单元 2）：开放 issue 最多、已有样板、耦合小，用来验证模式。
-3. Turn 提案阶段 2–4。
-4. Dispatch watcher 与 MessageHandler（单元 1）。
-5. Renderer workspace runtime（单元 3），按 transport 逐个拆。
-6. 单元 5、6、7、4、8，按开工时的缺陷与 issue 状态重新排序。
+1. L0 + L1 ProcessService，迁移全部 ACP 相关进程（Turn 提案第一个 PR）。
+2. L1 其余 spawn 调用方。
+3. 与 1–2 并行：loro-repo Flock 持久化迁移。
+4. loro-repo 与 streams-crdt 的 Effect 内核与 `loro-repo/effect` 入口（各自仓库）。
+5. Lody L2：可在第 2 步后基于临时 `LoroRepo` Layer 开始，第 4 步完成后替换 Layer；同期完成
+   托管 runtime、worktree 与文件锁。
+6. L3 → L4 → L5（Turn 提案）。
+7. L6 与编排投递。
+8. Renderer workspace runtime（第 4 步之后），然后 Electron 与 supervisor。
 
 ## 验证边界
 
-排序与机制计数来自 git 历史、issue 与代码 grep，不是运行时测量；"可能关闭"的 issue 是推断，
-需要各单元在实施时复现与验证。未评估迁移的工作量与对发布节奏的影响。
+排序与机制计数来自 git 历史、issue 与代码 grep，不是运行时测量；loro-repo 与 streams-crdt 的
+数字来自落后于 Lody 所用版本的本地检出。"可能关闭"的 issue 是推断，需要各单元实施时复现与
+验证。未评估迁移工作量、Effect 对热路径与 renderer 包体积的实际开销，以及对发布节奏的影响。

@@ -13,9 +13,10 @@ CLI 的 Turn 执行运行时与 ACP 子进程关停是近两个月生命周期�
 十余个按会话登记的 Map 和五份各不相同的 kill 实现维持。本提案把所有权改为三层 Effect
 作用域（守护进程 → 会话资源 → turn）：进程与 ACP 连接由会话资源作用域获取和释放，原始 ACP
 请求、steer、配置调用与收尾归 turn 作用域，停止原因以类型化值传给 finalizer，所有等待都有
-上限并显式升级。计划分六个可独立回退的阶段交付，不改变 Stop/steer 的用户语义、历史格式
-与 dispatch 指针规则；各阶段的预期收益尚未验证，Windows 进程树与"终止失败后是否隔离会话"
-两项需要人工决定。
+上限并显式升级。交付遵循[迁移路线图](2026-09-27-effect-lifecycle-migration-roadmap.zh.md)的
+自底向上分层原则：先做平台层与进程叶子层，再做 ACP 连接、会话资源，Turn 层在其依赖的状态层
+完成后最后完成；不改变 Stop/steer 的用户语义、历史格式与 dispatch 指针规则。各阶段的预期收益
+尚未验证，Windows 进程树与"终止失败后是否隔离会话"两项需要人工决定。
 
 ## 问题与证据
 
@@ -232,87 +233,99 @@ steer：
   promise 链。
 - `awaitPromptHandoffTail` 的 `Promise.race` 循环改写为 Effect 循环，`successorReady` 为
   `Deferred`；"handoff 裁决未到时不结束 steer 等待"的规则原样保留（#817）。
-- `steerMutationQueue` 与 `steerStatusQueue` 先保留 `ConcurrentQueue`，第四阶段再改为
+- `steerMutationQueue` 与 `steerStatusQueue` 先保留 `ConcurrentQueue`，L5 再改为
   TurnSupervisor 内每会话一个 `Semaphore(1)`。
 
 `yieldedFinalization` promise 链改为 turn 作用域上的 `ancillary` `FiberSet`；release 时有上限地
 join（超限记录日志、不阻塞释放）。初始化停滞由 watchdog 直接调用 `stop(InitStalled)`，
 移除 `raceFirst` 与 `initializationStalled` 标志。
 
-## 分阶段交付
+## 分层交付
 
-每个阶段一个 PR，可独立回退，不改持久化格式。现有 `tests/session-execution-service.test.ts`
-（9322 行）是行为契约：每个阶段都必须在不修改断言的前提下通过，只允许把计时脚手架换成
-TestClock。
+交付严格自底向上，每层一到两个 PR，可独立回退，不改持久化格式。层的定义、完成判定与迁移期
+门面规则见[迁移路线图](2026-09-27-effect-lifecycle-migration-roadmap.zh.md#分层原则)。现有
+`tests/session-execution-service.test.ts`（9322 行）是行为契约：每个 PR 都必须在不修改断言的
+前提下通过，只允许把计时脚手架换成 TestClock。
 
-### 阶段 0：基础设施（无行为变化）
+### PR1：L0 平台 + L1 ProcessService（直接对应 #429）
 
-- 新建 `DaemonRuntime` 与测试运行时辅助；`runVisibleSessionTurn` 改为
-  `runtime.runFork(program, { scope })`。
-- 修正已知误用：`void runPromise(Fiber.interrupt)` 改为由 turn 作用域持有的中断 fiber
-  （RPC 仍立即返回，释放由 `waitForTurnRelease` 观察）；`awaitTurnFiber` 用 `Cause.squash`
-  保留原始错误；`Effect.promise(dispatchOptions.onTurnClaimed!)` 改为 `tryPromise`。
-- 把 CLI `AGENTS.md` 引用但 OSS 仓库中缺失的 `context/cli-effect-ts.md` 补为
-  `.agents/docs/cli-effect-ts.md`，写入本文"已验证的行为"中的边界规则，并修正链接。
-- 决定是否引入 `@effect/vitest` 0.26.x（兼容 effect 3.18 与 vitest 3.2）。
+- L0：`DaemonRuntime`（`ManagedRuntime` + 根作用域，关停流程中 `dispose`）；Effect Logger 桥接到
+  现有 Logger，避免牵动约 95 个 Logger 测试替身；基于 TestClock 的测试运行时辅助；恢复
+  `.agents/docs/cli-effect-ts.md` 并修正 CLI `AGENTS.md` 的断链。
+- L1：`ProcessService`：`spawn(spec): Effect<ProcessHandle, SpawnFailed, Scope>`（释放即
+  `terminateTree`）、`exec`、`awaitExit`。三种平台策略各一个 Layer：
+  - POSIX 进程组：释放时**总是**向进程组发信号（ESRCH 视为已退出），即使根进程已先退出；
+  - Windows：`taskkill /T` 检查退出码、设期限，失败再 `/F`；
+  - Linux cgroup：宽限期后升级为 `cgroup.kill`。
+  规则：同时看 `exitCode` 与 `signalCode`；每次等待有上限，计时器随等待结束释放；终止失败以
+  类型化的 `TerminationFailed` 返回，不在底层吞掉。
+- 迁移的消费方：`Session` 的 ACP agent 进程（替换 `killAndWait` 与 sandbox 的 kill 路径）、
+  `acp-runner.ts` 的辅助 ACP 进程（能力探测、标题生成、协议登录）、`acp-authentication.ts`
+  的状态探测。`Session.terminate` 记忆化，`terminated` 恰好一次且载荷取 agent 的退出信息，
+  sandbox 终止失败不再报成功。
+- 暂不迁移：`Session` 自身仍为 Promise 类，经临时 `runtime.runPromise` 门面调用 ProcessService，
+  门面在 L4 删除。
+- 测试：伪进程 + TestClock 覆盖宽限、升级、超时、`signalCode` 退出、根先退出而组内后代存活；
+  注入平台与伪 `taskkill` 覆盖 Windows 分支；POSIX 真实进程测试以"子进程把孙进程 PID 写到
+  stdout"为显式就绪信号，断言关闭后孙进程不存在，不使用 sleep。
+- 完成标准：CLI 全量测试通过；关停时 `runtime.dispose()` 能等到所有 turn fiber。
 
-完成标准：CLI 全量测试通过；关停时 `runtime.dispose()` 能等到所有 turn fiber。
+### PR2：L1 其余 spawn 调用方
 
-### 阶段 1：进程树原语（直接对应 #429）
+git（含收尾阶段的 diff 与分支同步）、worktree setup runner（修复超时只 SIGTERM shell、子孙泄漏）、
+ACP 终端、登录 shell 环境探测、MCP、preview 等迁到同一个 ProcessService。完成后 L1 满足
+路线图的完成判定。
 
-- 新增进程树模块（初期放在 `apps/cli/src/lib/process/`）：`spawnScoped`、`terminateTree`、
-  `awaitExit`。规则：
-  - 同时看 `exitCode` 与 `signalCode`；
-  - POSIX 释放时**总是**向进程组发信号（ESRCH 视为已退出），即使根进程已先退出；
-  - 宽限期后 SIGKILL，每次等待都有上限，计时器随等待结束清除；
-  - Windows `taskkill /T` 检查退出码、设期限，失败再 `/F`，仍失败则返回类型化失败；
-  - Linux cgroup 优雅路径宽限期后升级为 `cgroup.kill`；
-  - 终止失败以类型化错误返回，由调用方决定，不在底层吞掉。
-- 替换 `Session.killAndWait`、`acp-runner.ts` 的 `terminateChildProcess`、sandbox 的 kill 实现、
-  `acp-authentication.ts` 状态探测的 kill；`cli-supervisor` 的实现在路线图中另行迁移。
-- `Session.terminate` 记忆化、`terminated` 恰好一次且载荷正确、sandbox 终止失败不再报成功。
+### L2：状态与云（由路线图负责）
 
-测试：伪进程 + TestClock 覆盖宽限、升级、超时、`signalCode` 退出、根先退出而组内后代存活；
-注入平台与伪 `taskkill` 覆盖 Windows 分支；POSIX 真实进程测试用"子进程把孙进程 PID 写到 stdout"
-作为显式就绪信号，断言关闭后孙进程不存在，不使用 sleep。
+SessionDocuments、SessionHistory、SessionPresence、CloudPort 的设计与 loro-repo/streams-crdt 的
+决定见[路线图](2026-09-27-effect-lifecycle-migration-roadmap.zh.md#l2-与-loro-同步栈)。Turn 层依赖
+它们，因此本提案的 L5 在 L2 完成（至少完成基于临时 `LoroRepo` Layer 的版本）之后才开始。
 
-### 阶段 2：会话资源作用域与 agent 退出信号
+### L3：AcpConnection
 
-- `Session` 持有 `CloseableScope`；start gate、进程、连接在其中获取；新增 `exited` 监视 fiber。
-- `SessionManager` 按实例订阅；创建改为可中断 fiber；移除 reaper 与 300 秒哨兵。
-- MessageHandler 的 `terminated`/`exit`/`error` 处理只在会话**没有**拥有者 turn 时收尾；
-  有拥有者时由 turn 以 `AgentExited` 处理。这一步需同时修改 MessageHandler 与执行服务。
-- 需要先验证：当前 SDK 在 `connection.close(error)` 后对 prompt 与扩展请求的 reject 行为，
-  以及适配器孙进程持有 stdout 时的表现。
+- `AgentClient` 拆成协议连接与领域操作。AcpConnection 以连接级 `FiberSet` 持有每个原始请求
+  （prompt、steer 扩展请求、`set_config_option`），请求本身以 `Effect.uninterruptible` 包住，
+  只能由 ACP 响应或连接关闭结束；提供 `awaitIdle` 与 `isIdle`；`closed: Deferred` 与通知 `Stream`
+  取代回调；SDK 是此层唯一包装的第三方边界。
+- 删除 `pendingPrompts`、`pendingPromptCompletion`、`steerApplicationWaiters` 的 promise 维护；
+  steer 裁决改为 `Deferred<SteerOutcome>`，三态语义不变。
+- 先验证：当前 SDK 在 `connection.close(error)` 后对 prompt 与扩展请求的 reject 行为，以及适配器
+  孙进程持有 stdout 时的表现。
 
-测试：agent 在 prompt 中途退出、在 steer 等待中退出、在初始化中退出；旧实例迟到的退出不影响
-替代实例（沿用 bounded-init 的真实 `Session` 顺序用例）；放弃创建后进程被释放。
+### L4：AgentSession 与 AgentSessionPool
 
-### 阶段 3：Turn 作用域与 TurnSupervisor（核心）
+- `AgentSession` 是一个作用域：启动闸门许可（`Semaphore(2)`，保持
+  `LODY_MAX_CONCURRENT_ACP_SESSION_STARTS`）、ProcessService 进程、AcpConnection、ACP 终端与
+  sandbox 依次获取；`exited` 监视 fiber 显式关闭连接并以 `AgentExited` 通知拥有它的 turn。
+- `AgentSessionPool` 以按 sessionId 的 `RcMap`（或显式中断并等待的 `FiberMap`，因为 `FiberMap`
+  替换不等待旧 fiber）取代 `SessionManager` 的 `sessions`、`pendingSessionCreates`、
+  `pendingTerminationPromises`；创建可中断，放弃即中断并由作用域释放已获取的进程，移除 reaper
+  与 300 秒哨兵；生命周期事件按实例订阅，不再按 id 删除。
+- 依赖：托管 runtime 下载与 ACP 登录、worktree 与文件锁须先按路线图完成。
+- 删除 PR1 在 `Session` 上留下的门面。
 
-- 引入 `TurnHandle`、`TurnStopReason`、`TurnPhase`；删除上文列出的布尔标志与 promise 链。
-- `AgentClient` 改为连接级 `FiberSet` + `awaitIdle`；drain 进入 release 并按上文升级。
-- `finalizeTurn` 各阶段改为 Effect 步骤（`tryPromise` 传 signal）。
-- 初始化停滞、agent 退出、守护进程关停都经由 `stop(reason)`。
-- 多次 CRDT 写入必须原子完成的序列用 `Effect.uninterruptible` 包住，例如
-  "取消标记先于终态 assistant 条目"、"墓碑与清除 steer 状态"。
+### L5：Turn 作用域与 TurnSupervisor（核心）
 
-测试：原有套件；新增按阶段 × 原因的矩阵（Stop 在 preparing/prompting/finalizing，
-遇到 steer 已提交、handoff 裁决滞后、drain 超时且终止成功/失败、agent 退出）；对每个新机制做
-消融，确认至少一个测试会因移除它而失败。
+- 引入 `TurnHandle`、`TurnStopReason`、`TurnPhase`，删除上文列出的布尔标志与 promise 链。
+- drain 进入 turn 作用域的 release：`AcpConnection.awaitIdle` 带 5 秒上限（上限放在等待者上），
+  超限以 `DrainTimeout` 关闭 AgentSession，再有上限地等一次；终止失败进入可观测的
+  `release-blocked` 状态。
+- `finalizeTurn` 各阶段改为依赖 L1 Git 与 L2 SessionHistory 的 Effect 步骤；必须原子的写入序列
+  通过 `SessionHistory.commit(batch)` 完成。
+- 初始化停滞、agent 退出、守护进程关停都经由 `stop(reason)`；presence 由 `SessionPresence.hold`
+  租约持有。
+- 随后合并 `currentTurnBySession`、`turnRuntimeBySession`、`canceledTurnBySession`、
+  `turnReleaseWaiters`、`initializationStallWaiters` 为 `TurnRegistry`，`cancelSession` 变为
+  "子任务控制分支 → 查注册表 → `handle.stop(UserStop{...})`"，保留显式的孤儿 turn 修复路径；
+  steer 队列改为每会话 `Semaphore(1)`。
+- 测试：原有套件；按阶段 × 原因的矩阵（Stop 在 preparing/prompting/finalizing，遇到已提交
+  steer、滞后的 handoff 裁决、drain 超时且终止成功/失败、agent 退出）；每个新机制做消融。
 
-### 阶段 4：单一所有权登记与 cancelSession 简化
+### 可并行：拆出机器级 ACP 操作
 
-- `currentTurnBySession`、`turnRuntimeBySession`、`canceledTurnBySession`、`turnReleaseWaiters`、
-  `initializationStallWaiters` 合并为 `TurnRegistry`；`waitForTurnRelease` = `Deferred.await(released)`。
-- `cancelSession` 变为：取子任务控制分支 → 查 `TurnRegistry` → `handle.stop(UserStop{...})`；
-  没有 runtime 时的"陈旧未完成 turn 修复"保留为显式的孤儿修复路径。
-- steer 相关队列改为每会话 `Semaphore(1)`。
-
-### 阶段 5：拆出机器级 ACP 操作
-
-把认证、能力刷新、二进制安装（执行服务约 :5897-6850）移到独立服务，in-flight Map 改为
-`RcMap`/`Deferred`。与 turn 无耦合，可与阶段 3/4 并行或延后。
+认证、能力刷新、二进制安装（执行服务约 :5897-6850）移到独立服务，in-flight Map 改为
+`RcMap`/`Deferred`。依赖 L1 与 L3，与 turn 无耦合。
 
 ## 必须保持的不变量
 
@@ -340,21 +353,26 @@ TestClock。
   等待都必须带上限。
 - **适配器差异**：handoff（内建 Claude）、同 turn steer（Codex）、合成压缩工具调用只能在真实
   适配器上完全验证；确定性测试只证明执行服务一侧的顺序。
-- **两个最大文件同时修改**：阶段 2 需要 MessageHandler（9762 行）与执行服务一起改，评审成本高；
-  以阶段划分控制单个 PR 规模。
-- **测试替身扇出**：接口变化会波及约 95 个 Logger 替身；阶段 0 引入的运行时注入要避免新增
+- **两个最大文件同时修改**：L4 需要 MessageHandler（9762 行）与执行服务一起改，评审成本高；
+  以分层 PR 控制单个 PR 规模。
+- **临时门面滞留**：自底向上意味着上层在迁移前经 `runtime.runPromise` 门面使用新服务。每个门面
+  登记在对应层的 PR 中，并在该层迁移时删除；门面不得出现在已完成的层内部。
+- **测试替身扇出**：接口变化会波及约 95 个 Logger 替身；PR1 引入的运行时注入要避免新增
   必填依赖。
-- **回退**：各阶段不改持久化格式，可单独 revert。不建议为阶段 3 保留新旧两套执行路径的开关，
+- **回退**：各阶段不改持久化格式，可单独 revert。不建议为 L5 保留新旧两套执行路径的开关，
   维护两份 6000 行级逻辑的成本高于风险；以现有套件、消融和按发布通道逐步放量替代。
 
 ## 待决问题（需要人工决定）
 
 1. **Windows 进程树**：只做"验证过的 `taskkill /T`"，还是引入 Job Object（需要原生模块或
-   辅助可执行文件，并影响打包）？阶段 1 默认只做前者。
-2. **终止失败后的所有权**：保持 turn 持有直到原始请求结束（现状语义，阶段 3 默认），还是隔离该
+   辅助可执行文件，并影响打包）？PR1 默认只做前者。
+2. **终止失败后的所有权**：保持 turn 持有直到原始请求结束（现状语义，L5 默认），还是隔离该
    会话资源、允许用新进程继续（行为变化，需要 Spec 草案）？
 3. 是否引入 `@effect/vitest`，以及是否统一改用 TestClock 替换现有只 fake `setInterval` 的写法。
 4. `ancillary` 收尾的上限取值；当前没有测量数据。
+5. **ProcessService 的位置**：先放在 `apps/cli/src/platform/`，还是直接放进
+   `packages/shared/src/node/` 供 cli-supervisor 与 Electron 复用？默认先放 CLI，supervisor
+   迁移时再上移（Electron main 的 `node --test` 对 shared 的无扩展名导入有已知问题）。
 
 ## 验证边界
 
