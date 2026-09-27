@@ -5334,9 +5334,6 @@ type PlanEntryItem = Extract<MessageContent, { type: 'plan' }>['entries'][number
 type ProposedPlanMessage = Extract<MessageContent, { type: 'proposed_plan' }>;
 type GoalMessage = Extract<MessageContent, { type: 'goal' }>;
 
-const isRecord = (value: unknown): value is Record<string, unknown> =>
-  typeof value === 'object' && value !== null && !Array.isArray(value);
-
 const formatJsonValue = (value: unknown) => {
   try {
     return JSON.stringify(value, null, 2);
