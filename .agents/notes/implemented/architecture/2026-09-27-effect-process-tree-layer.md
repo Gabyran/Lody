@@ -2,6 +2,7 @@
 
 Status: implemented
 Translation: current
+PR: [#1065](https://github.com/LodyAI/Lody/pull/1065)
 
 [中文](2026-09-27-effect-process-tree-layer.zh.md)
 
