@@ -141,6 +141,8 @@ Layer 3 validation: full `TMPDIR=/private/tmp NODE_ENV=test pnpm check` passes, 
 
 已整合主线 `ef242986`。主线输入框等待上传的流程改为立即持久接收 draft，后续传输由 journal 管理。保留当前发送路由及 Queue 反转快捷键、作用域隔离、防重复提交，以及逐字段保护后来替换的草稿。输入框测试改为验证完整附件快照、接收失败重试、仅附件发送和阻断状态；传输与恢复失败继续由 preparation/journal 测试覆盖。保留主线按 key 虚拟列表、回复留白滚动、图片预览和当前 UI 组件。renderer 收尾接在现有 CLI 退出屏障之前，取消时服务不停止，CLI 停止失败仍保留所有权。
 
+后续：[对话滚动引擎](../../implemented/architecture/2026-09-27-conversation-scroll-engine.zh.md)（#1071）取代了按 key 虚拟列表和 `useStickyScroll`。回复留白滚动由引擎的 `sent` 意图负责，待提交消息（`trailingContent`）渲染为引擎的固定 `trailing` 行。
+
 资源层整合保留主线的目标同步与 workspace 销毁顺序。作用域所有权规则在不改变保证的前提下压缩，以满足 AGENTS.md 大小限制。
 
 桌面整合先收尾 renderer，再进入现有 CLI 退出屏障；取消时服务不停止，CLI 停止失败仍保留所有权。恢复对话框使用当前 UI 组件。journal、queue-steer、writer 和会话动作共 91 项测试通过，退出顺序与取消测试通过。
