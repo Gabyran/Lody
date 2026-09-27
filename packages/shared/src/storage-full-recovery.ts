@@ -171,6 +171,12 @@ export type RepoStorageGuardOptions = Omit<StorageFullRecoveryOptions, 'flush' |
   onUnsavedChange: (since: number | null) => void;
   /** The repo was destroyed; after a retained close, only once its changes were saved. */
   onClosed?: () => void;
+  /**
+   * Every write refused for lack of space, including those inside an episode
+   * that already started (whose `since` does not change). Lets a caller notice
+   * data that became unsaved after it last looked.
+   */
+  onWriteRefused?: () => void;
 };
 
 /**
@@ -189,7 +195,12 @@ export class RepoStorageGuard {
     inner: StorageAdapter,
     private readonly options: RepoStorageGuardOptions
   ) {
-    const { onUnsavedChange: _onUnsavedChange, onClosed: _onClosed, ...timing } = options;
+    const {
+      onUnsavedChange: _onUnsavedChange,
+      onClosed: _onClosed,
+      onWriteRefused: _onWriteRefused,
+      ...timing
+    } = options;
     this.recovery = new StorageFullRecovery({
       ...timing,
       flush: async () => {
@@ -204,7 +215,7 @@ export class RepoStorageGuard {
     });
     this.adapter = observeStorageAdapterWrites(inner, {
       onWriteFailed: (error) => {
-        this.recovery.reportWriteFailed(error);
+        if (this.recovery.reportWriteFailed(error)) options.onWriteRefused?.();
       },
       onWriteSucceeded: () => this.recovery.reportWriteSucceeded(),
     });

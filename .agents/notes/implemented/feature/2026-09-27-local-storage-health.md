@@ -170,15 +170,27 @@ unsaved changes. That covers close, reload, force reload, navigation and
   repeats the action.
 - If changes are still unsaved, it shows the quit dialog's per-window variant
   ("Close/Reload Anyway"). Cancel keeps the window, its repo and its report.
-- An approval lets the window's next unload through until its document is replaced.
+- An approval lets one unload through: it is bound to the unsaved generation it saw,
+  used once, and expires after 10 s.
 
 Main-initiated actions record what to repeat: window close, the Cmd/Ctrl+R shortcut,
 the View menu's Reload / Force Reload (now click items, since the built-in roles
 reload directly) and recovery reloads. A renderer-initiated navigation has nothing to
-repeat, so the user retries it. During app quit the quit barrier has already asked, so
-windows unload freely. A report is dropped only after approval or when the document
-is gone. A crash or unapproved destroy is logged as a loss, and failing to ask a
-window keeps its report.
+repeat, so the user retries it within the approval's lifetime or is asked again. During
+an approved quit windows unload freely. A report is dropped only when the document is
+gone, not at approval, so a quit in between still sees it. A crash or an unapproved
+destroy is logged as a loss, and failing to ask a window keeps its report.
+
+The first version of this barrier kept an approval until the document was replaced.
+After "Reload Anyway" on a navigation the page had started itself, nothing was
+repeated. The user could keep editing, and the next close then dropped the new
+changes without asking. Review caught it. Now:
+- Main bumps a per-window generation on every unsaved report, and an approval is
+  valid only for the generation it saw.
+- The renderer republishes on every newly refused write, even inside an episode whose
+  earliest `since` is unchanged. Guards report each refusal (`onWriteRefused`), and
+  the registry sends a revision at most every 500 ms.
+- An approval is also single use and short-lived.
 
 **Sign-out and cache clear force-destroy other windows, so they approve first.** They
 call `destroy()`, which runs no `beforeunload`, so the unload guard never saw them;
@@ -308,6 +320,13 @@ Automated, with injected clocks, manual timers and fault injection, no real slee
   - A crash is reported as a loss.
 
   Making the barrier approve without asking fails both barrier tests.
+  Approval lifetime: an approval without an intent is void after a newer report, a
+  republished `since`, one use or 10 s. The approved unload is not reported as a
+  loss, while data that appears without approval is. Removing the generation check,
+  single use or expiry each fails it.
+- `renderer-storage-episodes.test.ts` (refusal revision, real `LoroRepo`): a second
+  refused meta write inside an open episode republishes with the same `since` and a
+  higher revision. Dropping the guard's refusal hook fails it.
 - `desktop-exclusion.test.mjs` (quit coordinator): with the quitting flag preset as
   the updater does, a cancelled quit clears it, and a later window close is flushed
   and asked again. An approved quit lets the window go; an aborted one (failed

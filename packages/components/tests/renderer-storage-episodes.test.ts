@@ -202,9 +202,57 @@ describe('sign-out across windows', () => {
     await expect(signOut()).resolves.toBe(true);
     expect(confirms).toEqual([[1_000, 'sign-out']]);
     expect(destroyed).toEqual([2]);
-    expect(state.unsavedSince(2)).toBeNull();
+    // Still unsaved until B is really gone, so a quit in between would still see it.
+    expect(state.unsavedSince(2)).toBe(1_000);
     // The destroy that follows is an approved teardown, not a loss.
     barrier.documentGone(2);
+    expect(state.unsavedSince(2)).toBeNull();
     expect(lost).toEqual([]);
+  });
+});
+
+describe('refusals inside an open episode', () => {
+  it('reports again when another write is refused, although the earliest since is unchanged', async () => {
+    const published: Array<[number | null, number]> = [];
+    let fire: (() => void) | null = null;
+    const episodes = new RendererStorageEpisodes(
+      (since, revision) => published.push([since, revision]),
+      {
+        setTimer: (callback) => {
+          fire = callback;
+          return 1;
+        },
+      }
+    );
+    const store = createQuotaStore();
+    const episode = episodes.register(() => guard.flushNow());
+    const guard = new RepoStorageGuard(store.adapter, {
+      onUnsavedChange: (since) => episode.report(since),
+      onWriteRefused: () => episode.refused(),
+      now: () => 1_000,
+      setTimer: () => null,
+      clearTimer: () => {},
+    });
+    const repo = await LoroRepo.create({ storageAdapter: guard.adapter, metaDebounceCommitMs: 0 });
+    guard.attach(repo);
+
+    store.state.full = true;
+    await repo.upsertDocMeta('doc-a', { title: 'first' });
+    await expect(repo.persistMetaNow()).rejects.toThrow();
+    const afterFirst = published.length;
+    expect(published.at(-1)?.[0]).toBe(1_000);
+
+    // More work on the full disk: the episode's `since` stays 1_000.
+    await repo.upsertDocMeta('doc-b', { title: 'typed after an approval' });
+    await expect(repo.persistMetaNow()).rejects.toThrow();
+    expect(fire).not.toBeNull();
+    fire!();
+    expect(published.length).toBeGreaterThan(afterFirst);
+    const [since, revision] = published.at(-1)!;
+    expect(since).toBe(1_000);
+    expect(revision).toBeGreaterThan(published[afterFirst - 1]![1]);
+
+    store.state.full = false;
+    await guard.close();
   });
 });

@@ -16,12 +16,27 @@ export type RendererStorageQuitCheckOptions = {
 
 export class RendererStorageState {
   private readonly unsaved = new Map<number, number>();
+  /** Bumped by every unsaved report: an approval is only valid for the generation it saw. */
+  private readonly generations = new Map<number, number>();
   private readonly pending = new Map<string, (since: number | null) => void>();
   private nextRequest = 1;
 
+  /**
+   * A window's current unsaved state. The renderer reports again on every newly
+   * refused write (its revision), even when the earliest `since` is unchanged,
+   * so each unsaved report is news.
+   */
   report(windowId: number, since: number | null): void {
-    if (since === null) this.unsaved.delete(windowId);
-    else this.unsaved.set(windowId, since);
+    if (since === null) {
+      this.unsaved.delete(windowId);
+      return;
+    }
+    this.unsaved.set(windowId, since);
+    this.generations.set(windowId, this.generation(windowId) + 1);
+  }
+
+  generation(windowId: number): number {
+    return this.generations.get(windowId) ?? 0;
   }
 
   /**
@@ -117,7 +132,17 @@ export type WindowStorageBarrierOptions = {
   confirmDiscard: (since: number, kind: WindowTeardownKind) => Promise<boolean>;
   /** A renderer went away without an approved teardown (crash, forced destroy). */
   reportLost?: (windowId: number, since: number) => void;
+  now?: () => number;
+  /**
+   * How long an approval stays usable. It covers the unload it was given for:
+   * the repeated close/reload, or the user retrying a navigation the page
+   * started itself (which main cannot repeat). Default 10 s.
+   */
+  approvalTtlMs?: number;
 };
+
+/** One unload the barrier allows: for the unsaved generation it saw, once, soon. */
+type Approval = { generation: number; expiresAt: number };
 
 type TeardownIntent = { kind: WindowTeardownKind; redo: () => void };
 
@@ -131,7 +156,9 @@ type TeardownIntent = { kind: WindowTeardownKind; redo: () => void };
  */
 export class WindowStorageBarrier {
   private readonly intents = new Map<number, TeardownIntent>();
-  private readonly approved = new Set<number>();
+  private readonly approvals = new Map<number, Approval>();
+  /** Unloads an approval let through, until the document is really gone. */
+  private readonly unloading = new Map<number, number>();
   private readonly decisions = new Map<number, Promise<void>>();
   // No parameter property: `node --test` strips types and cannot compile one.
   private readonly options: WindowStorageBarrierOptions;
@@ -150,7 +177,7 @@ export class WindowStorageBarrier {
    * (the caller then calls `event.preventDefault()` to override the renderer).
    */
   onUnloadPrevented(windowId: number): boolean {
-    if (this.options.quitApproved() || this.approved.has(windowId)) return true;
+    if (this.options.quitApproved() || this.consumeApproval(windowId)) return true;
     if (this.decisions.has(windowId)) return false;
     const intent = this.intents.get(windowId);
     this.intents.delete(windowId);
@@ -172,10 +199,38 @@ export class WindowStorageBarrier {
       since === null ||
       (await this.options.confirmDiscard(since, intent?.kind ?? 'reload').catch(() => false));
     if (!allowed) return;
-    this.approved.add(windowId);
-    this.options.state.forget(windowId);
-    // A renderer-initiated navigation has nothing to repeat: the user retries it.
+    // The report stays: until the window really unloads, its changes are still
+    // only in memory, and a later quit must still see them.
+    this.grantApproval(windowId);
+    // A renderer-initiated navigation has nothing to repeat: the user retries it
+    // within the approval's lifetime, or is asked again.
     intent?.redo();
+  }
+
+  private grantApproval(windowId: number): void {
+    this.approvals.set(windowId, {
+      generation: this.options.state.generation(windowId),
+      expiresAt: this.now() + (this.options.approvalTtlMs ?? 10_000),
+    });
+  }
+
+  /**
+   * Single use, and only for the unsaved state it was given for: a newer
+   * report (a write refused after the approval) or expiry voids it.
+   */
+  private consumeApproval(windowId: number): boolean {
+    const approval = this.approvals.get(windowId);
+    this.approvals.delete(windowId);
+    const valid =
+      approval !== undefined &&
+      approval.generation === this.options.state.generation(windowId) &&
+      this.now() < approval.expiresAt;
+    if (valid) this.unloading.set(windowId, approval.generation);
+    return valid;
+  }
+
+  private now(): number {
+    return (this.options.now ?? Date.now)();
   }
 
   /**
@@ -199,19 +254,22 @@ export class WindowStorageBarrier {
         .catch(() => false);
       if (!allowed) return false;
     }
-    for (const windowId of pending) {
-      this.approved.add(windowId);
-      this.options.state.forget(windowId);
-    }
+    for (const windowId of pending) this.grantApproval(windowId);
     return true;
   }
 
   /** The window's document was replaced or its renderer is gone. */
   documentGone(windowId: number): void {
-    const wasApproved = this.approved.delete(windowId);
+    const generation = this.options.state.generation(windowId);
+    // Approved means approved for exactly the unsaved state that was dropped.
+    const approved =
+      this.unloading.get(windowId) === generation ||
+      this.approvals.get(windowId)?.generation === generation;
+    this.approvals.delete(windowId);
+    this.unloading.delete(windowId);
     this.intents.delete(windowId);
     const dropped = this.options.state.forget(windowId);
-    if (!wasApproved && dropped !== null) this.options.reportLost?.(windowId, dropped);
+    if (!approved && dropped !== null) this.options.reportLost?.(windowId, dropped);
   }
 }
 

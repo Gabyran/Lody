@@ -203,10 +203,12 @@ const createBarrierHarness = (options = {}) => {
   const answer = { since: 1_000 }
   const confirms = []
   const lost = []
+  const clock = { now: 0 }
   let confirmAnswer = false
   const barrier = new WindowStorageBarrier({
     state,
     quitApproved: () => options.quitting ?? false,
+    now: () => clock.now,
     confirmDiscard: async (since, kind) => {
       confirms.push([since, kind])
       return confirmAnswer
@@ -228,6 +230,7 @@ const createBarrierHarness = (options = {}) => {
     answer,
     confirms,
     lost,
+    clock,
     setConfirm: (value) => {
       confirmAnswer = value
     }
@@ -349,6 +352,51 @@ void test('a cancelled quit clears a preset quitting flag, so window close is gu
   assert.equal(appQuitting, false)
   assert.equal(barrier.onUnloadPrevented(7), false)
   await barrier.whenDecided(7)
+})
+
+void test('an approval without an intent does not outlive new unsaved data, reuse or its lifetime', async () => {
+  const { state, barrier, answer, confirms, lost, clock, setConfirm } = createBarrierHarness()
+  setConfirm(true)
+  const approveNavigation = async () => {
+    // The page started a navigation itself: nothing to repeat on its behalf.
+    assert.equal(barrier.onUnloadPrevented(1), false)
+    await barrier.whenDecided(1)
+  }
+
+  // The reported case: discard approved, then the page keeps editing and a new
+  // write is refused before the next unload.
+  state.report(1, 100)
+  answer.since = 100
+  await approveNavigation()
+  state.report(1, 200)
+  answer.since = 200
+  assert.equal(barrier.onUnloadPrevented(1), false)
+  await barrier.whenDecided(1)
+  assert.deepEqual(confirms.at(-1), [200, 'reload'])
+
+  // A refusal inside the same episode republishes the same `since`; that is news too.
+  state.report(1, 200)
+  assert.equal(barrier.onUnloadPrevented(1), false)
+  await barrier.whenDecided(1)
+
+  // An approval is single use.
+  assert.equal(barrier.onUnloadPrevented(1), true)
+  assert.equal(barrier.onUnloadPrevented(1), false)
+  await barrier.whenDecided(1)
+
+  // And short-lived.
+  clock.now += 10_000
+  assert.equal(barrier.onUnloadPrevented(1), false)
+  await barrier.whenDecided(1)
+  assert.equal(confirms.length, 5)
+
+  // The approved unload itself is not a loss; unsaved data that appears after it is.
+  assert.equal(barrier.onUnloadPrevented(1), true)
+  barrier.documentGone(1)
+  assert.deepEqual(lost, [])
+  state.report(2, 300)
+  barrier.documentGone(2)
+  assert.deepEqual(lost, [[2, 300]])
 })
 
 void test('quit waits for execution exit, retains ownership on failure, and allows retry', async () => {

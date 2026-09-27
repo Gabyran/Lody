@@ -58,7 +58,11 @@ export type IpcSendMap = {
   'app.windowContentReady': ElectronWindowTarget;
   'app.preparedWindowState': PreparedWindowTarget & { ready: boolean };
   /** This window's earliest repo change refused for lack of space, or null when all saved. */
-  'storage.rendererUnsaved': { since: number | null };
+  'storage.rendererUnsaved': {
+    since: number | null;
+    /** Refused writes so far; a new value is news even when `since` is unchanged. */
+    revision?: number;
+  };
   /** Answer to `storage.quitCheck`, after the window's final flush attempt. */
   'storage.quitCheckResult': { requestId: string; since: number | null };
 };

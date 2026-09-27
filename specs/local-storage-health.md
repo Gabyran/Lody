@@ -117,8 +117,9 @@ Closing or reloading a single window is held to the same rule, because the windo
 memory is where those changes live. While its own repo holds unsaved changes, the
 window refuses to unload. The desktop asks it to flush, and lets the close or reload
 through once everything is saved; otherwise it asks, and Cancel keeps the window.
-A window that closes or crashes without that approval is recorded as a loss, never
-as saved.
+An approval covers one close or reload of the changes it asked about; anything
+refused afterwards is asked about again. A window that closes or crashes without
+that approval is recorded as a loss, never as saved.
 
 Signing out and clearing the local cache close the other windows without giving
 them a chance to unload, so both ask first: every window holding unsaved changes

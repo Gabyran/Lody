@@ -462,6 +462,7 @@ export async function createWorkspaceRuntime(deps: RuntimeDeps): Promise<Workspa
   const storageEpisode = rendererStorageEpisodes.register(() => repoStorageGuard.flushNow());
   const repoStorageGuard = new RepoStorageGuard(repoStorage, {
     onUnsavedChange: (since) => storageEpisode.report(since),
+    onWriteRefused: () => storageEpisode.refused(),
     onClosed: () => storageEpisode.release(),
   });
   const repo = await LoroRepo.create({
