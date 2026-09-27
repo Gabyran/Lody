@@ -262,6 +262,22 @@ The barrier code moved to the self-contained `@lody/shared/renderer-storage-barr
 so Electron's `node --test` suite and the renderer's real-`LoroRepo` tests run the
 same code.
 
+**A system shutdown is a quit too.** On Windows, Electron sends no `before-quit` when
+the app closes for a shutdown, restart or log-off, so none of the above ran and
+changes held only in memory were lost with the process. Review caught it. Every
+window now handles `query-session-end`, and `powerMonitor` `shutdown` covers Linux
+and macOS. The OS wants a synchronous answer, so `createSessionEndGuard` decides from
+what main already knows: the agent's unsaved issue and the windows' reports. With
+nothing unsaved, or a quit already approved, the session end goes ahead at once, so a
+healthy app never holds up a shutdown. Otherwise it holds the session end and calls
+`app.quit()`, which enters the same quit barrier: final flush, question, agent stop.
+The app exiting lets the session end continue; a Cancel keeps the app open and the
+session end held. A test drives a session end with no `before-quit` through the real
+coordinator and barrier. Never holding, holding when healthy, not starting the quit,
+or holding after approval each fails it. Not verified on a real Windows shutdown: the
+system's "apps are preventing shutdown" screen may cover the question, and Electron
+exposes no way to set its block reason.
+
 **Remote-sync persistence failures** are reported like every other write. The first
 revision also raised the Streams persist coalescer's failures from debug to a
 rate-limited warning. #1066 removed that coalescer: each cursor save now waits on a

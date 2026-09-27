@@ -1,6 +1,14 @@
 import { handleWindowContentReady } from './window-target'
 import { installLocalFileResourceProtocol } from './services/local-file-resource-protocol'
-import { app, BrowserWindow, dialog, ipcMain, safeStorage, webContents } from 'electron'
+import {
+  app,
+  BrowserWindow,
+  dialog,
+  ipcMain,
+  powerMonitor,
+  safeStorage,
+  webContents
+} from 'electron'
 import { electronApp, optimizer } from '@electron-toolkit/utils'
 import dns from 'node:dns'
 import { writeHeapSnapshot } from 'node:v8'
@@ -31,6 +39,7 @@ import {
   RendererStorageState,
   WindowStorageBarrier,
   createQuitCoordinator,
+  createSessionEndGuard,
   resolveUnsavedBeforeQuit,
   type RendererStorageQuitCheckOptions,
   type WindowTeardownKind
@@ -271,17 +280,18 @@ export function startApplication(executionHost?: DesktopExecutionHost): void {
     // and the user confirms what is still unsaved. Approval lets windows unload
     // freely; a cancelled or failed quit clears it, and the global quitting flag,
     // so window close/reload is guarded again.
+    const cliUnsavedSince = (): number | null =>
+      cliService
+        .getCliState()
+        .runtime?.issues.find((issue) => issue.code === LOCAL_STORAGE_UNSAVED_ISSUE_CODE)
+        ?.firstSeenAtMs ?? null
     const quitCoordinator = createQuitCoordinator({
-      unsavedSince: async () => {
-        const cliIssue = cliService
-          .getCliState()
-          .runtime?.issues.find((issue) => issue.code === LOCAL_STORAGE_UNSAVED_ISSUE_CODE)
-        return await resolveUnsavedBeforeQuit({
-          cliUnsavedSince: cliIssue?.firstSeenAtMs ?? null,
+      unsavedSince: async () =>
+        await resolveUnsavedBeforeQuit({
+          cliUnsavedSince: cliUnsavedSince(),
           renderer: rendererStorageState,
           quitCheck: rendererQuitCheck
-        })
-      },
+        }),
       confirmDiscard: (since) => confirmStorageLoss(since, 'quit'),
       setAppQuitting
     })
@@ -298,6 +308,22 @@ export function startApplication(executionHost?: DesktopExecutionHost): void {
         )
       }
     })
+    // A shutdown, restart or log-off ends the app without `before-quit` on Windows;
+    // with changes known unsaved, hold it and run the ordinary quit instead.
+    const sessionEndGuard = createSessionEndGuard({
+      unsavedSince: () => {
+        const cli = cliUnsavedSince()
+        const renderer = rendererStorageState.earliestUnsaved()
+        if (cli === null) return renderer
+        return renderer === null ? cli : Math.min(cli, renderer)
+      },
+      quitApproved: quitCoordinator.isApproved,
+      requestQuit: () => setImmediate(() => app.quit())
+    })
+    if (process.platform !== 'win32') {
+      // Electron passes the event to this listener; its typing omits it.
+      powerMonitor.on('shutdown', sessionEndGuard as unknown as () => void)
+    }
     const reloadWindowGuarded = (window: BrowserWindow, ignoreCache = false): void => {
       const reload = (): void => {
         if (window.isDestroyed()) return
@@ -374,6 +400,7 @@ export function startApplication(executionHost?: DesktopExecutionHost): void {
           })
         })
       })
+      window.on('query-session-end', sessionEndGuard)
       window.webContents.on('will-prevent-unload', (event) => {
         if (windowStorageBarrier.onUnloadPrevented(contentsId)) event.preventDefault()
       })

@@ -9,6 +9,7 @@ import {
   RendererStorageState,
   WindowStorageBarrier,
   createQuitCoordinator,
+  createSessionEndGuard,
   resolveUnsavedBeforeQuit,
   tearDownWindows
 } from '@lody/shared/renderer-storage-barrier'
@@ -162,6 +163,85 @@ void test('quit warns for a window whose storage refused changes, even with a he
   await handler({ preventDefault() {} })
   assert.deepEqual(warnings, [1_000])
   assert.equal(stopCalls, 1)
+})
+
+void test('an OS session end holds for unsaved storage and runs the same quit barrier', async () => {
+  const renderer = new RendererStorageState()
+  const quitCheck = {
+    timeoutMs: 3_000,
+    setTimer: () => null,
+    clearTimer: () => {},
+    send: (windowId, requestId) => {
+      // The window's final flush is still refused.
+      queueMicrotask(() => renderer.handleQuitCheckResult(windowId, requestId, 1_000))
+      return true
+    }
+  }
+  const answers = [false, true]
+  const asked = []
+  const coordinator = createQuitCoordinator({
+    unsavedSince: () => resolveUnsavedBeforeQuit({ cliUnsavedSince: null, renderer, quitCheck }),
+    confirmDiscard: async (since) => {
+      asked.push(since)
+      return answers.shift()
+    },
+    setAppQuitting: () => {}
+  })
+  let stopCalls = 0
+  let exited = 0
+  const quitBarrier = createDesktopQuitBarrier({
+    confirmQuit: coordinator.approve,
+    stop: async () => {
+      stopCalls++
+    },
+    quit: () => {
+      exited++
+    },
+    reportFailure: () => {}
+  })
+  // `app.quit()`: Electron emits `before-quit`, which the barrier handles.
+  let quitting = Promise.resolve()
+  const guard = createSessionEndGuard({
+    unsavedSince: () => renderer.earliestUnsaved(),
+    quitApproved: coordinator.isApproved,
+    requestQuit: () => {
+      quitting = quitBarrier({ preventDefault() {} })
+    }
+  })
+  /** A shutdown with no `before-quit`; true when the app held it. */
+  const endSession = () => {
+    let held = false
+    guard({
+      preventDefault() {
+        held = true
+      }
+    })
+    return held
+  }
+
+  // Healthy: the shutdown goes ahead at once, and nobody is asked.
+  assert.equal(endSession(), false)
+  await quitting
+  assert.deepEqual(asked, [])
+  assert.equal(exited, 0)
+
+  // Window 7's storage refused changes: the shutdown is held and the quit asks.
+  renderer.report(7, 1_000)
+  assert.equal(endSession(), true)
+  await quitting
+  assert.deepEqual(asked, [1_000])
+  assert.equal(stopCalls, 0)
+  assert.equal(exited, 0)
+
+  // They cancelled to keep the changes; the next attempt is held and asked again.
+  assert.equal(endSession(), true)
+  await quitting
+  assert.deepEqual(asked, [1_000, 1_000])
+  assert.equal(exited, 1)
+  assert.equal(stopCalls, 1)
+
+  // Approved: a repeated session end is not held any longer.
+  assert.equal(endSession(), false)
 })
 
 void test('a window that does not answer, or cannot be asked, keeps its last report', async () => {

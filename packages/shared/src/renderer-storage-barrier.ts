@@ -347,6 +347,33 @@ export async function tearDownWindows(options: {
 }
 
 /** Auth error code when the user kept unsaved changes instead of signing out. */
+/**
+ * The OS is ending the session: a window's `query-session-end` on Windows (which
+ * sends no `before-quit` for a shutdown, restart or log-off), `powerMonitor`
+ * `shutdown` on Linux and macOS. Without this the quit barrier never runs, and
+ * changes that exist only in memory are lost with the process.
+ *
+ * With nothing known unsaved, or a quit already approved, the session end goes
+ * ahead at once: a healthy app must never hold up a shutdown. Otherwise it is held
+ * (synchronously, as the OS requires) and the ordinary quit is requested, so the
+ * same barrier flushes, asks, and stops the agent; the app exiting lets the
+ * session end continue. A quit the user cancels keeps the app, and the session
+ * end stays held.
+ */
+export function createSessionEndGuard(options: {
+  /** What is already known unsaved, without asking anyone: the OS answer is synchronous. */
+  unsavedSince: () => number | null;
+  quitApproved: () => boolean;
+  /** Starts the ordinary quit (`app.quit()`), after the OS query has been answered. */
+  requestQuit: () => void;
+}): (event: { preventDefault: () => void }) => void {
+  return (event) => {
+    if (options.quitApproved() || options.unsavedSince() === null) return;
+    event.preventDefault();
+    options.requestQuit();
+  };
+}
+
 export const SIGN_OUT_CANCELLED_CODE = 'sign_out_cancelled_unsaved_storage';
 
 export type QuitCoordinator = {

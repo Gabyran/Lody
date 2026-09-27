@@ -22,11 +22,11 @@ The daemon judges the volume holding its data directory by two signals:
   applies at once, without waiting for the next sample. Errors are classified by
   code or name, never by message text.
 
-| Level | When | Effect |
-| --- | --- | --- |
-| `ok` | free space above the warning threshold, no refused write | none |
-| `warning` | free space below the warning threshold | informs; dismissible |
-| `critical` | free space below the critical threshold, or a write was refused | degraded mode |
+| Level      | When                                                            | Effect               |
+| ---------- | --------------------------------------------------------------- | -------------------- |
+| `ok`       | free space above the warning threshold, no refused write        | none                 |
+| `warning`  | free space below the warning threshold                          | informs; dismissible |
+| `critical` | free space below the critical threshold, or a write was refused | degraded mode        |
 
 Thresholds scale with the volume and are capped at both ends:
 
@@ -112,6 +112,13 @@ main process. On quit, every window holding unsaved changes is asked to flush on
 more and answer. A window that does not answer within 3 seconds keeps its last
 report; silence is not proof that it saved. The question names the earliest unsaved
 change. Quitting then loses changes not yet synced elsewhere.
+
+The same applies when the system ends the session — a shutdown, restart or log-off —
+which on Windows closes the app without its ordinary quit. With changes known unsaved,
+the desktop holds the session end and runs that same quit: the final flush, the
+question, stopping the local agent. It exits once that quit is approved, letting the
+session end continue. Cancel keeps the app open and the session end held. With
+nothing unsaved it never delays a shutdown.
 
 Closing or reloading a single window is held to the same rule, because the window's
 memory is where those changes live. While its own repo holds unsaved changes, the
