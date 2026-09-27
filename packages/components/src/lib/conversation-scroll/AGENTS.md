@@ -23,8 +23,8 @@ Design, invariants I1–I8 and the coverage lemma:
   outside the fixed leading/agent-activity rows stay at least `ENGINE_MIN_ROW_PX`.
 - Reading anchors are separate from React row keys: resolve through `anchor.ts`
   rules, never by list index.
-- `keyed-layout/` came from `@lody/virtua` with its tests; engine extensions are
-  marked `Engine:`. It is engine-owned now: change it here, not in the fork.
+- `keyed-layout/` came from Lody's removed Virtua fork with its tests; engine
+  extensions are marked `Engine:`. It is engine-owned: keep its MIT `LICENSE`.
 - Change the transaction logic only with a model test in
   `tests/conversation-scroll-engine.test.ts` (seeded sequences included) and, for
   adapter changes, `tests/engine-conversation-scroller.test.tsx`.

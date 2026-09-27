@@ -80,11 +80,10 @@ defines locale-specific spacing for these labels.
   "Exited Plan Mode" card may follow an answer, so the answer is not necessarily
   the final stream item.
 
-- **Keyed `@lody/virtua` and `bufferSize`.** Upstream `shift` reuses stale
-  cumulative heights (rows overlap) and only covers rows added at the start;
-  placeholder turns expand in the middle. The keyed fork keeps sizes with row keys
-  and the row at the viewport start in place
-  ([note](../../../../../.agents/notes/implemented/architecture/2026-09-24-virtua-keyed-fork.md)).
+- **Keyed sizes and `bufferSize`.** Placeholder turns expand in the middle of the
+  list, so the scroll engine keeps sizes with row keys and holds the reader's row
+  through its reading anchor
+  ([note](../../../../../.agents/notes/implemented/architecture/2026-09-27-conversation-scroll-engine.md)).
   `bufferSize` is a trade between blank space during a fast scroll and keeping
   resizing rows mounted.
 - **`buildChatStreamItems()` filtering.** An empty assistant entry renders `null`,

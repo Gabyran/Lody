@@ -21,7 +21,7 @@ Edit `AGENTS.md`, not its `CLAUDE.md` symlink. Ownership: [README.md](README.md)
   history ids.
 - `leadingContent` is a real first row: include it in sticky counts and scroll
   targets; never overlay or persist it.
-- Empty-state presentation stays outside Virtua, even with an empty leading Fragment:
+- Empty-state presentation stays outside the list, even with an empty leading Fragment:
   zero-height caches can hide the first user row. Preserve live activity labels/tones.
   Apply the header inset once to the whole scroller.
 - Create `operation_progress` cards update in place per materialized target; bind
@@ -67,7 +67,7 @@ Edit `AGENTS.md`, not its `CLAUDE.md` symlink. Ownership: [README.md](README.md)
   has no footer.
 - Streaming replies use a direct Copy action and turn-config info (set at open);
   Fork controls and loading need a finished turn.
-- The gutter belongs to `ConversationColumn`, not Virtua. EVERY row shares one left rail with no shell pad, INCLUDING
+- The gutter belongs to `ConversationColumn`, not the list. EVERY row shares one left rail with no shell pad, INCLUDING
   the contents of an expanded region: expanding reveals rows, it never shifts
   them right; the chevron carries the hierarchy. Prose, desktop group/status
   labels, and steps share a fixed 4px inset. Steps use `px-[4px]` with
@@ -120,7 +120,7 @@ Edit `AGENTS.md`, not its `CLAUDE.md` symlink. Ownership: [README.md](README.md)
 - Attachment and mobile image-preview invariants live in
   [session-files-rendering.md](session-files-rendering.md).
 - Markdown images remember each source's natural size or failure for the page's
-  life: a Virtua remount must render at its final height (failed sources show alt text).
+  life: a virtualized remount must render at its final height (failed sources show alt text).
 - Live file Markdown images use the owning file provider: same-machine reads are
   automatic; remote reads require a per-image click. Never grant this resolver to
   anonymous shares. Release owned Blob URLs on cleanup and ignore late reads.

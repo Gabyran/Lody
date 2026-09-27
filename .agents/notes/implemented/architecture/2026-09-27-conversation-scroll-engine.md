@@ -763,6 +763,12 @@ collected after release, through the diagnostics below.
     report, in `SessionChatStream`.
   - The row component types (`ConversationRowComponentProps`) belong to
     `conversation-list/`. The conversation no longer imports `@lody/virtua`.
+- **The fork is removed.** Without the conversation, nothing passed `keyed`: sizes by
+  key live in the engine's copied `keyed-layout/`, and the reading anchor replaced
+  Virtua-side anchoring. After formatting, the fork differed from upstream 0.52.7 only
+  in the keyed changes, so `packages/virtua` is deleted and the two `VList` users
+  (paged file viewer, project settings) depend on upstream `virtua` 0.52.7. Virtua's
+  MIT license moved to `keyed-layout/LICENSE`.
 - **Found while removing the old path.** A range starting at a zero-height row skipped
   the other zero-height rows on the same line, such as an empty leading Fragment. The
   range start now walks back over them.
@@ -824,8 +830,6 @@ collected after release, through the diagnostics below.
 - After release: read the momentum counts and the diagnostics, decide on the iOS
   positive-shift extension, audit rows below `ENGINE_MIN_ROW_PX`, and profile long
   conversations.
-- `@lody/virtua` still carries its `keyed` changes with no consumer. Remove them,
-  or move the two `VList` users back to upstream.
 - The Spec is revised as `draft` (restore by row; never blank on open).
 
 ## Evidence

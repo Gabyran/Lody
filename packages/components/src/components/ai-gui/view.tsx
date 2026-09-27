@@ -491,7 +491,7 @@ const NativeSelectionRowsContext = createContext<{
   leading: number;
   held: ReadonlySet<string>;
 }>({ rows: [], leading: 0, held: new Set() });
-// Keys of the two Virtua rows that are not conversation rows (`keyed` needs one per row).
+// Keys of the two list rows that are not conversation rows (the engine keys every row).
 const LEADING_ROW_KEY = '\u0000leading';
 const AGENT_ACTIVITY_ROW_KEY = '\u0000agent-activity';
 

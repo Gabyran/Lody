@@ -1,12 +1,12 @@
 // @vitest-environment jsdom
 import { act, createRef, type ReactElement } from 'react';
 import { createRoot } from 'react-dom/client';
-import type { CustomItemComponentProps } from '@lody/virtua';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import type { SessionId } from '@lody/shared';
 import { EngineConversationScroller } from '../src/components/ai-gui/conversation-list/engine-conversation-scroller';
 import type {
   ConversationListHandle,
+  ConversationRowComponentProps,
   ConversationScrollerState,
 } from '../src/components/ai-gui/conversation-list/types';
 import { clearSavedScrollStates } from '../src/lib/conversation-scroll/saved-state';
@@ -24,7 +24,7 @@ import { createFrameHarness, type FrameHarness } from './support/scroll-frame-ha
 const VIEWPORT = 400;
 const ROW = 100;
 
-function Row({ index, ...props }: CustomItemComponentProps) {
+function Row({ index, ...props }: ConversationRowComponentProps) {
   return <div {...props} data-virtual-index={index} />;
 }
 

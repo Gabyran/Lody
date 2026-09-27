@@ -1,4 +1,4 @@
-// Moved with the keyed list layout from packages/virtua/src/core/layouts/list.spec.ts.
+// Moved with the keyed list layout from the removed Virtua fork (core/layouts/list.spec.ts).
 import { describe, it, expect } from 'vitest';
 import { createListLayout } from '../src/lib/conversation-scroll/keyed-layout/list';
 

@@ -1,5 +1,5 @@
-// Moved with the keyed list layout from packages/virtua/tests/keyed-list.test.ts
-// (the layout cases; the store cases stay with the fork's store).
+// Moved with the keyed list layout from the removed Virtua fork (tests/keyed-list.test.ts)
+// (the layout cases; the store cases were removed with the fork).
 import { describe, expect, it } from 'vitest';
 import { createListLayout } from '../src/lib/conversation-scroll/keyed-layout/list';
 

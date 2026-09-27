@@ -533,6 +533,9 @@ keyed 布局本身已在 P2 迁入引擎。
 - **P3。**`EngineConversationScroller`（React 适配器）、由 `ChatVirtualRow` 构建的行元数据，以及在 `SessionChatStream`
   中于第一次视口上报前加载恢复锚点所在 turn 的水合窗口。行组件类型（`ConversationRowComponentProps`）归
   `conversation-list/` 所有，对话不再导入 `@lody/virtua`。
+- **fork 已删除。**对话移走后已没有地方传 `keyed`：按 key 保存尺寸由引擎复制的 `keyed-layout/` 负责，
+  阅读锚点取代了 Virtua 侧的锚定。格式化后，fork 与上游 0.52.7 只差 keyed 改动，因此删除了 `packages/virtua`，
+  两个 `VList` 使用方（分页文件查看器、项目设置）改为依赖上游 `virtua` 0.52.7。Virtua 的 MIT 许可证移到 `keyed-layout/LICENSE`。
 - **移除旧路径时发现的问题。**范围起点若落在零高度行上，会漏掉同一条线上的其他零高度行（例如空的 leading Fragment）；
   现在范围起点会向前回溯越过它们。
 - **大纲跳转落点偏过目标轮次（staging 测试中发现）。**`view.tsx` 里 Virtua 时代的修正循环还在运行：`scrollend` 时它按点击时
@@ -577,7 +580,6 @@ keyed 布局本身已在 P2 迁入引擎。
 
 **剩余：**
 - 上线后：读取惯性计数和诊断，决定是否做 iOS 正方向延期扩展，审计低于 `ENGINE_MIN_ROW_PX` 的行，并剖析长对话性能。
-- `@lody/virtua` 仍带着已无使用方的 `keyed` 改动：移除它们，或让两个 `VList` 使用方回到上游。
 - Spec 已按 `draft` 修订（按行恢复；打开时绝不空白）。
 
 ## 证据
