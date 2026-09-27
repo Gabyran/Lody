@@ -5,6 +5,8 @@ Translation: current
 
 [English](2026-09-27-cli-log-survives-full-disk.md)
 
+PR：[#1056](https://github.com/LodyAI/Lody/pull/1056)
+
 ## 摘要
 
 Lody 数据目录所在磁盘写满后，守护进程下一次写文件日志时会在一个无人监听的 stream 上
@@ -67,6 +69,6 @@ host 日志都通过 `createFileTransport` 构建它。
   同步 stdio stream 崩溃。守护进程路径不会这样做。
 - `acp-extension-claude` 中未防护的 `CLAUDE_AGENT_LOGS` 写入只在该包的独立二进制中运行，
   CLI 不会启动它。
-- 恢复警告在触发重新打开的那一行之后才格式化，因此它的时间戳可能比那一行早一毫秒。
+- 恢复警告写在触发重新打开的那一行之前，但格式化在其之后，因此它的时间戳可能比下一行晚几毫秒。
 - issue #1054 的第 2–4 层仍待处理：`statfs` 检测与机器健康状态、针对已分类存储错误的用户提示、
   暂停磁盘密集型工作的降级模式，以及压舱文件。loro-repo 侧由 loro-dev/loro-repo#139 跟踪。

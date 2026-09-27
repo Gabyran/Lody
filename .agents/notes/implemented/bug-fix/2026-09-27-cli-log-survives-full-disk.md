@@ -5,6 +5,8 @@ Translation: current
 
 [中文](2026-09-27-cli-log-survives-full-disk.zh.md)
 
+PR: [#1056](https://github.com/LodyAI/Lody/pull/1056)
+
 ## Abstract
 
 When the disk holding the Lody data directory filled up, the daemon's next file
@@ -88,8 +90,9 @@ stdio are pipes, not files.
   path does not do this.
 - The unguarded `CLAUDE_AGENT_LOGS` writer in `acp-extension-claude` only runs in
   that package's standalone binary, which the CLI does not launch.
-- The resume warning is formatted after the line that triggered the reopen. Its
-  timestamp can therefore precede that line's by a millisecond.
+- The resume warning is written before the line that triggered the reopen but
+  formatted after it, so its timestamp can be a few milliseconds later than that
+  of the next line.
 - Issue #1054 layers 2–4 remain open: `statfs` detection and machine health, user
   warnings for classified storage errors, a degraded mode that pauses disk-heavy
   work, and a ballast file. The loro-repo side is tracked in loro-dev/loro-repo#139.
