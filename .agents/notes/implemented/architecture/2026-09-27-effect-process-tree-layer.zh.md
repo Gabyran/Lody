@@ -71,7 +71,7 @@ shell 包装先退出、它启动的 agent 仍在运行时，终止照样继续�
 提供 Layer；守护进程运行时随 L4 引入，那里的会话池是第一个守护进程级的拥有者。现在就把 turn fiber
 迁到守护进程作用域，会在下层完成之前先改动 L5。
 
-## 后续：CLI 中所有进程调用方
+## 后续：CLI 中所有进程调用方（[#1069](https://github.com/LodyAI/Lody/pull/1069)）
 
 下一个叠加的 PR 把 `apps/cli/src` 中其余所有进程调用方迁到这一层——git 与 gh 调用、daemon /
 worker / MCP host 子进程、隧道、setup 脚本、内存探测、升级安装和 PTY 终止——只留下一套实现。

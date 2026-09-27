@@ -113,7 +113,7 @@ Layers per call, and the daemon runtime arrives with L4, whose session pool is
 its first daemon-scoped owner. Rewiring the turn fiber onto a daemon scope now
 would touch L5 before the layers beneath it are finished.
 
-## Follow-up: every CLI process caller
+## Follow-up: every CLI process caller ([#1069](https://github.com/LodyAI/Lody/pull/1069))
 
 The next stacked PR moves every remaining process caller in `apps/cli/src` onto the
 layer:
