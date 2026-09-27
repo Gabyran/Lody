@@ -502,27 +502,67 @@ describe('createWorkspaceRuntime meta recovery lifecycle', () => {
     await runtime.dispose();
   });
 
-  it('drops a Meta checkpoint marked suspect by a previous page lifetime before attaching Streams', async () => {
-    mocks.joinMetaRoom.mockResolvedValueOnce(createMetaSub(Promise.resolve()));
-    window.localStorage.setItem(
-      `${META_REMOTE_CURSOR_BYPASS_STORAGE_KEY_PREFIX}:workspace-1`,
-      JSON.stringify({ reason: 'previous timeout' })
-    );
+  const markerKey = `${META_REMOTE_CURSOR_BYPASS_STORAGE_KEY_PREFIX}:workspace-1`;
+  const markSuspectMetaCheckpoint = () =>
+    window.localStorage.setItem(markerKey, JSON.stringify({ reason: 'previous timeout' }));
+  const cloudAttachCalls = () =>
+    mocks.addTransport.mock.calls.filter(([transportId]) => transportId === 'cloud');
 
+  it('does not attach Streams on the web until a suspect Meta checkpoint is really deleted', async () => {
+    mocks.joinMetaRoom.mockResolvedValue(createMetaSub(Promise.resolve()));
+    markSuspectMetaCheckpoint();
+    mocks.metaCheckpointDelete.mockRejectedValueOnce(
+      new Error('The database connection is closing.')
+    );
     const runtime = await createWorkspaceRuntime({
       workspaceSlug: 'workspace',
       workspaceId: 'workspace-1' as WorkspaceId,
       apiBaseUrl: 'https://api.example.test',
-      token: 'auth-token',
     });
 
-    expect(mocks.metaCheckpointDelete).toHaveBeenCalledTimes(1);
-    expect(mocks.addTransport).toHaveBeenCalledWith('cloud', expect.anything(), expect.anything());
-    // Deleted before the cloud transport could start a Meta session from it.
-    expect(mocks.metaCheckpointDelete.mock.invocationCallOrder[0]).toBeLessThan(
-      mocks.addTransport.mock.invocationCallOrder[0] ?? 0
+    // Resuming from the undeleted checkpoint could skip Meta history for good.
+    await expect(runtime.setAuthToken('auth-token-1')).rejects.toThrow('connection is closing');
+    expect(cloudAttachCalls()).toEqual([]);
+    expect(window.localStorage.getItem(markerKey)).not.toBeNull();
+
+    // The next attach retries the delete and only then starts a Meta session.
+    await runtime.setAuthToken('auth-token-2');
+    expect(mocks.metaCheckpointDelete).toHaveBeenCalledTimes(2);
+    expect(mocks.metaCheckpointDelete.mock.calls[1]?.[0]).toMatch(/\/workspace-1%3Ameta$/);
+    expect(cloudAttachCalls()).toHaveLength(1);
+    expect(mocks.metaCheckpointDelete.mock.invocationCallOrder[1]).toBeLessThan(
+      mocks.addTransport.mock.invocationCallOrder.at(-1) ?? 0
     );
-    expect(mocks.metaCheckpointDelete.mock.calls[0]?.[0]).toMatch(/\/workspace-1%3Ameta$/);
+    await flushPromises();
+    expect(window.localStorage.getItem(markerKey)).toBeNull();
+
+    await runtime.dispose();
+  });
+
+  it('does not attach the cloud plane in dual mode until a suspect Meta checkpoint is really deleted', async () => {
+    mocks.joinMetaRoom.mockResolvedValue(createMetaSub(Promise.resolve()));
+    enableElectronLocalDataPlane();
+    markSuspectMetaCheckpoint();
+    mocks.metaCheckpointDelete.mockRejectedValueOnce(
+      new Error('The database connection is closing.')
+    );
+    const runtime = await createWorkspaceRuntime({
+      workspaceSlug: 'workspace',
+      workspaceId: 'workspace-1' as WorkspaceId,
+      apiBaseUrl: 'https://api.example.test',
+    });
+
+    await expect(runtime.setAuthToken('auth-token')).rejects.toThrow('connection is closing');
+    expect(cloudAttachCalls()).toEqual([]);
+    expect(window.localStorage.getItem(markerKey)).not.toBeNull();
+
+    // Same path as the cloud reconnect loop: attach while not attached.
+    await runtime.setAuthToken('auth-token');
+    expect(mocks.metaCheckpointDelete).toHaveBeenCalledTimes(2);
+    expect(cloudAttachCalls()).toHaveLength(1);
+    expect(mocks.metaCheckpointDelete.mock.invocationCallOrder[1]).toBeLessThan(
+      mocks.addTransport.mock.invocationCallOrder.at(-1) ?? 0
+    );
 
     await runtime.dispose();
   });

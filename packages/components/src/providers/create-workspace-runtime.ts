@@ -521,6 +521,11 @@ export async function createWorkspaceRuntime(deps: RuntimeDeps): Promise<Workspa
   let initialMetaSyncFailed = false;
   let metaFirstSyncRecovery: Promise<void> | null = null;
   let metaRemoteCursorInvalidated = false;
+  // Whether the suspect Meta checkpoint named by the bypass marker has actually
+  // been deleted in this page lifetime. The marker may only be cleared then: a
+  // Meta session that resumed from an undeleted suspect checkpoint can sync
+  // "successfully" while still missing the prefix it skipped.
+  let suspectMetaCheckpointDropped = false;
   const metaSyncState = (): RoomSyncState => metaTracker?.getSyncState() ?? 'idle';
 
   // workspaceId is required and provided at initialization
@@ -726,13 +731,20 @@ export async function createWorkspaceRuntime(deps: RuntimeDeps): Promise<Workspa
       return;
     }
 
-    metaRemoteCursorInvalidated = true;
+    suspectMetaCheckpointDropped = false;
     const metaStreamId = getLoroMetaStreamId(workspaceId);
-    const metaStreamUrl = getMetaStreamUrl(
-      transportStreamsBaseUrl ?? getStreamsBaseUrlForProvider(streamsTokenProvider)
-    );
     try {
-      await deleteMetaCheckpoint(metaStreamUrl);
+      // Throws before a Streams provider exists; the marker then makes the
+      // next cloud attach delete the checkpoint instead.
+      await deleteMetaCheckpoint(
+        getMetaStreamUrl(
+          transportStreamsBaseUrl ?? getStreamsBaseUrlForProvider(streamsTokenProvider)
+        )
+      );
+      // One-shot per lifetime only once the delete really happened; a failed
+      // delete leaves the marker set and lets the next failure or attach retry.
+      metaRemoteCursorInvalidated = true;
+      suspectMetaCheckpointDropped = true;
       console.warn('Deleted Loro Streams meta remote cursor after sync failure', {
         workspaceId,
         metaStreamId,
@@ -750,18 +762,15 @@ export async function createWorkspaceRuntime(deps: RuntimeDeps): Promise<Workspa
     }
   };
 
-  // A previous page lifetime may have timed out before deleting a suspect Meta
-  // checkpoint. The marker persists that intent; honor it before the cloud
-  // transport starts a Meta session. Successful Meta sync clears the marker.
-  const dropBypassedMetaCheckpoint = async (streamsBaseUrl: string): Promise<void> => {
-    try {
-      await deleteMetaCheckpoint(getMetaStreamUrl(streamsBaseUrl));
-    } catch (deleteError) {
-      console.warn('Failed to drop bypassed Loro Streams meta checkpoint', {
-        workspaceId,
-        deleteError,
-      });
-    }
+  // While the bypass marker is set, every new Meta session must start without
+  // the suspect checkpoint (a previous page lifetime may have failed or timed
+  // out before deleting it). Callers check the marker synchronously, so an
+  // unmarked attach keeps its timing. This is a hard precondition of attaching
+  // the cloud transport: a failed delete rejects the attach, keeps the marker,
+  // and leaves the retry to the existing attach/reconnect paths.
+  const dropSuspectMetaCheckpointBeforeAttach = async (streamsBaseUrl: string): Promise<void> => {
+    await deleteMetaCheckpoint(getMetaStreamUrl(streamsBaseUrl));
+    suspectMetaCheckpointDropped = true;
   };
 
   const clearReconnectingStatusTimer = () => {
@@ -2922,7 +2931,7 @@ export async function createWorkspaceRuntime(deps: RuntimeDeps): Promise<Workspa
       createMachineRpcJsonStreamClient(activeStreamsTokenProvider, streamsBaseUrl);
 
       if (isMetaRemoteCursorBypassActive()) {
-        await dropBypassedMetaCheckpoint(streamsBaseUrl);
+        await dropSuspectMetaCheckpointBeforeAttach(streamsBaseUrl);
       }
       const transportAdapter = createStreamsDurableTransport(
         activeStreamsTokenProvider,
@@ -2990,7 +2999,7 @@ export async function createWorkspaceRuntime(deps: RuntimeDeps): Promise<Workspa
         // addTransport joins routed rooms but does not await their catch-up
         // (per-room first sync stays observable on each cloud binding).
         if (isMetaRemoteCursorBypassActive()) {
-          await dropBypassedMetaCheckpoint(streamsBaseUrl);
+          await dropSuspectMetaCheckpointBeforeAttach(streamsBaseUrl);
         }
         await repo.addTransport('cloud', createStreamsDurableTransport(provider, streamsBaseUrl), {
           ephemeral: true,
@@ -3132,7 +3141,9 @@ export async function createWorkspaceRuntime(deps: RuntimeDeps): Promise<Workspa
           initialMetaSyncCompleted = true;
           initialMetaSyncFailed = false;
           currentMetaTracker.markFirstSynced();
-          clearMetaRemoteCursorBypass();
+          if (suspectMetaCheckpointDropped) {
+            clearMetaRemoteCursorBypass();
+          }
           // Claim the single-outcome slot on success so a later transient
           // failure can't emit a false meta_sync_failed/timed_out. The success
           // event itself was removed as low-value (high volume, no churn signal).

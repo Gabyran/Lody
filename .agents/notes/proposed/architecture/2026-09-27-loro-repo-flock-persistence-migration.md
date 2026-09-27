@@ -26,7 +26,7 @@ The proposal is a staged rollout:
 3. Give the CLI real data-before-cursor barriers.
 4. Only after an upstream `SqliteRepoStore` replica capability exists, bind the CLI's cursors the same way.
 
-No existing cursor is copied. The only migration cost is one bootstrap per Meta/Flock room, which is also the only way to repair an already-damaged cache. Only step 1 is implemented, with a cross-version storage check; nothing has been measured. The main unverified risk is the write cost of IndexedDB's strict durability on busy workspaces.
+No existing cursor is copied. The only migration cost is one bootstrap per Meta/Flock room, which is also the only way to repair an already-damaged cache. Step 1 has shipped (#1049) and step 2 is #1058. Step 3 was folded into step 4, which is implemented on a branch awaiting the loro-repo release. Measurement found one real cost: IndexedDB's strict durability makes cloud-mode flush barriers about N× slower when N resources are dirty. It does not affect correctness; step 2's per-resource barriers reduce it, and loro-repo#140 addresses the rest.
 
 ## Upstream change (0.20.0 → 0.20.3, `main` at `5862a2b`)
 
@@ -192,6 +192,11 @@ Separately, a real full disk makes the CLI daemon exit through an uncaught log-t
   - A drifted Meta key fails the recovery test.
   - Dropping the startup deletion fails the new marker test in `create-workspace-runtime-meta-recovery.test.ts`.
 - **Test-isolation fix.** That file's tests now stub `globalThis.localStorage` per test. The runtime reads it, and a bypass marker from one test previously leaked into every later one.
+- **Review fix (P1).** Deleting the suspect Meta checkpoint is now a hard precondition of the cloud attach, on both the web and dual paths.
+  - If the delete rejects (for example, the IndexedDB connection is closing), the attach fails, the marker is kept, and the existing attach/reconnect paths retry. Previously the failure was swallowed, the transport resumed from the suspect checkpoint, and the next successful sync cleared the marker for good.
+  - Runtime invalidation latches its one-shot flag only after a successful delete.
+  - The marker is cleared only once this page lifetime has actually deleted the checkpoint.
+  - Regressions: for both web and dual, a rejected delete means no `addTransport('cloud')` and the marker survives; the next attach deletes first, then attaches. Both fail against the reviewed head.
 - **Merge gate for the web.** Mixed-version tabs need loro-dev/loro-repo#138. Electron runs one bundle for all windows, so it is exposed only on rollback.
 
 ### Phase 2: real CLI barriers (independent of upstream)
