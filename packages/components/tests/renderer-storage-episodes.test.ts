@@ -398,6 +398,98 @@ describe('refusals inside an open episode', () => {
     await guard.close();
   });
 
+  describe('while the user is asked on a full disk', () => {
+    /** Window 1 holds a refused write; the barrier asks, and `duringQuestion` runs meanwhile. */
+    const setup = async (
+      duringQuestion: (
+        repo: LoroRepo,
+        guard: RepoStorageGuard,
+        refusedSaves: () => number
+      ) => Promise<void>
+    ) => {
+      const state = new RendererStorageState();
+      const episodes = new RendererStorageEpisodes((since) => state.report(1, since));
+      const store = createQuotaStore();
+      let refusedSaves = 0;
+      const adapter: StorageAdapter = {
+        ...store.adapter,
+        save: async (payload) => {
+          if (store.state.full) refusedSaves++;
+          await store.adapter.save(payload);
+        },
+        saveMany: async (payloads) => {
+          if (store.state.full) refusedSaves++;
+          await store.adapter.saveMany!(payloads);
+        },
+      };
+      const episode = episodes.register(() => guard.flushNow());
+      const guard = new RepoStorageGuard(adapter, {
+        onUnsavedChange: (since) => episode.report(since),
+        onWriteRefused: () => episode.refused(),
+        now: () => 1_000,
+        setTimer: () => null,
+        clearTimer: () => {},
+      });
+      const repo = await LoroRepo.create({
+        storageAdapter: guard.adapter,
+        metaDebounceCommitMs: 0,
+      });
+      guard.attach(repo);
+      const confirms: number[] = [];
+      const barrier = new WindowStorageBarrier({
+        state,
+        quitApproved: () => false,
+        confirmDiscard: async (since) => {
+          confirms.push(since);
+          if (confirms.length === 1) await duringQuestion(repo, guard, () => refusedSaves);
+          return true; // "Sign Out Anyway"
+        },
+        quitCheck: {
+          timeoutMs: 3_000,
+          setTimer: () => null,
+          clearTimer: () => {},
+          send: (windowId, requestId) => {
+            void episodes
+              .flushForQuit()
+              .then((since) => state.handleQuitCheckResult(windowId, requestId, since));
+            return true;
+          },
+        },
+      });
+      store.state.full = true;
+      const lease = await repo.acquireDoc('doc-a');
+      lease.doc.getText('body').insert(0, 'typed while full');
+      lease.doc.commit();
+      await repo.upsertDocMeta('doc-a', { title: 'typed while full' });
+      await expect(repo.flush()).rejects.toThrow();
+      const approved = await barrier.approveTeardown([1], 'sign-out');
+      store.state.full = false;
+      await lease.release();
+      await guard.close();
+      return { approved, confirms };
+    };
+
+    it('asks once when only a retry of the same data is refused meanwhile', async () => {
+      const result = await setup(async (_repo, guard, refusedSaves) => {
+        const before = refusedSaves();
+        // Recovery retries on its backoff while the question is open, and is refused again.
+        await expect(guard.flushNow()).resolves.toBe(1_000);
+        expect(refusedSaves()).toBeGreaterThan(before);
+      });
+      expect(result.approved).toBe(true);
+      expect(result.confirms).toEqual([1_000]);
+    });
+
+    it('asks again when new data is refused meanwhile', async () => {
+      const result = await setup(async (repo) => {
+        await repo.upsertDocMeta('doc-b', { title: 'typed while the question was open' });
+        await expect(repo.persistMetaNow()).rejects.toThrow();
+      });
+      expect(result.approved).toBe(true);
+      expect(result.confirms).toEqual([1_000, 1_000]);
+    });
+  });
+
   it("reaches main before the window's next task, not with the IPC queue", () => {
     // Main as the preload bridge reaches it: `send` is delivered later, like any
     // async IPC message; `sendSync` returns only once main handled it.

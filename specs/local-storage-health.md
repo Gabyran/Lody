@@ -138,7 +138,9 @@ Signing out and clearing the local cache close the other windows without giving
 them a chance to unload, so both ask first: every window holding unsaved changes
 flushes, and whatever is still unsaved gets one confirmation. A window that becomes
 unsaved while this is going on is flushed and included in a new question; an answer
-only covers what it was about. Cancel stops the sign-out or the clear, and nothing is
+only covers what it was about. New data refused while the question is open counts;
+the app retrying changes already asked about does not, so a full disk cannot keep
+asking the same question. Cancel stops the sign-out or the clear, and nothing is
 closed or changed. For a sign-out, including this window's own sign-in state: the
 question is settled before anything about the session changes.
 

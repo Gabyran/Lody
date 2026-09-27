@@ -172,9 +172,11 @@ export type RepoStorageGuardOptions = Omit<StorageFullRecoveryOptions, 'flush' |
   /** The repo was destroyed; after a retained close, only once its changes were saved. */
   onClosed?: () => void;
   /**
-   * Every write refused for lack of space, including those inside an episode
-   * that already started (whose `since` does not change). Lets a caller notice
-   * data that became unsaved after it last looked.
+   * New data refused for lack of space, including inside an episode that already
+   * started (whose `since` does not change). Lets a caller notice data that became
+   * unsaved after it last looked. A retry of data already refused in this episode
+   * (recovery, a final flush) is not new: it is the same payload, and reporting it
+   * would void every answer the user gives while the disk stays full.
    */
   onWriteRefused?: () => void;
 };
@@ -190,6 +192,9 @@ export class RepoStorageGuard {
   private repo: GuardedRepo | null = null;
   private closing = false;
   private closed = false;
+  /** What was refused in the current episode (`RefusedStorageWrite`). */
+  private readonly refusedKeys = new Set<string>();
+  private readonly refusedTargets = new Set<string>();
 
   constructor(
     inner: StorageAdapter,
@@ -208,14 +213,30 @@ export class RepoStorageGuard {
         await this.repo.flush();
       },
       onChange: (state) => {
+        if (state === null) {
+          this.refusedKeys.clear();
+          this.refusedTargets.clear();
+        }
         options.onUnsavedChange(state?.since ?? null);
         // A close that had to wait for space finishes as soon as recovery saved everything.
         if (state === null && this.closing) void this.finishClose();
       },
     });
     this.adapter = observeStorageAdapterWrites(inner, {
-      onWriteFailed: (error) => {
-        if (this.recovery.reportWriteFailed(error)) options.onWriteRefused?.();
+      onWriteFailed: (error, _operation, writes) => {
+        if (!this.recovery.reportWriteFailed(error)) return;
+        let fresh = writes.length === 0;
+        for (const write of writes) {
+          const key = `${write.target}\u0000${write.key}`;
+          const seen =
+            write.shape === 'exact'
+              ? this.refusedKeys.has(key)
+              : this.refusedTargets.has(write.target);
+          if (!seen) fresh = true;
+          this.refusedKeys.add(key);
+          this.refusedTargets.add(write.target);
+        }
+        if (fresh) options.onWriteRefused?.();
       },
       onWriteSucceeded: () => this.recovery.reportWriteSucceeded(),
     });

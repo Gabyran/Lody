@@ -213,6 +213,36 @@ approvals depend on it too. Tests:
   later.
   Restoring the debounce, or sending asynchronously, each fails one of them.
 
+**A retry is not new data.** Every refused write counted as a refusal, including
+the final flush that asks a window what is still unsaved, and the guard's own
+backoff retries. With the throttle, a question left open past half a second saw a
+"new" refusal, started another round, and asked again. Review caught this as a
+loop that made sign-out and cache clear impossible on a full disk. The synchronous
+report closes the final-flush part, but a backoff retry while the question is open
+would do the same. The guard now counts only refusals of data it had not seen
+refused in this episode. `observeStorageAdapterWrites` describes each refused write:
+
+- _Exact_ payloads (a doc update, JSON Flock records, a delete) carry exactly the
+  pending changes, and loro-repo retries them byte for byte, so a new hash means
+  new data.
+- _Whole_ payloads (a snapshot, or a binary Flock file) re-encode state under their
+  target. Count them only for a target not refused before.
+
+A probe found why this second kind matters. After three failed attempts,
+loro-repo's persistence journal adds a Flock-file snapshot of all metadata to the
+same flush, which is a new byte string for the same records. Records received from
+sync are saved in that binary form too. Real `LoroRepo` tests:
+
+- A retry during the question, including that fallback, asks once and approves.
+- New metadata refused during the question starts one more round.
+
+Counting every refusal, treating whole payloads as exact, treating exact ones by
+target only, or restoring the delayed publish each fails one of them.
+
+A remote doc update refused while the question is open is exact and new, so it
+still costs another round. Loro updates do not tell local ops from received ones
+at this boundary.
+
 **Sign-out and cache clear force-destroy other windows, so they approve first.** They
 call `destroy()`, which runs no `beforeunload`, so the unload guard never saw them;
 review caught that as well. Both now go through `tearDownWindows`, which calls
