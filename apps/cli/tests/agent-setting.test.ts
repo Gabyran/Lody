@@ -771,10 +771,12 @@ describe('mergeLoginShellEnv', () => {
 
   it('keeps the gh shim dir ahead of login-shell and default ACP entries', () => {
     // The session env prepends the shim, but the login shell and default ACP dirs are
-    // merged in front of it afterwards. /usr/bin/gh would then win and read the
-    // launch-time GH_TOKEN, which 401s once it expires.
-    const shimDir = getGhShimHostBinDir();
-    const base = { PATH: prependGhShimBinDirToPath('/proj/node_modules/.bin:/usr/bin') };
+    // merged in front of it afterwards. /usr/bin/gh would then win and run without
+    // the shim's per-command credential selection.
+    // Sessions use the shim dir of their own workspace broker, not the default one.
+    const statePath = join(tmpdir(), 'broker-workspace-a.json');
+    const shimDir = getGhShimHostBinDir(statePath);
+    const base = { PATH: prependGhShimBinDirToPath('/proj/node_modules/.bin:/usr/bin', statePath) };
     const shell = { PATH: '/home/u/.local/bin:/usr/local/bin:/usr/bin:/bin' };
 
     const spawned = withDefaultAcpPathEntries(mergeLoginShellEnv(base, shell));

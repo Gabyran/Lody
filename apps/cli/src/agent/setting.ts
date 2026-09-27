@@ -39,7 +39,7 @@ import {
   type ManagedRuntimeProgressCallback,
 } from '@/agent/managed-agent-runtime';
 import { getManagedRuntimeUpdateCoordinator } from '@/agent/managed-runtime-update-coordinator';
-import { getGhShimHostBinDir } from '@/lib/gh-shim-script';
+import { getGhShimSessionBinRoot } from '@/lib/gh-shim-script';
 import {
   DEEPSEEK_HARNESS_CAPABILITY_SOURCE_VERSION,
   resolveDeepSeekHarnessProcessLaunch,
@@ -672,15 +672,15 @@ function normalizePathEntry(entry: string): string {
 }
 
 /**
- * Moves the `gh` shim dir to the front when present. The shim is the only `gh` that
- * fetches a fresh managed token per call; a `gh` found earlier in PATH reads the
- * session's launch-time `GH_TOKEN`, which expires about an hour later. Agent shells
- * (Claude Code's shell snapshot) inherit this order verbatim, so `BASH_ENV` alone
- * cannot restore it.
+ * Moves the session's `gh` shim dir to the front when present. The shim (and its
+ * sibling `git` transport) is what selects per-command GitHub credentials; a native
+ * `gh` found earlier in PATH runs without them. Agent shells (Claude Code's shell
+ * snapshot) inherit this order verbatim, so `BASH_ENV` alone cannot restore it.
+ * Shim dirs are per workspace broker, so match any child of the shared root.
  */
 function pinGhShimBinDirFirst(parts: string[]): string[] {
-  const shimDir = normalizePathEntry(getGhShimHostBinDir());
-  const index = parts.findIndex((entry) => normalizePathEntry(entry) === shimDir);
+  const shimRoot = normalizePathEntry(getGhShimSessionBinRoot());
+  const index = parts.findIndex((entry) => dirname(normalizePathEntry(entry)) === shimRoot);
   const shimEntry = parts[index];
   if (index <= 0 || shimEntry === undefined) {
     return parts;
