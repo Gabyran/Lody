@@ -21,7 +21,7 @@ import {
 } from '@lody/shared';
 import { LoroRepo, type RepoRoomSubscription, type RepoWatchHandle } from 'loro-repo';
 import { IndexedDBStorageAdaptor } from 'loro-repo/storage/indexeddb';
-import { StreamsTransportAdapter } from 'loro-repo/transport/streams';
+import type { StreamsTransportAdapter } from 'loro-repo/transport/streams';
 import { StreamsCrdt, createLoroDocAdapter } from '@loro-dev/streams-crdt/loro';
 import type { PlatformSyncMode } from '@lody/platform';
 import {
@@ -125,6 +125,10 @@ import { WorkspaceMachineMonitorTransport } from './workspace-machine-monitor-tr
 import { WorkspaceLocalMachineMonitorTransport } from './workspace-local-machine-monitor-transport';
 import { TargetRoutedMachineMonitor } from './target-routed-machine-monitor';
 import { createResilientRemoteCursorStore } from './resilient-remote-cursor-store';
+import {
+  createWorkspaceStreamsTransport,
+  getWorkspaceMetaStreamUrl,
+} from './workspace-streams-transport';
 import { scheduleAfterStartupNavigationCooldown } from './startup-network-idle';
 import { logCodeCollabDebug } from '@/lib/code-collab-debug';
 import { readSessionAndMachineMetas, type ReadDocMetaCache } from '@/lib/doc-meta-batch';
@@ -444,24 +448,10 @@ export async function createWorkspaceRuntime(deps: RuntimeDeps): Promise<Workspa
   // Liveness invariant: opening a workspace must never wait forever on rebuildable
   // local cache. Loro Streams cursors are checkpoints, not source-of-truth data, so
   // a broken IndexedDB cursor store must fail open and let Streams bootstrap/catch up.
-  const metaStreamIdForWorkspace = getLoroMetaStreamId(deps.workspaceId);
-  const shouldBypassMetaRemoteCursorLoad = (streamUrl: string): boolean => {
-    const storage = getBrowserLocalStorage();
-    if (!storage) {
-      return false;
-    }
-    // If a previous page lifetime timed out before deleting a suspect meta cursor,
-    // persistently bypass that checkpoint on the next startup. The cursor is only
-    // replay progress; successful meta sync below clears this marker.
-    const bypassMarker = storage.getItem(getMetaRemoteCursorBypassStorageKey(deps.workspaceId));
-    return (
-      bypassMarker !== null &&
-      streamUrl.endsWith(`/${encodeURIComponent(metaStreamIdForWorkspace)}`)
-    );
-  };
+  // This store serves LoroDoc rooms only: Meta and named Flock progress is
+  // replica-bound and restored by the repo's own IndexedDB with the data it covers.
   const remoteCursorStore = createResilientRemoteCursorStore({
     dbName: cacheIdentity.remoteCursorDbName,
-    shouldBypassPrimaryLoad: shouldBypassMetaRemoteCursorLoad,
     onWarning: (message, context) => {
       console.warn(message, {
         workspaceId: deps.workspaceId,
@@ -714,6 +704,17 @@ export async function createWorkspaceRuntime(deps: RuntimeDeps): Promise<Workspa
     provider: LoroStreamsTokenProvider | null
   ): string | undefined => provider?.getShardHostSuffix();
 
+  const getMetaStreamUrl = (baseUrl: string): string =>
+    getWorkspaceMetaStreamUrl(workspaceId, baseUrl);
+
+  // The Meta checkpoint was captured with this window's hydrated meta Flock
+  // when the repo was created; deleting it makes the next Meta session bootstrap.
+  const deleteMetaCheckpoint = async (metaStreamUrl: string): Promise<void> => {
+    await repo
+      .getReplicaCheckpointStore({ kind: 'meta', flock: repo.getMeta() })
+      .delete?.(metaStreamUrl);
+  };
+
   const invalidateMetaRemoteCursor = async (reason: string, error: unknown): Promise<void> => {
     // Remote cursors only exist for the Streams plane; the local-only
     // platform has neither the cursor rows nor a provider to derive URLs from.
@@ -727,13 +728,11 @@ export async function createWorkspaceRuntime(deps: RuntimeDeps): Promise<Workspa
 
     metaRemoteCursorInvalidated = true;
     const metaStreamId = getLoroMetaStreamId(workspaceId);
-    const metaStreamUrl = createLoroStreamUrl({
-      bucketId: LORO_STREAMS_BUCKET_ID,
-      streamId: metaStreamId,
-      baseUrl: transportStreamsBaseUrl ?? getStreamsBaseUrlForProvider(streamsTokenProvider),
-    });
+    const metaStreamUrl = getMetaStreamUrl(
+      transportStreamsBaseUrl ?? getStreamsBaseUrlForProvider(streamsTokenProvider)
+    );
     try {
-      await remoteCursorStore.delete(metaStreamUrl);
+      await deleteMetaCheckpoint(metaStreamUrl);
       console.warn('Deleted Loro Streams meta remote cursor after sync failure', {
         workspaceId,
         metaStreamId,
@@ -746,6 +745,20 @@ export async function createWorkspaceRuntime(deps: RuntimeDeps): Promise<Workspa
         metaStreamId,
         reason,
         error,
+        deleteError,
+      });
+    }
+  };
+
+  // A previous page lifetime may have timed out before deleting a suspect Meta
+  // checkpoint. The marker persists that intent; honor it before the cloud
+  // transport starts a Meta session. Successful Meta sync clears the marker.
+  const dropBypassedMetaCheckpoint = async (streamsBaseUrl: string): Promise<void> => {
+    try {
+      await deleteMetaCheckpoint(getMetaStreamUrl(streamsBaseUrl));
+    } catch (deleteError) {
+      console.warn('Failed to drop bypassed Loro Streams meta checkpoint', {
+        workspaceId,
         deleteError,
       });
     }
@@ -2854,31 +2867,13 @@ export async function createWorkspaceRuntime(deps: RuntimeDeps): Promise<Workspa
     activeStreamsTokenProvider: LoroStreamsTokenProvider,
     streamsBaseUrl: string
   ): StreamsTransportAdapter =>
-    new StreamsTransportAdapter({
-      bucketId: LORO_STREAMS_BUCKET_ID,
-      metaStreamId: getLoroMetaStreamId(workspaceId),
-      docStreamId: (docId) => getLoroStreamIdForDocId(workspaceId, docId),
-      flockDocStreamId: (flockDocId) => flockDocId,
+    createWorkspaceStreamsTransport({
+      repo,
+      workspaceId,
+      documentRemoteCursorStore: remoteCursorStore,
       auth: activeStreamsTokenProvider.createAuthCallback(),
-      remoteCursorStore,
-      snapshotCodec: streamsSnapshotCodec,
-      baseUrl: streamsBaseUrl,
-      shardUrls: getLoroStreamsShardUrls(
-        streamsBaseUrl,
-        getStreamsShardHostSuffixForProvider(activeStreamsTokenProvider)
-      ),
-      snapshotUpload: {
-        canUpload: async () => true,
-      },
-      onPersistDoc: async () => {
-        await repo.flush();
-      },
-      onPersistMeta: async () => {
-        await repo.flush();
-      },
-      onPersistFlockDoc: async () => {
-        await repo.flush();
-      },
+      streamsBaseUrl,
+      shardHostSuffix: getStreamsShardHostSuffixForProvider(activeStreamsTokenProvider),
     });
 
   const attachCloudMetaHealthTracker = (): void => {
@@ -2926,6 +2921,9 @@ export async function createWorkspaceRuntime(deps: RuntimeDeps): Promise<Workspa
 
       createMachineRpcJsonStreamClient(activeStreamsTokenProvider, streamsBaseUrl);
 
+      if (isMetaRemoteCursorBypassActive()) {
+        await dropBypassedMetaCheckpoint(streamsBaseUrl);
+      }
       const transportAdapter = createStreamsDurableTransport(
         activeStreamsTokenProvider,
         streamsBaseUrl
@@ -2991,6 +2989,9 @@ export async function createWorkspaceRuntime(deps: RuntimeDeps): Promise<Workspa
       try {
         // addTransport joins routed rooms but does not await their catch-up
         // (per-room first sync stays observable on each cloud binding).
+        if (isMetaRemoteCursorBypassActive()) {
+          await dropBypassedMetaCheckpoint(streamsBaseUrl);
+        }
         await repo.addTransport('cloud', createStreamsDurableTransport(provider, streamsBaseUrl), {
           ephemeral: true,
         });

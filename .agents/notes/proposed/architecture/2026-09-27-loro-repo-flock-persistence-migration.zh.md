@@ -175,6 +175,24 @@ Lody 目前运行 0.20.0，外加一个上游已经吸收的补丁。因此 Lody
   - 如果 strict 写入太贵，退回阶段 0 的行为，而不是放宽写入顺序。
 - **checkpoint 的 key（已知限制）：** key 是不透明的 stream URL。因此网关 origin 变化时会触发 bootstrap，而过去 `getLoroStreamsRemoteCursorUrlAliases` 可以避免这种情况。改为按 `(bucketId, streamId)` 作 key 需要上游修改。
 
+**阶段 1 的实际实现（分支 `feat/renderer-replica-bound-checkpoints`；可直接使用已锁定的 0.20.3）。**
+
+- **接线。** `workspace-streams-transport.ts` 用 `createRepoStreamsPersistence(repo, { documentRemoteCursorStore })` 构建渲染端 transport。容错的按窗口游标库现在只服务 LoroDoc 房间。
+  - 每个房间的屏障是它自己的 `persist*Now`，而不是整库 `repo.flush()`。这也消除了阶段 0 测到的多资源 strict 提交成本的大部分，因为一次屏障只提交它自己的资源。
+- **Meta 恢复。** `invalidateMetaRemoteCursor` 通过 `repo.getReplicaCheckpointStore({ kind: "meta", flock: repo.getMeta() })` 删除 Meta checkpoint。
+  - `localStorage` 跳过标记改为在 cloud transport 接入之前删除该 checkpoint。
+  - 容错游标库中已无用的 `shouldBypassPrimaryLoad` 选项及其测试已删除。
+  - 两处删除都使用 `getWorkspaceMetaStreamUrl`，与 transport 写入时的 key 相同。
+- **`tests/workspace-streams-transport.test.ts`**（在 fake-indexeddb 上使用真实的 `IndexedDBStorageAdaptor` 和容错游标库，对接脚本化的 Streams 服务端）：
+  - 一个标签页如果在兄弟标签页推进共享数据库之前就已加载，会 bootstrap，而不是从兄弟标签页的尾部继续（不一致 3）。
+  - 在运行时使用的 Meta key 上删除后，下一次同步会 bootstrap。
+- **消融。**
+  - 改动前的写法（共享游标库 + `repo.flush()` 屏障）会让这两个测试都失败。
+  - Meta key 漂移会让恢复测试失败。
+  - 去掉启动时的删除，会让 `create-workspace-runtime-meta-recovery.test.ts` 中新增的标记测试失败。
+- **测试隔离修复。** 该文件的测试现在每个用例都会 stub `globalThis.localStorage`。运行时读取的是它，此前一个测试写入的跳过标记会泄漏到之后的所有测试。
+- **Web 端的合并条件。** 新旧版本标签页混用需要 loro-dev/loro-repo#138。Electron 所有窗口运行同一个包，只有回滚时才会受影响。
+
 ### 阶段 2：CLI 使用真正的屏障（不依赖上游）
 
 - 把"只安排、不等待"的回调，换成真正等待的按资源屏障。可以用已弃用的 `createRepoStreamsPersistence(repo, aliasedCursorStore)`，也可以自己组装等价的 bundle：

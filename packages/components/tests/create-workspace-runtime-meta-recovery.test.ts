@@ -19,6 +19,13 @@ const mocks = vi.hoisted(() => {
   const watch = vi.fn(() => ({ unsubscribe: vi.fn() }));
   const joinMetaRoom = vi.fn();
   const remoteCursorDelete = vi.fn(async () => {});
+  const metaFlock = {};
+  const metaCheckpointDelete = vi.fn(async (_streamUrl: string) => {});
+  const getReplicaCheckpointStore = vi.fn((_target: { kind: string; flock: unknown }) => ({
+    load: vi.fn(async () => null),
+    save: vi.fn(async () => {}),
+    delete: metaCheckpointDelete,
+  }));
   const tokenProviderInvalidate = vi.fn();
   const presenceStart = vi.fn();
   const presenceStop = vi.fn(async () => {});
@@ -67,6 +74,9 @@ const mocks = vi.hoisted(() => {
     watch,
     joinMetaRoom,
     remoteCursorDelete,
+    metaFlock,
+    metaCheckpointDelete,
+    getReplicaCheckpointStore,
     tokenProviderInvalidate,
     presenceStart,
     presenceStop,
@@ -182,6 +192,8 @@ vi.mock('loro-repo', () => ({
       reconnect: mocks.reconnect,
       listDoc: mocks.listDoc,
       watch: mocks.watch,
+      getMeta: () => mocks.metaFlock,
+      getReplicaCheckpointStore: mocks.getReplicaCheckpointStore,
     })),
   },
 }));
@@ -193,6 +205,10 @@ vi.mock('loro-repo/storage/indexeddb', () => ({
 }));
 
 vi.mock('loro-repo/transport/streams', () => ({
+  createRepoStreamsPersistence: (_repo: unknown, options: object) => ({
+    mode: 'replica-bound',
+    ...options,
+  }),
   StreamsTransportAdapter: class StreamsTransportAdapter {
     constructor(readonly options: unknown) {
       mocks.streamsTransportConstructors(options);
@@ -356,6 +372,7 @@ import {
   createWorkspaceRuntime,
   resolveWorkspaceRuntimeCacheIdentity,
 } from '../src/providers/create-workspace-runtime';
+import { META_REMOTE_CURSOR_BYPASS_STORAGE_KEY_PREFIX } from '../src/lib/clear-local-cache';
 
 describe('createWorkspaceRuntime meta recovery lifecycle', () => {
   beforeEach(() => {
@@ -377,6 +394,8 @@ describe('createWorkspaceRuntime meta recovery lifecycle', () => {
     mocks.watch.mockClear();
     mocks.joinMetaRoom.mockReset();
     mocks.remoteCursorDelete.mockClear();
+    mocks.metaCheckpointDelete.mockClear();
+    mocks.getReplicaCheckpointStore.mockClear();
     mocks.tokenProviderInvalidate.mockClear();
     mocks.presenceStart.mockClear();
     mocks.presenceStop.mockClear();
@@ -432,6 +451,9 @@ describe('createWorkspaceRuntime meta recovery lifecycle', () => {
       }),
     });
     vi.stubGlobal('navigator', { onLine: true });
+    // The runtime reads `globalThis.localStorage`; without this, a Meta cursor
+    // bypass marker written by one test leaks into every later one.
+    vi.stubGlobal('localStorage', localStorage);
   });
 
   afterEach(() => {
@@ -467,6 +489,40 @@ describe('createWorkspaceRuntime meta recovery lifecycle', () => {
     expect(runtime.workspaceId).toBe('workspace-1');
     expect(mocks.presenceStart).toHaveBeenCalledTimes(1);
     expectNoPresenceStopAfterStart();
+    // The suspect Meta progress is the replica-bound checkpoint of this window's
+    // own meta Flock; the LoroDoc cursor store never holds Meta progress.
+    await vi.waitFor(() => expect(mocks.metaCheckpointDelete).toHaveBeenCalledTimes(1));
+    expect(mocks.getReplicaCheckpointStore).toHaveBeenCalledWith({
+      kind: 'meta',
+      flock: mocks.metaFlock,
+    });
+    expect(mocks.metaCheckpointDelete.mock.calls[0]?.[0]).toMatch(/\/workspace-1%3Ameta$/);
+    expect(mocks.remoteCursorDelete).not.toHaveBeenCalled();
+
+    await runtime.dispose();
+  });
+
+  it('drops a Meta checkpoint marked suspect by a previous page lifetime before attaching Streams', async () => {
+    mocks.joinMetaRoom.mockResolvedValueOnce(createMetaSub(Promise.resolve()));
+    window.localStorage.setItem(
+      `${META_REMOTE_CURSOR_BYPASS_STORAGE_KEY_PREFIX}:workspace-1`,
+      JSON.stringify({ reason: 'previous timeout' })
+    );
+
+    const runtime = await createWorkspaceRuntime({
+      workspaceSlug: 'workspace',
+      workspaceId: 'workspace-1' as WorkspaceId,
+      apiBaseUrl: 'https://api.example.test',
+      token: 'auth-token',
+    });
+
+    expect(mocks.metaCheckpointDelete).toHaveBeenCalledTimes(1);
+    expect(mocks.addTransport).toHaveBeenCalledWith('cloud', expect.anything(), expect.anything());
+    // Deleted before the cloud transport could start a Meta session from it.
+    expect(mocks.metaCheckpointDelete.mock.invocationCallOrder[0]).toBeLessThan(
+      mocks.addTransport.mock.invocationCallOrder[0] ?? 0
+    );
+    expect(mocks.metaCheckpointDelete.mock.calls[0]?.[0]).toMatch(/\/workspace-1%3Ameta$/);
 
     await runtime.dispose();
   });

@@ -176,6 +176,24 @@ Separately, a real full disk makes the CLI daemon exit through an uncaught log-t
   - If strict writes are too expensive, fall back to Phase 0 behavior. Do not relax the ordering.
 - **Checkpoint key (limit):** it is the opaque stream URL, so a gateway-origin change forces bootstraps where `getLoroStreamsRemoteCursorUrlAliases` used to avoid them. Keying checkpoints by `(bucketId, streamId)` would need an upstream change.
 
+**Phase 1 as implemented (branch `feat/renderer-replica-bound-checkpoints`; works with the pinned 0.20.3).**
+
+- **Wiring.** `workspace-streams-transport.ts` builds the renderer transport with `createRepoStreamsPersistence(repo, { documentRemoteCursorStore })`. The resilient per-window cursor database now serves LoroDoc rooms only.
+  - Each room's barrier is its own `persist*Now`, not a full `repo.flush()`. That also removes most of the multi-resource strict-commit cost measured under Phase 0, because a barrier commits only its own resource.
+- **Meta recovery.** `invalidateMetaRemoteCursor` deletes the Meta checkpoint through `repo.getReplicaCheckpointStore({ kind: "meta", flock: repo.getMeta() })`.
+  - The `localStorage` bypass marker now deletes that checkpoint before the cloud transport attaches.
+  - The resilient store's now-unused `shouldBypassPrimaryLoad` option and its test are removed.
+  - Both deletions use `getWorkspaceMetaStreamUrl`, the same key the transport writes.
+- **`tests/workspace-streams-transport.test.ts`** (real `IndexedDBStorageAdaptor` and resilient cursor store on fake-indexeddb, scripted Streams server):
+  - A tab that hydrated before a sibling tab advanced the shared databases bootstraps instead of resuming at the sibling's tail (mismatch 3).
+  - Deleting at the runtime's Meta key makes the next sync bootstrap.
+- **Ablations.**
+  - The pre-change wiring (shared cursor database plus a `repo.flush()` barrier) fails both tests.
+  - A drifted Meta key fails the recovery test.
+  - Dropping the startup deletion fails the new marker test in `create-workspace-runtime-meta-recovery.test.ts`.
+- **Test-isolation fix.** That file's tests now stub `globalThis.localStorage` per test. The runtime reads it, and a bypass marker from one test previously leaked into every later one.
+- **Merge gate for the web.** Mixed-version tabs need loro-dev/loro-repo#138. Electron runs one bundle for all windows, so it is exposed only on rollback.
+
 ### Phase 2: real CLI barriers (independent of upstream)
 
 - Replace the schedule-only callbacks with awaited per-resource barriers, via the deprecated `createRepoStreamsPersistence(repo, aliasedCursorStore)` or an equivalent bundle:
