@@ -84,7 +84,10 @@ The desktop shows one banner for its own machine:
 - `warning`: how much is left, dismissible until the level changes.
 
 The renderer's own IndexedDB repo shows the same banner when a write fails with
-`quota`, and clears it on the next successful write. The renderer's crisis handling
+`quota`. A later successful write of some other resource does not clear it: it only
+triggers a full repo flush, at most every 5 seconds, and failed flushes retry on a
+bounded backoff. The banner clears once such a flush succeeds with no newer
+refusal in between. The renderer's crisis handling
 for a connection that stops working (`unavailable`) is tracked separately in
 issue #417.
 

@@ -94,9 +94,14 @@ The gate re-samples `statfs` when the reading is older than 2 seconds, so the
 60-second poll does not delay it.
 
 **Surface the same banner for the renderer's quota errors.** `create-workspace-runtime`
-wraps its IndexedDB adapter. A `quota` failure sets the renderer atom, and the next
-successful write clears it. The banner prefers a failed write over low space, and the
-desktop's own machine over colleagues' machines. This is the notice part of #417's
+wraps its IndexedDB adapter with the shared `StorageFullRecovery`. A `quota` failure
+sets the renderer atom. A later successful write clears nothing by itself: IndexedDB
+can accept a small doc write while the failed meta is still dirty. It only triggers a
+`repo.flush()` (at most every 5 s; failed flushes retry at 5, 15 and 60 s). The
+episode ends when that flush succeeds and a generation fence shows no newer refusal
+arrived meanwhile, the same rule the CLI monitor applies. The first revision of this
+PR cleared on any successful write; review caught it. The banner prefers a failed
+write over low space, and the desktop's own machine over colleagues' machines. This is the notice part of #417's
 crisis mode. The breaker for a dead connection, the blocking recovery modal and the
 filesystem-only "Manage storage" panel remain #417's.
 
@@ -146,8 +151,13 @@ Automated, with injected clocks, manual timers and fault injection, no real slee
   immediately, and the field survives a real `EphemeralStore` roundtrip.
 - `packages/shared/tests/presence.test.ts`: an unknown storage value keeps the
   heartbeat. Ablating `.catch` fails it.
-- `packages/shared/tests/storage-health.test.ts`: classification, and the wrapper
-  keeping optional methods absent.
+- `packages/shared/tests/storage-health.test.ts`: classification; the wrapper keeps
+  optional methods absent; and, over a real `LoroRepo`, meta refused with
+  `QuotaExceededError` followed by a successful doc write does not end the episode.
+  The recovery flush stays degraded while meta is still refused and retries on
+  backoff; only once meta reaches storage does the episode end. A second case checks
+  that a flush racing a newer refusal does not end it. Ablating "any success clears"
+  fails both; ablating the generation fence fails the race case.
 - `apps/cli/tests/session-execution-service.test.ts`: the memory-pressure refusal
   cases are parameterized over storage too, for both create and continue.
 - `packages/components/tests/local-storage-banner.test.tsx`: banner state, value

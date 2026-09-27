@@ -1,7 +1,7 @@
 import { waitForScheduleWriteSync, withScheduleWrite } from './schedule-write-sync';
 import {
   getScheduleRoomId,
-  isStorageFullError,
+  StorageFullRecovery,
   observeStorageAdapterWrites,
   scheduleDocSchema,
   scheduleDocumentFromMirrorState,
@@ -457,20 +457,22 @@ export async function createWorkspaceRuntime(deps: RuntimeDeps): Promise<Workspa
   const repoStorage = new IndexedDBStorageAdaptor({ dbName: cacheIdentity.repoDbName });
   const openSessionWithSnapshot = createSessionSnapshotLoader(repoStorage);
   // loro-repo only logs a failed background save, so the adapter is where a
-  // `quota` refusal is seen. A failed save stays dirty in memory and is retried
-  // by the next flush; the next successful write ends the episode.
-  let storageFullSince: number | null = null;
+  // `quota` refusal is seen. A failed save stays dirty in memory; a later
+  // successful write of some other resource does not prove it was saved, so the
+  // episode ends only when a full repo flush succeeds (see StorageFullRecovery).
+  let flushRepoForStorageRecovery: (() => Promise<void>) | null = null;
+  const storageFullRecovery = new StorageFullRecovery({
+    flush: async () => {
+      if (!flushRepoForStorageRecovery) throw new Error('repo not ready');
+      await flushRepoForStorageRecovery();
+    },
+    onChange: (state) => deps.onLocalStorageFull?.(state),
+  });
   const observedRepoStorage = observeStorageAdapterWrites(repoStorage, {
     onWriteFailed: (error) => {
-      if (storageFullSince !== null || !isStorageFullError(error)) return;
-      storageFullSince = Date.now();
-      deps.onLocalStorageFull?.({ since: storageFullSince });
+      storageFullRecovery.reportWriteFailed(error);
     },
-    onWriteSucceeded: () => {
-      if (storageFullSince === null) return;
-      storageFullSince = null;
-      deps.onLocalStorageFull?.(null);
-    },
+    onWriteSucceeded: () => storageFullRecovery.reportWriteSucceeded(),
   });
   const repo = await LoroRepo.create({
     storageAdapter: observedRepoStorage,
@@ -478,6 +480,7 @@ export async function createWorkspaceRuntime(deps: RuntimeDeps): Promise<Workspa
     resolveRoomTransports: (room) =>
       resolveRoomTransportsImpl?.(room) ?? { transportIds: ['cloud'] },
   });
+  flushRepoForStorageRecovery = () => repo.flush();
   // Liveness invariant: opening a workspace must never wait forever on rebuildable
   // local cache. Loro Streams cursors are checkpoints, not source-of-truth data, so
   // a broken IndexedDB cursor store must fail open and let Streams bootstrap/catch up.
@@ -4753,6 +4756,8 @@ export async function createWorkspaceRuntime(deps: RuntimeDeps): Promise<Workspa
         }
       }
 
+      // No recovery flush may run against a repo that is being destroyed.
+      storageFullRecovery.dispose();
       let destroyError: unknown = null;
       try {
         await repo.destroy();

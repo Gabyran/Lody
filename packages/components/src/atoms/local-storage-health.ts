@@ -27,7 +27,8 @@ export const machineStorageHealthAtomFamily = atomFamily((machineId: MachineId |
 
 /**
  * Set while this app's own repo store (IndexedDB) refused a write for lack of
- * space; cleared by the next successful write. `since` is the first failure.
+ * space; cleared only once a full repo flush succeeds (`StorageFullRecovery`).
+ * `since` is the first failure.
  */
 export const rendererStorageFullAtom = atom<{ since: number } | null>(null);
 

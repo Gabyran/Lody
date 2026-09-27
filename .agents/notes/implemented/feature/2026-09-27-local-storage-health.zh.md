@@ -72,8 +72,12 @@ issue #1054 表明存储本身能撑过写满：SQLite 拒绝写入但不损坏�
 
 剩余空间读数超过 2 秒时，拦截点会重新 `statfs`，所以 60 秒的轮询不会让拦截变慢。
 
-**渲染端的 quota 错误显示同一个横幅。** `create-workspace-runtime` 包装它的 IndexedDB 适配器。
-`quota` 失败会设置渲染端 atom，下一次成功写入会清除它。横幅优先显示写入失败而不是空间不足，
+**渲染端的 quota 错误显示同一个横幅。** `create-workspace-runtime` 用 shared 的
+`StorageFullRecovery` 包装它的 IndexedDB 适配器。`quota` 失败会设置渲染端 atom。之后
+的成功写入本身不会清除它：IndexedDB 可能接受一次较小的 doc 写入，而失败的 meta 仍是脏的。成功写入
+只会触发一次 `repo.flush()`（至多每 5 秒一次；flush 失败则在 5、15、60 秒后重试）。只有这次 flush
+成功、且代数栅栏表明期间没有新的拒绝时，这一轮才结束，与 CLI 监视器的规则相同。本 PR 的第一版在任何
+一次成功写入时就清除，评审发现了这个问题。横幅优先显示写入失败而不是空间不足，
 优先显示本机而不是同事的机器。这是 #417 危机模式中的"提示"部分。失效连接的断路器、阻塞式恢复
 弹窗以及只操作文件系统的"管理存储"面板仍属于 #417。
 
@@ -117,7 +121,11 @@ flush 再次成功时记录一条 info。
   `EphemeralStore` 往返。
 - `packages/shared/tests/presence.test.ts`：未知的存储值不会让心跳丢失；消融 `.catch` 会让它
   失败。
-- `packages/shared/tests/storage-health.test.ts`：分类，以及包装保持可选方法缺席。
+- `packages/shared/tests/storage-health.test.ts`：分类，以及包装保持可选方法缺席；在真实
+  `LoroRepo` 上，meta 以 `QuotaExceededError` 被拒绝后，另一个 doc 写入成功不会结束这一轮，恢复
+  flush 在 meta 仍被拒绝时保持降级并按退避重试，空间恢复后 meta 落盘才结束；另有一个用例验证与新
+  失败竞争的 flush 不会结束这一轮。消融"任意成功即清除"会让前两个用例失败，消融代数栅栏会让竞争
+  用例失败。
 - `apps/cli/tests/session-execution-service.test.ts`：内存压力拒绝的用例对存储参数化，覆盖创建
   和继续两种情况。
 - `packages/components/tests/local-storage-banner.test.tsx`：横幅状态、在 presence 刷新时保持
