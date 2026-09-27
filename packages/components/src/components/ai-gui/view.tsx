@@ -491,9 +491,10 @@ const NativeSelectionRowsContext = createContext<{
   leading: number;
   held: ReadonlySet<string>;
 }>({ rows: [], leading: 0, held: new Set() });
-// Keys of the two list rows that are not conversation rows (the engine keys every row).
+// Keys of the list rows that are not conversation rows (the engine keys every row).
 const LEADING_ROW_KEY = '\u0000leading';
 const AGENT_ACTIVITY_ROW_KEY = '\u0000agent-activity';
+const TRAILING_ROW_KEY = '\u0000trailing';
 
 function ConversationVirtualRow({ index, ...props }: ConversationRowComponentProps) {
   const { rows, leading, held } = useContext(NativeSelectionRowsContext);
@@ -534,6 +535,8 @@ export interface SessionChatStreamViewProps {
   className?: string;
   /** Scrolls as the first conversation row (for example, Session provenance). */
   leadingContent?: ReactNode;
+  /** Scrolls after history as a local, not-yet-committed user message. */
+  trailingContent?: ReactNode;
   emptyState?: ReactNode;
   onAtBottomChange?: (atBottom: boolean) => void;
   showScrollToLatest?: boolean;
@@ -1372,6 +1375,8 @@ const ENGINE_ROW_ESTIMATE_PX = {
   subagentTasks: 64,
   leading: 48,
   activity: 36,
+  // Pending messages: usually none, so the row is usually empty.
+  trailing: 0,
 } as const;
 
 const toolCallIdOf = (content: unknown): string | null =>
@@ -1477,6 +1482,18 @@ const AGENT_ACTIVITY_ENGINE_ROW: EngineRow = {
   estimate: ENGINE_ROW_ESTIMATE_PX.activity,
 };
 
+const TRAILING_ENGINE_ROW: EngineRow = {
+  key: TRAILING_ROW_KEY,
+  turnId: null,
+  turnIndex: -1,
+  itemIndex: null,
+  itemIdentity: null,
+  firstItemIndex: null,
+  placeholder: false,
+  fixed: 'trailing',
+  estimate: ENGINE_ROW_ESTIMATE_PX.trailing,
+};
+
 /**
  * The conversation viewport's own style, shared by both scroller
  * implementations. Browser scroll anchoring is off for the whole scroller, not
@@ -1519,6 +1536,7 @@ export const SessionChatStreamView = forwardRef<
       initialWindowReady = true,
       className,
       leadingContent,
+      trailingContent,
       emptyState,
       onAtBottomChange,
       showScrollToLatest = true,
@@ -1610,7 +1628,7 @@ export const SessionChatStreamView = forwardRef<
           },
         });
         // Toggling must not scroll: the header stays where the reader clicked
-        // and the rows open or fold beneath it. useStickyScroll keeps a
+        // and the rows open or fold beneath it. The scroll engine keeps a
         // non-following reader from being pulled to the end by the commit's
         // observer deliveries; a reader following the tail is left there.
         setAssistantExpansionVersion((version) => version + 1);
@@ -1780,8 +1798,9 @@ export const SessionChatStreamView = forwardRef<
       const meta = virtualRows.map(engineRowOf);
       if (leadingContent != null) meta.unshift(LEADING_ENGINE_ROW);
       if (shouldShowAgentActivityRow && agentActivityLabel) meta.push(AGENT_ACTIVITY_ENGINE_ROW);
+      if (trailingContent != null) meta.push(TRAILING_ENGINE_ROW);
       return meta;
-    }, [agentActivityLabel, leadingContent, shouldShowAgentActivityRow, virtualRows]);
+    }, [agentActivityLabel, leadingContent, shouldShowAgentActivityRow, trailingContent, virtualRows]);
 
     /**
      * A sent message waiting for its row. The send path learns the turn id
@@ -2213,6 +2232,11 @@ export const SessionChatStreamView = forwardRef<
                     </div>
                   )}
                 </div>
+                {trailingContent == null ? null : (
+                  <div className="shrink-0" data-conversation-trailing-content="">
+                    {trailingContent}
+                  </div>
+                )}
               </div>
             </ContainerQueryProvider>
           </SessionImagePreviewContext.Provider>
@@ -2220,7 +2244,8 @@ export const SessionChatStreamView = forwardRef<
       );
     }
 
-    // Keyed rows in list order: the leading row, the conversation, the activity row.
+    // Keyed rows in list order: the leading row, the conversation, the activity
+    // row, and the pending (not yet committed) messages.
     const listRows = [
       leadingContent == null ? null : (
         <div key={LEADING_ROW_KEY} data-conversation-leading-content="">
@@ -2309,6 +2334,11 @@ export const SessionChatStreamView = forwardRef<
           />
         </div>
       ) : null,
+      trailingContent == null ? null : (
+        <div key={TRAILING_ROW_KEY} data-conversation-trailing-content="">
+          {trailingContent}
+        </div>
+      ),
     ].filter((row): row is ReactElement => row != null);
 
     return (

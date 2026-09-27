@@ -107,6 +107,41 @@ describe('following', () => {
     }
   });
 
+  it('keeps the bottom as a pending message appears after the activity row and is then committed', () => {
+    const activity: SimRow = {
+      key: 'activity',
+      turnId: null,
+      turnIndex: -1,
+      fixed: 'agent-activity',
+      height: 36,
+      estimate: 36,
+    };
+    const trailing = (height: number): SimRow => ({
+      key: 'trailing',
+      turnId: null,
+      turnIndex: -1,
+      fixed: 'trailing',
+      height,
+      estimate: 0,
+    });
+    const turns = turnRows(40, () => 120);
+    const sim = new ScrollSim([...turns, activity, trailing(0)], V);
+    sim.render();
+    sim.settle();
+    expectHealthy(sim);
+
+    // The pending message shows in the trailing row, then the history commits
+    // it as a turn and the trailing row empties again.
+    sim.render([...turns, activity, trailing(140)]);
+    sim.settle();
+    expect(sim.controller.mode).toBe('follow');
+    expectHealthy(sim);
+    sim.render([...turns, ...turnRows(1, () => 140, () => 88, 'sent'), activity, trailing(0)]);
+    sim.settle();
+    expect(sim.controller.mode).toBe('follow');
+    expectHealthy(sim);
+  });
+
   it('keeps the bottom when the viewport grows and clamps (composer shrinking)', () => {
     const sim = new ScrollSim(
       turnRows(50, () => 100),

@@ -1,13 +1,14 @@
 import { anchorOfRow, deriveAnchor, resolveAnchor } from './anchor';
 import { Geometry, type SavedSizes } from './geometry';
-import type {
-  CycleDiagnostic,
-  EngineRow,
-  Intent,
-  MovementClass,
-  ReadingAnchor,
-  ScrollSnapshot,
-  StickyMode,
+import {
+  FIXED_ROW_KINDS,
+  type CycleDiagnostic,
+  type EngineRow,
+  type Intent,
+  type MovementClass,
+  type ReadingAnchor,
+  type ScrollSnapshot,
+  type StickyMode,
 } from './types';
 
 /**
@@ -823,8 +824,7 @@ export class ScrollController {
     const length = this.rows.length;
     const anchor = this.anchorIndex();
     const a = this.glide ? 1 : 0;
-    const fixedRows = 2;
-    const span = Math.ceil(((1 + a) * this.viewportHeight) / this.minRow) + fixedRows;
+    const span = Math.ceil(((1 + a) * this.viewportHeight) / this.minRow) + FIXED_ROW_KINDS.length;
     return [Math.max(0, anchor - span), Math.min(length - 1, anchor + span)];
   }
 

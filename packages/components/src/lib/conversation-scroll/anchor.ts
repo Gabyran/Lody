@@ -62,8 +62,8 @@ const clampOffset = (offsetPx: number, size: number) =>
  * 6. the turn is gone: the next surviving turn in the old order, else the
  *    previous one, at 0.
  *
- * Fixed rows resolve to themselves; a missing agent-activity row falls back
- * to the last row, a missing leading row to the first.
+ * Fixed rows resolve to themselves; a missing agent-activity or trailing row
+ * falls back to the last row, a missing leading row to the first.
  */
 export function resolveAnchor(
   rows: readonly EngineRow[],

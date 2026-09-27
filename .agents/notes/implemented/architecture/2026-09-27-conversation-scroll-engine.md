@@ -249,9 +249,11 @@ when a row's measured height changes within one transaction without a content or
 layout-version change.
 
 **Minimum row height and the exempt set K.** Every row satisfies `height >= hMin`, except
-the rows in `K`. `K` is defined statically by key and holds only the two fixed non-turn
-rows: the leading row and the agent-activity row (`view.tsx`). The leading row may be an
-empty Fragment that renders no DOM, which the `ai-gui` rules allow. Placeholder rows
+the rows in `K`. `K` is defined statically by key and holds only the fixed non-turn rows
+(`FIXED_ROW_KINDS`): the leading row, the agent-activity row and the trailing row of
+pending, not yet committed messages (`view.tsx`). The leading row may be an empty
+Fragment that renders no DOM, which the `ai-gui` rules allow. The trailing row is empty
+whenever no message is pending, which is most of the time. Placeholder rows
 already carry a `minHeight` estimate. In development, any row outside `K` measuring below
 `hMin` is reported. Before the default flips, an audit confirms which rows outside `K` can
 render near zero height today.
@@ -459,7 +461,9 @@ not depend on this.
 **Worst-case window.** The anchor row plus `ceil((1 + a) · V / hMin) + |K|` rows on each
 side, or up to the list ends. `a` bounds how far `screenY` may lie outside `[0, V]`: `a = 1`
 for glide frames and `a = 0` otherwise. Rows in `K` may have zero height, so each side adds
-`|K|` rows (`|K| = 2`).
+`|K|` rows (`|K| = 3`; `worstCaseWindow` reads it from `FIXED_ROW_KINDS`). The trailing row
+joined `K` when #719's pending messages were merged; the argument is the same for any
+`|K|`.
 
 **Lemma.** Assume the transaction's content and layout version are fixed, and layout is
 position-independent (the layout contract).

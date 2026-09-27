@@ -162,9 +162,10 @@ spacer 可见时若上方内容变高，Chromium 可能自行调整 `scrollTop`�
 或其他哪些行已挂载。行保持 `contain: layout style`，不使用相对容器的百分比高度。开发环境中，若一行的测量高度
 在一个事务内发生变化，而内容和布局版本都没有变，就报告前提被违反。
 
-**最小行高与豁免集 K。**除 `K` 中的行外，每一行满足 `height >= hMin`。`K` 按 key 静态定义，只包含两个固定的
-非 turn 行：leading 行和 agent-activity 行（`view.tsx`）。leading 行可能是一个不渲染任何 DOM 的空 Fragment，
-这是 `ai-gui` 规则允许的。placeholder 行已带 `minHeight` 估算。开发环境中，`K` 之外任何测得低于 `hMin` 的行都会被报告；
+**最小行高与豁免集 K。**除 `K` 中的行外，每一行满足 `height >= hMin`。`K` 按 key 静态定义，只包含固定的
+非 turn 行（`FIXED_ROW_KINDS`）：leading 行、agent-activity 行，以及显示待提交消息的 trailing 行（`view.tsx`）。
+leading 行可能是一个不渲染任何 DOM 的空 Fragment，这是 `ai-gui` 规则允许的；没有待提交消息时 trailing 行为空，
+大多数时候都是如此。placeholder 行已带 `minHeight` 估算。开发环境中，`K` 之外任何测得低于 `hMin` 的行都会被报告；
 切默认前做一次审计，确认目前 `K` 之外哪些行可能以接近零的高度渲染。
 
 ### 阅读锚点
@@ -313,7 +314,8 @@ follow 的目标在同一个 cycle 内取代 sent 的目标。
 
 **最坏情况窗口**是锚点行加上两侧各 `ceil((1 + a) · V / hMin) + |K|` 行，或延伸到列表两端。`a` 界定
 `screenY` 可以超出 `[0, V]` 多远：glide 帧 `a = 1`，其余均为 `a = 0`。`K` 中的行可能为零高度，
-所以每侧多加 `|K|` 行（`|K| = 2`）。
+所以每侧多加 `|K|` 行（`|K| = 3`，`worstCaseWindow` 从 `FIXED_ROW_KINDS` 读取）。trailing 行是合入 #719 的待提交消息时
+加入 `K` 的；论证对任意 `|K|` 都成立。
 
 **引理。**假设事务的内容与布局版本固定，且布局与位置无关（布局契约）。最后一次提交后，窗口内每一行都已测量、
 已提交，且 `K` 之外的每一行高度至少为 `hMin`。写入位置由锚点推导，所以对锚点位置 `p` 有

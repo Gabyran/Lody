@@ -3,8 +3,12 @@
  * `.agents/notes/implemented/architecture/2026-09-27-conversation-scroll-engine.md`.
  */
 
-/** The two fixed rows that are not turn rows and may render at zero height. */
-export type FixedRowKind = 'leading' | 'agent-activity';
+/**
+ * The fixed rows that are not turn rows and may render at zero height: the
+ * coverage lemma's exempt set K, whose size widens its worst-case window.
+ */
+export const FIXED_ROW_KINDS = ['leading', 'agent-activity', 'trailing'] as const;
+export type FixedRowKind = (typeof FIXED_ROW_KINDS)[number];
 
 /**
  * What the engine knows about one list row. Rows are listed in display order;

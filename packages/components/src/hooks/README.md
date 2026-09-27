@@ -4,6 +4,16 @@ Binding rules for this directory live in [AGENTS.md](AGENTS.md); this file keeps
 the reasoning behind them so the rules can stay short. It explains only the hooks
 that carry an invariant — the directory itself is the list of hooks.
 
+## Session submission
+
+`use-session-actions.ts` binds admission, analytics, and Jotai observations to
+`lib/session-submission.ts`. The latter owns the ordinary Promise entry points
+for creation, initial history, continuation, dispatch, and guide. It has no React
+lifetime or second writer. The workspace journal durably accepts the full input before releasing the
+composer, prepares attachments on Send, and serializes same-session submission.
+`use-session-preparation` holds an owned warmup lease; attachment takeover cancels
+and joins it. See the [attachment draft Spec](../../../../specs/session-files.md).
+
 | Area                   | Entry point                                                                                | Responsibility                                              |
 | ---------------------- | ------------------------------------------------------------------------------------------ | ----------------------------------------------------------- |
 | Session lifecycle      | [`use-session-actions.ts`](use-session-actions.ts)                                         | Bind operation targets and writes to one workspace runtime. |

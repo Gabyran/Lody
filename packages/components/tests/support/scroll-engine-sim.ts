@@ -4,7 +4,7 @@ import {
   type RenderPlan,
   type ScrollHost,
 } from '../../src/lib/conversation-scroll/controller';
-import type { EngineRow } from '../../src/lib/conversation-scroll/types';
+import type { EngineRow, FixedRowKind } from '../../src/lib/conversation-scroll/types';
 
 /**
  * A browser-semantics simulator for the scroll engine's model tests.
@@ -32,7 +32,7 @@ export interface SimRow {
   turnId: string | null;
   turnIndex: number;
   itemIndex?: number | null;
-  fixed?: 'leading' | 'agent-activity' | null;
+  fixed?: FixedRowKind | null;
   placeholder?: boolean;
   height: number;
   estimate: number;

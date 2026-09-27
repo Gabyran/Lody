@@ -20,7 +20,8 @@ Design, invariants I1–I8 and the coverage lemma:
 - Keep the layout contract: viewport `overflow-anchor: none` and
   `scrollbar-gutter: stable`; rows container `overflow-y: clip`; no row may use
   `content-visibility: auto` or size itself from the container or its position. Rows
-  outside the fixed leading/agent-activity rows stay at least `ENGINE_MIN_ROW_PX`.
+  outside the fixed rows (`FIXED_ROW_KINDS`) stay at least `ENGINE_MIN_ROW_PX`; a new
+  zero-height row kind joins that list.
 - Reading anchors are separate from React row keys: resolve through `anchor.ts`
   rules, never by list index.
 - `keyed-layout/` came from Lody's removed Virtua fork with its tests; engine

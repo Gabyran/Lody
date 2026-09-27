@@ -58,6 +58,8 @@ export interface SessionChatStreamProps {
   className?: string;
   /** Scrolls as the first conversation row (for example, Session provenance). */
   leadingContent?: ReactNode;
+  /** Scrolls after history as a local, not-yet-committed user message. */
+  trailingContent?: ReactNode;
   emptyState?: ReactNode;
   onAtBottomChange?: (atBottom: boolean) => void;
   showScrollToLatest?: boolean;
@@ -146,6 +148,7 @@ const SessionChatStreamImpl = forwardRef<SessionChatStreamHandle, SessionChatStr
       dividerLabel: _dividerLabel,
       className,
       leadingContent,
+      trailingContent,
       emptyState,
       onAtBottomChange,
       showScrollToLatest = true,
@@ -262,6 +265,7 @@ const SessionChatStreamImpl = forwardRef<SessionChatStreamHandle, SessionChatStr
         sessionId={sessionId}
         className={className}
         leadingContent={leadingContent}
+        trailingContent={trailingContent}
         emptyState={emptyState}
         onAtBottomChange={onAtBottomChange}
         showScrollToLatest={showScrollToLatest}
