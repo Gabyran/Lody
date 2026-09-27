@@ -5724,6 +5724,9 @@ export class MessageHandler {
       return;
     }
     const turn = state.turn;
+    // Runs ahead of every ACP flush, so it is as hot as the flush span itself: a
+    // healthy open gate stays out of the default file sink, while a wait that
+    // fails or runs long still reports at debug.
     await traceAsync(
       this.logger,
       'history.turn_gate_wait',
@@ -5732,7 +5735,8 @@ export class MessageHandler {
         ...(turn.phase === 'idle' ? {} : { turnId: turn.turnId }),
         ...(turn.phase === 'idle' || !turn.userTurnId ? {} : { userTurnId: turn.userTurnId }),
       },
-      async () => await gate.waitUntilOpen()
+      async () => await gate.waitUntilOpen(),
+      { hot: true }
     );
   }
 
