@@ -1,32 +1,13 @@
 # Migrating Lody to loro-repo's replica-safe Flock persistence
 
-Status: proposed
+Status: implemented
 Translation: current
 
 [中文](2026-09-27-loro-repo-flock-persistence-migration.zh.md)
 
 ## Abstract
 
-loro-repo 0.20.3 changes how metadata and named Flock documents are written.
-It stops treating the Flock version vector as proof that everything below it has been saved.
-It now persists the exact records and received payloads.
-For IndexedDB it can also store each Streams cursor with the data it describes, in one transaction.
-Lody runs 0.20.0 (plus a patch that upstream has since absorbed).
-Lody therefore still has the persistence hole upstream reproduced.
-It also has three cursor/data mismatch paths of its own:
-
-- the CLI saves cursors before the matching SQLite write happens;
-- one-shot CLI commands share the daemon's cursor rows;
-- web tabs share one repo database and one cursor database.
-
-The proposal is a staged rollout:
-
-1. Upgrade the library without changing composition.
-2. Move the renderer's Meta/Flock cursors into the repo database.
-3. Give the CLI real data-before-cursor barriers.
-4. Only after an upstream `SqliteRepoStore` replica capability exists, bind the CLI's cursors the same way.
-
-No existing cursor is copied. The only migration cost is one bootstrap per Meta/Flock room, which is also the only way to repair an already-damaged cache. Steps 1 (#1049) and 2 (#1058) have merged. Step 3 was folded into step 4, which this PR implements on loro-repo 0.21.0. Measurement found one real cost: IndexedDB's strict durability makes cloud-mode flush barriers about N× slower when N resources are dirty. It does not affect correctness; step 2's per-resource barriers reduce it, and loro-repo#140 addresses the rest.
+loro-repo 0.20.0 treated the Flock version vector as proof that everything below it had been saved. Lody added three cursor/data mismatches of its own: the CLI saved Streams cursors before the matching SQLite write, one-shot CLI commands resumed from the daemon's cursor rows, and web tabs shared one repo database and one cursor database. Each could make a replica skip remote data permanently. Lody now binds every Meta/Flock Streams checkpoint to the replica that loaded it and stores the checkpoint atomically with that replica's data: IndexedDB in the renderer, SQLite in the CLI. Each cursor is saved only after a real per-resource persistence barrier, and LoroDoc cursors are shared and durable only in the daemon. It shipped in three PRs: the library upgrade (#1049), the renderer (#1058), and the CLI on loro-repo 0.21.0 (#1066). No cursor was migrated. Each Meta/Flock room bootstraps once, which also repairs caches that were already damaged. Remaining limits: durability is proven with fake-indexeddb, real-Chromium ordering and injected SQLite failures, not power loss; and LoroDoc cursors are not bound to a replica, so a one-shot command bootstraps each document it opens.
 
 ## Upstream change (0.20.0 → 0.20.3, `main` at `5862a2b`)
 
@@ -304,11 +285,28 @@ Separately, a real full disk makes the CLI daemon exit through an uncaught log-t
   - A smaller option for mismatch 2 if the upstream work is delayed.
   - It blocks one-shot commands while the daemon runs, or forces them to route through the daemon. That is a product decision that has not been made.
 
-## Verification limits
+## Outcome and verification limits
 
-This is desk analysis of upstream code at `5862a2b`, streams-crdt 0.15.1 and Lody at `d0f2d9b7`.
+The proposal above is kept as written. This section records what shipped, and it replaces the proposal's desk-analysis limits.
 
-- No mismatch above has been reproduced in Lody.
-- No migration has run.
-- No performance number has been measured.
-- Upstream tests use fake-indexeddb, which proves transaction ordering, not power-loss durability.
+- **Shipped.**
+  - #1049 upgraded to loro-repo 0.20.3 and removed the patch.
+  - #1058 bound the renderer's Meta/Flock cursors to the IndexedDB replica.
+  - #1066 bound the CLI's cursors to the SQLite replica and upgraded to loro-repo 0.21.0.
+  - Phase 2 was folded into #1066.
+- **Upstream.** loro-repo 0.21.0 ships three changes:
+  - the SQLite `replica_checkpoints` table with delete triggers (loro-dev/loro-repo#137);
+  - the IndexedDB lineage marker (#138, which closes #136);
+  - one strict transaction per flush through the optional atomic `saveMany` (#141, which closes #140).
+- **Evidence.**
+  - The Phase 0 simulations and the Phase 1 and Phase 3 regressions and ablations listed above.
+  - Independent Reviewer passes found no remaining P0/P1 at each merged head.
+  - The #1066 review ran 0.20.3 and 0.21.0 alternately against one fake-indexeddb database and one SQLite file. No data was lost. While an older version keeps writing, each affected resource bootstraps at most once more.
+  - With the page count capped until SQLite raised `SQLITE_FULL`, `saveMany` rolled back every row.
+- **Open follow-ups.**
+  - Opening the database for the first time after the upgrade still fails if the disk is full (loro-dev/loro-repo#139).
+  - Storage-adapter wrappers must forward `saveMany`. #1060's write observer is being updated; omitting it stays correct but falls back to one commit per payload.
+  - A replica-bound LoroDoc checkpoint upstream would remove the per-command LoroDoc bootstrap. It is not needed for correctness.
+- **Limits.**
+  - fake-indexeddb and real Chromium prove transaction ordering, not durability across power loss.
+  - The strict-flush cost was measured on 0.20.3 (see the table above). #141's batching has not been re-measured inside Lody.

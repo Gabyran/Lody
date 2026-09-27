@@ -1,31 +1,13 @@
 # 将 Lody 迁移到 loro-repo 的副本安全 Flock 持久化
 
-Status: proposed
+Status: implemented
 Translation: current
 
 [English](2026-09-27-loro-repo-flock-persistence-migration.md)
 
 ## 摘要
 
-loro-repo 0.20.3 改变了元数据和命名 Flock 文档的写入方式：
-
-- 不再把 Flock 版本向量当作"其下所有内容都已保存"的证据，改为持久化精确记录和收到的原始负载；
-- 对 IndexedDB，还可以把每个 Streams 游标和它所描述的数据放在同一个事务里保存。
-
-Lody 目前运行 0.20.0，外加一个上游已经吸收的补丁。因此 Lody 仍带着上游复现过的那个持久化空洞，另外还有三条自己的游标与数据不一致的路径：
-
-- CLI 在对应的 SQLite 写入发生之前就保存了游标；
-- 一次性 CLI 命令与 daemon 共用游标行；
-- Web 标签页共用同一个 repo 库和同一个游标库。
-
-提案是分阶段推进：
-
-1. 先只升级库，不改组合方式；
-2. 再把渲染端的 Meta/Flock 游标移进 repo 库；
-3. 然后给 CLI 加上真正的"先数据后游标"屏障；
-4. 等上游 `SqliteRepoStore` 具备副本能力之后，再以同样方式绑定 CLI 的游标。
-
-不复制任何现有游标。唯一的迁移代价是每个 Meta/Flock 房间 bootstrap 一次，而这也是修复已经损坏的缓存的唯一途径。第 1 步（#1049）和第 2 步（#1058）已合入。第 3 步并入了第 4 步，后者在本 PR 中实现，依赖 loro-repo 0.21.0。测量只发现一项真实成本：IndexedDB 的 strict 持久化会让 cloud 模式下的 flush 屏障在有 N 个脏资源时慢约 N 倍。它不影响正确性；第 2 步的按资源屏障降低了这一成本，其余由 loro-repo#140 处理。
+loro-repo 0.20.0 把 Flock 版本向量当作"其下所有内容都已保存"的证据。Lody 自己还另有三处游标与数据不一致：CLI 在对应的 SQLite 写入之前就保存了 Streams 游标；一次性 CLI 命令会从 daemon 的游标行继续；Web 标签页共用同一个 repo 库和同一个游标库。每一处都可能让某个副本永久跳过远端数据。现在，Lody 把每个 Meta/Flock Streams checkpoint 绑定到加载它的副本，并与该副本的数据原子地存在一起：渲染端存在 IndexedDB，CLI 存在 SQLite。每次保存游标前都会先等真实的逐资源持久化屏障；LoroDoc 游标只在 daemon 中共享并持久化。改动分三个 PR 上线：库升级（#1049）、渲染端（#1058），以及基于 loro-repo 0.21.0 的 CLI（#1066）。没有迁移任何游标；每个 Meta/Flock 房间 bootstrap 一次，这也顺带修复了已经损坏的缓存。剩余局限有两点：持久性是用 fake-indexeddb、真实 Chromium 的事务顺序和注入的 SQLite 故障证明的，没有验证断电；LoroDoc 游标没有绑定到副本，所以一次性命令打开的每个文档都会 bootstrap 一次。
 
 ## 上游变化（0.20.0 → 0.20.3，`main` 位于 `5862a2b`）
 
@@ -303,11 +285,28 @@ Lody 目前运行 0.20.0，外加一个上游已经吸收的补丁。因此 Lody
   - 如果上游工作延迟，这是解决不一致 2 的一个更小的方案。
   - 但它要么在 daemon 运行时阻塞一次性命令，要么强制一次性命令都经 daemon 转发。这是一个尚未做出的产品决策。
 
-## 验证限制
+## 结果与验证局限
 
-本文是对上游 `5862a2b`、streams-crdt 0.15.1 和 Lody `d0f2d9b7` 代码的桌面分析。
+上文提案保持原样。本节记录实际上线的内容，并替代提案阶段基于代码阅读写下的验证局限。
 
-- 上述不一致均未在 Lody 中复现。
-- 没有运行过任何迁移。
-- 没有测量过任何性能数字。
-- 上游测试使用 fake-indexeddb，只能证明事务顺序，不能证明断电情况下的持久性。
+- **已上线。**
+  - #1049 升级到 loro-repo 0.20.3，并删除了补丁。
+  - #1058 把渲染端的 Meta/Flock 游标绑定到 IndexedDB 副本。
+  - #1066 把 CLI 的游标绑定到 SQLite 副本，并升级到 loro-repo 0.21.0。
+  - 阶段 2 并入了 #1066。
+- **上游。** loro-repo 0.21.0 包含三项改动：
+  - SQLite `replica_checkpoints` 表和删除触发器（loro-dev/loro-repo#137）；
+  - IndexedDB lineage marker（#138，关闭 #136）；
+  - 通过可选的原子 `saveMany`，每次 flush 只用一个 strict 事务（#141，关闭 #140）。
+- **证据。**
+  - 上文列出的阶段 0 模拟，以及阶段 1、阶段 3 的回归测试和消融。
+  - 每个被合并的 head 都经过独立 Reviewer 复核，未发现遗留 P0/P1。
+  - #1066 的评审让 0.20.3 和 0.21.0 交替读写同一个 fake-indexeddb 库和同一个 SQLite 文件，没有丢数据。旧版本持续写入期间，每个受影响的资源最多多 bootstrap 一次。
+  - 限制页数直到 SQLite 报 `SQLITE_FULL` 时，`saveMany` 会回滚全部行。
+- **待办。**
+  - 升级后第一次打开数据库时，如果磁盘已满，仍会打开失败（loro-dev/loro-repo#139）。
+  - 存储适配器的包装层必须转发 `saveMany`。#1060 的写入观察器正在补这一项；漏掉不会出错，但会退回每个 payload 各提交一次。
+  - 上游如果提供绑定到副本的 LoroDoc checkpoint，就能省掉一次性命令对每个 LoroDoc 的 bootstrap。这不影响正确性。
+- **局限。**
+  - fake-indexeddb 和真实 Chromium 证明的是事务顺序，而不是断电后的持久性。
+  - strict flush 的成本是在 0.20.3 上测的（见上表），#141 的批量提交还没有在 Lody 中重新测量。
