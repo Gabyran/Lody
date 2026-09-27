@@ -561,6 +561,18 @@ describe('createWorkspaceRuntime meta recovery lifecycle', () => {
     await runtime.dispose();
   });
 
+  it('retries a web attach blocked by a suspect Meta checkpoint when the network comes back', async () => {
+    const runtime = await createWebRuntimeWithSuspectMetaCheckpoint();
+
+    // No token replay and no backoff wait: the ordinary online edge alone.
+    dispatchWindowEvent('online');
+    await flushPromises();
+    await flushPromises();
+    expectDeleteThenAttach();
+
+    await runtime.dispose();
+  });
+
   it('stops a pending web attach retry when the runtime is disposed', async () => {
     const runtime = await createWebRuntimeWithSuspectMetaCheckpoint();
 
