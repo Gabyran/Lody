@@ -122,3 +122,30 @@ function describeExit(
   }
   return `The update install failed: dpkg exited with code ${code}.${suffix}`
 }
+
+/**
+ * A `.deb` install as one quit transaction. The quit was approved before the
+ * password prompt, and polkit can hold that prompt open for minutes while every
+ * window keeps running. That approval covers only what it asked about, so once
+ * the package is installed, anything a window could not save since is flushed
+ * and asked about (`approveFinal`) before the app is relaunched and quit.
+ */
+export async function installLinuxDebThenQuit(steps: {
+  install: () => Promise<LinuxDebInstallResult>
+  /** False: the user kept unsaved changes; the quit is aborted and nothing relaunches. */
+  approveFinal: () => Promise<boolean>
+  abort: () => void
+  relaunchAndQuit: () => void
+}): Promise<{ ok: true } | { ok: false; error: string } | { ok: false; cancelled: true }> {
+  const result = await steps.install()
+  if (!result.ok) {
+    steps.abort()
+    return result
+  }
+  if (!(await steps.approveFinal())) {
+    steps.abort()
+    return { ok: false, cancelled: true }
+  }
+  steps.relaunchAndQuit()
+  return { ok: true }
+}

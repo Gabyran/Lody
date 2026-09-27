@@ -351,7 +351,7 @@ export function startApplication(executionHost?: DesktopExecutionHost): void {
         localPlatform: isLocalPlatform(),
         forceEnable: process.env.LODY_ELECTRON_ENABLE_UPDATER === '1'
       }),
-      quit: { approve: approveQuit, abort: abortQuit }
+      quit: { approve: approveQuit, approveFinal: quitCoordinator.approveFinal, abort: abortQuit }
     })
     const notificationService = new NotificationService(() => getMainWindow())
     const windowsTrayService = new WindowsTrayService({

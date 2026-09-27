@@ -144,7 +144,8 @@ question is settled before anything about the session changes.
 
 Installing an update is a quit and asks the same question before anything starts
 quitting. Cancel keeps the app running, and every later close or reload is guarded
-again.
+again. An install that first waits for the system password asks again, before it
+restarts the app, about anything a window could not save during that wait.
 
 ## Open questions
 

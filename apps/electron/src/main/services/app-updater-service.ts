@@ -14,6 +14,7 @@ import { IPC_PUSH_CHANNELS } from '@lody/shared/electron-ipc'
 import { formatUnknownError } from '../utils'
 import { setAppQuitting } from '../window-state'
 import {
+  installLinuxDebThenQuit,
   resolveLinuxDebInstallPlan,
   runLinuxDebInstall,
   type LinuxDebInstallPlan
@@ -102,7 +103,12 @@ export class AppUpdaterService {
        * the install does not go ahead. Installing must not mark the app as
        * quitting before approval: Electron's updater closes windows first.
        */
-      quit?: { approve: () => Promise<boolean>; abort: () => void }
+      quit?: {
+        approve: () => Promise<boolean>
+        /** Right before a quit that followed a long wait: what changed meanwhile. */
+        approveFinal: () => Promise<boolean>
+        abort: () => void
+      }
     } = {}
   ) {}
 
@@ -325,26 +331,25 @@ export class AppUpdaterService {
 
     this.installInFlight = true
     try {
-      const result = await runLinuxDebInstall(plan, (command, args) =>
-        spawn(command, args, { stdio: ['ignore', 'ignore', 'pipe'] })
-      )
-      if (!result.ok) {
-        this.abortQuit()
-        this.recordError(result.error)
-        return {
-          ok: false,
-          error: result.error
+      const result = await installLinuxDebThenQuit({
+        install: () =>
+          runLinuxDebInstall(plan, (command, args) =>
+            spawn(command, args, { stdio: ['ignore', 'ignore', 'pipe'] })
+          ),
+        approveFinal: async () => (await this.options.quit?.approveFinal()) ?? true,
+        abort: () => this.abortQuit(),
+        relaunchAndQuit: () => {
+          // Close handlers must not hide windows and block the updater-driven quit.
+          setAppQuitting(true)
+          app.relaunch()
+          app.quit()
         }
-      }
+      })
+      if ('error' in result) this.recordError(result.error)
+      return result
     } finally {
       this.installInFlight = false
     }
-
-    // Close handlers must not hide windows and block the updater-driven quit.
-    setAppQuitting(true)
-    app.relaunch()
-    app.quit()
-    return { ok: true }
   }
 
   /**

@@ -297,6 +297,18 @@ agent. A second quit asks up front and again about a write refused during that
 question. Skipping the final check, ignoring the generation, skipping the uncovered
 windows, dropping `resume`, or snapshotting after the question each fails it.
 
+The Linux `.deb` update has the same shape with a longer wait. It approves before
+the polkit password prompt, which can stay open for minutes, and then relaunched and
+quit. Review caught it as well. `installLinuxDebThenQuit` makes it one transaction:
+install, `approveFinal`, and only then `app.relaunch()` and `app.quit()`. A Cancel
+aborts the quit, so nothing is armed to relaunch. A test pauses the install,
+injects a refusal and closes the window (guarded), then completes the install. The
+final check asks, and Cancel means no relaunch. Skipping the updater's final check,
+letting the approval cover the whole wait, or a no-op final check each fails it.
+The before-quit final check still runs after that for the agent stop. A Cancel
+there leaves the relaunch that the updater already armed pending until the next
+quit.
+
 - The window barrier trusts only the coordinator's approval, never the global flag.
 - The updater asks before it marks anything or starts the install; on Linux that is
   before the password prompt and `app.relaunch()`.

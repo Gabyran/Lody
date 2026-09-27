@@ -1,7 +1,17 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { EventEmitter } from 'node:events'
-import { resolveLinuxDebInstallPlan, runLinuxDebInstall } from './app-updater-linux-install.ts'
+import {
+  installLinuxDebThenQuit,
+  resolveLinuxDebInstallPlan,
+  runLinuxDebInstall
+} from './app-updater-linux-install.ts'
+import {
+  RendererStorageState,
+  WindowStorageBarrier,
+  createQuitCoordinator,
+  resolveUnsavedBeforeQuit
+} from '@lody/shared/renderer-storage-barrier'
 
 function createFakeChild() {
   const child = new EventEmitter()
@@ -197,4 +207,70 @@ void test('reports a synchronous spawn throw', async () => {
   })
   assert.equal(result.ok, false)
   assert.match(result.error, /EACCES/)
+})
+
+void test('a write refused during the password prompt is guarded and asked about before relaunch', async () => {
+  const state = new RendererStorageState()
+  let flushAnswer = null
+  const quitCheck = {
+    timeoutMs: 3_000,
+    setTimer: () => null,
+    clearTimer: () => {},
+    send: (windowId, requestId) => {
+      queueMicrotask(() => state.handleQuitCheckResult(windowId, requestId, flushAnswer))
+      return true
+    }
+  }
+  const asked = []
+  const barrier = new WindowStorageBarrier({
+    state,
+    quitCheck,
+    quitApproved: (windowId) => coordinator.coversWindow(windowId),
+    confirmDiscard: async (since, kind) => {
+      asked.push([kind, since])
+      return false
+    }
+  })
+  const coordinator = createQuitCoordinator({
+    unsavedSince: () =>
+      resolveUnsavedBeforeQuit({ cliUnsavedSince: null, renderer: state, quitCheck }),
+    confirmDiscard: async () => true,
+    setAppQuitting: () => {},
+    renderer: state,
+    windowIds: () => [7],
+    approveWindows: (windowIds) => barrier.approveTeardown(windowIds, 'quit')
+  })
+  const installing = Promise.withResolvers()
+  let relaunches = 0
+
+  // Approved before the prompt, with everything saved.
+  assert.equal(await coordinator.approve(), true)
+  const installed = installLinuxDebThenQuit({
+    install: () => installing.promise,
+    approveFinal: coordinator.approveFinal,
+    abort: coordinator.abort,
+    relaunchAndQuit: () => {
+      relaunches++
+    }
+  })
+
+  // The prompt is open; window 7's storage refuses a write, and the user closes it.
+  state.report(7, 3_000)
+  flushAnswer = 3_000
+  barrier.noteIntent(7, 'close', () => {})
+  assert.equal(barrier.onUnloadPrevented(7), false)
+  await barrier.whenDecided(7)
+  assert.deepEqual(asked, [['close', 3_000]])
+
+  // The package installs; before relaunching, the new refusal is flushed and asked about.
+  installing.resolve({ ok: true })
+  assert.deepEqual(await installed, { ok: false, cancelled: true })
+  assert.deepEqual(asked, [
+    ['close', 3_000],
+    ['quit', 3_000]
+  ])
+  assert.equal(relaunches, 0)
+  assert.equal(coordinator.isApproved(), false)
+  assert.equal(barrier.onUnloadPrevented(7), false)
+  await barrier.whenDecided(7)
 })
