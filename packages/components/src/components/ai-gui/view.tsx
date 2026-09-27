@@ -1,6 +1,7 @@
 import {
   type ComponentPropsWithoutRef,
   type ComponentType,
+  type CSSProperties,
   type ElementType,
   createContext,
   forwardRef,
@@ -95,6 +96,8 @@ import { toIntlLocaleOrEn } from '@/lib/intl-locale';
 import { useStickyScroll } from '@/hooks/use-sticky-scroll';
 import { buildResendInputBlocks, isUndeliveredUserTurnEntry } from '@/lib/undelivered-user-turn';
 import { ConversationOutlineRail } from './conversation-outline-rail';
+import { RAIL_WIDTH } from './conversation-outline-rail-geometry';
+import { conversationWideBlockMaxWidth } from '@/lib/conversation-layout';
 import { useLatestRef } from '@/hooks/use-latest-ref';
 import { observeResizeOnAnimationFrame } from '@/lib/resize-observer';
 import {
@@ -477,6 +480,12 @@ const NativeSelectionRowsContext = createContext<{
 // Keys of the two Virtua rows that are not conversation rows (`keyed` needs one per row).
 const LEADING_ROW_KEY = '\u0000leading';
 const AGENT_ACTIVITY_ROW_KEY = '\u0000agent-activity';
+
+/**
+ * Wide blocks stay centred on the column and stop short of the outline rail on
+ * both sides, keeping the column's 18px gutter between them and the rail.
+ */
+const CONVERSATION_WIDE_BLOCK_MAX_WIDTH = conversationWideBlockMaxWidth(RAIL_WIDTH + 18);
 
 function ConversationVirtualRow({ index, ...props }: CustomItemComponentProps) {
   const { rows, leading, held } = useContext(NativeSelectionRowsContext);
@@ -2148,15 +2157,18 @@ export const SessionChatStreamView = forwardRef<
               // branch) pads the scroll content so the first message clears the
               // header at rest while later content scrolls under it and blurs.
               // Unset elsewhere → falls back to py-6's 1.5rem, a no-op.
-              style={{
-                visibility: initialWindowReady && initialScrollRestored ? 'visible' : 'hidden',
-                display: 'block',
-                overflowY: 'auto',
-                contain: 'strict',
-                width: '100%',
-                height: '100%',
-                paddingTop: 'calc(var(--conversation-top-inset, 0px) + 1.5rem)',
-              }}
+              style={
+                {
+                  visibility: initialWindowReady && initialScrollRestored ? 'visible' : 'hidden',
+                  display: 'block',
+                  overflowY: 'auto',
+                  contain: 'strict',
+                  width: '100%',
+                  height: '100%',
+                  paddingTop: 'calc(var(--conversation-top-inset, 0px) + 1.5rem)',
+                  '--conversation-wide-block-max-width': CONVERSATION_WIDE_BLOCK_MAX_WIDTH,
+                } as CSSProperties
+              }
             >
               <NativeSelectionRowsContext.Provider value={nativeSelectionRows}>
                 <Virtualizer
@@ -4940,10 +4952,6 @@ const AssistantChatItem = memo(function AssistantChatItem({
     if (nextTurn !== message.id) onTurnHoverChange(message.id, false);
   };
 
-  const hasWideContent =
-    content.kind === 'activity_detail' &&
-    content.entry.content.type === 'tool_call' &&
-    content.entry.content.content?.some((block) => block.type === 'diff');
   const isWorkedDetail = row.isWorkedDetail === true;
   const rowBody = (() => {
     switch (content.kind) {
@@ -5114,7 +5122,7 @@ const AssistantChatItem = memo(function AssistantChatItem({
       onMouseEnter={() => onTurnHoverChange(message.id, true)}
       onMouseLeave={handleMouseLeave}
     >
-      <div className={cn('w-full', hasWideContent && 'scrollbar-pro overflow-x-auto')}>
+      <div className="w-full">
         <div
           className={cn(
             'max-w-[800px] break-words',
@@ -5126,8 +5134,7 @@ const AssistantChatItem = memo(function AssistantChatItem({
               ? 'text-foreground'
               : isProcessCluster
                 ? 'text-muted-foreground'
-                : 'text-foreground',
-            hasWideContent && 'min-w-[480px]'
+                : 'text-foreground'
           )}
           style={conversationTextFontSizeStyle(conversationFontSize)}
           data-native-selection-allow
@@ -5352,6 +5359,7 @@ const renderAssistantContent = (
           isStreaming={options?.isStreaming}
           onFilePathClick={options?.onFilePathClick}
           searchBlockId={getTextSearchBlockId(messageId, itemIndex)}
+          wideBlocks
         />
       );
     case 'image':
@@ -6238,12 +6246,16 @@ export const MarkdownBlock = memo(function MarkdownBlock({
   isStreaming = false,
   onFilePathClick,
   searchBlockId,
+  wideBlocks = false,
 }: {
   text: string;
   size?: ConversationFontSize;
   isStreaming?: boolean;
   onFilePathClick?: (filePath: string) => void;
   searchBlockId?: string;
+  /** Top-level tables, code, diagrams and math may grow past the column. Only
+   *  for prose on the rail: markdown inside a bordered panel must stay in it. */
+  wideBlocks?: boolean;
 }) {
   const handleAgentFileLinkClick = useStableCallback((href: string) => {
     onFilePathClick?.(href);
@@ -6259,6 +6271,7 @@ export const MarkdownBlock = memo(function MarkdownBlock({
       isStreaming={isStreaming}
       onAgentFileLinkClick={onFilePathClick ? handleAgentFileLinkClick : undefined}
       searchBlockId={searchBlockId}
+      className={wideBlocks ? 'conversation-wide-markdown' : undefined}
     />
   );
 });
@@ -6979,7 +6992,7 @@ const ToolCallCard = memo(function ToolCallCard({
             title={terminalTitle}
             command={formatTerminalCommandLine(block)}
             output={prepareTerminalOutputBlocksPreview(outputs).text}
-            className={isActivityRow ? 'rounded-md' : undefined}
+            className={isActivityRow ? 'conversation-wide-block rounded-md' : undefined}
             showHeader={!isTerminalExecuteToolCall}
             showBorder={!isTerminalExecuteToolCall}
             outputDisplayMode={inlineOutput ? 'full' : undefined}
@@ -7006,7 +7019,7 @@ const ToolCallCard = memo(function ToolCallCard({
             title={terminalTitle}
             command=""
             output={prepareTerminalOutputBlocksPreview(outputs).text}
-            className={isActivityRow ? 'rounded-md' : undefined}
+            className={isActivityRow ? 'conversation-wide-block rounded-md' : undefined}
             showHeader={!isTerminalExecuteToolCall}
             showBorder={!isTerminalExecuteToolCall}
             outputDisplayMode={inlineOutput ? 'full' : undefined}
@@ -7027,7 +7040,8 @@ const ToolCallCard = memo(function ToolCallCard({
         <div
           key={`${block.type}-${index}`}
           className={cn(
-            isActivityRow && cn(CONVERSATION_PANEL_FRAME_CLASS, CONVERSATION_PANEL_BODY_CLASS)
+            isActivityRow && cn(CONVERSATION_PANEL_FRAME_CLASS, CONVERSATION_PANEL_BODY_CLASS),
+            isActivityRow && block.type === 'diff' && 'conversation-wide-block'
           )}
         >
           <ToolCallContentRenderer

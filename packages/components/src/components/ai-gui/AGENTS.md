@@ -65,6 +65,9 @@ Edit `AGENTS.md`, not its `CLAUDE.md` symlink. Ownership: [README.md](README.md)
   labels, and steps share a fixed 4px inset. Steps use `px-[4px]` with
   no negative margin; the footer bleeds only on the trailing edge (`-mr-[7px]`).
   See `AssistantTurnAlignment.stories`.
+- Only content-sized blocks on the rail leave the column, centred on it:
+  `conversation-wide-*` in `tailwind/index.css`. Never inside a bordered panel
+  or a nested Markdown block. See the [wide-block note](../../../../../.agents/notes/implemented/feature/2026-09-27-conversation-wide-blocks.md).
 
 ## Conversation Outline
 

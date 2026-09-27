@@ -206,6 +206,36 @@ pre,
     padding-inline: 0;
   }
 
+  /* Wide blocks grow past the prose column when their content needs it:
+     `max-content`, never narrower than the column, capped by
+     `--conversation-wide-block-max-width` (set on the conversation stream; see
+     `conversationWideBlockMaxWidth`). Outside the stream the variable is unset,
+     the cap is 100%, and the block keeps the column width. `left` + `translate`
+     keep it centred on the column whatever width it settles on. Only top-level
+     Markdown blocks qualify: a nested one would centre on its list or quote. A
+     previewed Markdown fence holds prose, which must keep the column's measure.
+     Below a 1024px pane the gain is under 60px a side and reads as a misaligned
+     edge rather than a wider block, so the column holds. */
+  @container (min-width: 1024px) {
+    .conversation-wide-markdown
+      > div
+      > :is(
+        [data-markdown-table-frame],
+        [data-streamdown='code-block']:not([data-markdown-preview='true']),
+        [data-streamdown='mermaid-block'],
+        .katex-display
+      ),
+    .conversation-wide-block {
+      position: relative;
+      left: 50%;
+      translate: -50% 0;
+      /* Streamdown ships `w-full` on its blocks, and utilities beat this layer. */
+      width: max-content !important;
+      min-width: 100%;
+      max-width: var(--conversation-wide-block-max-width, 100%);
+    }
+  }
+
   .markdown-renderer [data-streamdown='code-block'] {
     --markdown-code-block-bg: hsl(var(--code-background));
     --markdown-code-block-border: hsl(var(--code-border));
