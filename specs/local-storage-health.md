@@ -113,6 +113,12 @@ more and answer. A window that does not answer within 3 seconds keeps its last
 report; silence is not proof that it saved. The question names the earliest unsaved
 change. Quitting then loses changes not yet synced elsewhere.
 
+An answer covers only what it asked about. Windows keep running while the local
+agent stops, so a write refused after the question — while the user reads it, or
+while the agent stops — is flushed and asked about again before the app quits, and
+a window closed meanwhile is guarded as usual. Cancel then keeps the app open and
+restarts the local agent.
+
 The same applies when the system ends the session — a shutdown, restart or log-off —
 which on Windows closes the app without its ordinary quit. With changes known unsaved,
 the desktop holds the session end and runs that same quit: the final flush, the

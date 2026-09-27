@@ -276,6 +276,27 @@ updater paths.
   that then reports a refused write is flushed and asked on close. Dropping the
   `abort` call fails it. Services stopped before the agent (tray, relays, updater)
   stay stopped until the next quit attempt, as the failure dialog says.
+  (Superseded by the next correction: they now stop only after the final check.)
+
+**A quit approval covers what it asked about, not the seconds that follow.** Stopping
+the agent can take seconds while windows keep running. A window whose storage first
+refused a write in that time was never part of the question. The approval still let
+it unload freely, and the app then quit without looking again. Review caught it.
+The coordinator now records each window's storage generation when the user is
+asked; `coversWindow` holds only while that generation is unchanged. The window
+barrier uses it, so a window that became unsaved after approval is guarded on close
+as usual. After the agent stopped, `approveFinal` flushes every uncovered window
+and asks, in rounds (`approveTeardown(ids, 'quit')`), and only then does the app
+tear down the tray, relays and updater and call `app.quit()`. A Cancel aborts the
+quit and restarts the agent (`resume`). Those local services now stop after the
+final check, so a cancelled or failed quit leaves them running. The session-end
+guard releases only when the approval covers every window (`coversAll`). A test
+pauses the agent stop, injects a refusal, closes the window (guarded), and then
+completes the stop. The final check asks, and Cancel keeps the app and resumes the
+agent. A second quit asks up front and again about a write refused during that
+question. Skipping the final check, ignoring the generation, skipping the uncovered
+windows, dropping `resume`, or snapshotting after the question each fails it.
+
 - The window barrier trusts only the coordinator's approval, never the global flag.
 - The updater asks before it marks anything or starts the install; on Linux that is
   before the password prompt and `app.relaunch()`.

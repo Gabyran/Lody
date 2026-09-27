@@ -19,6 +19,12 @@ export function createDesktopQuitBarrier(options: {
    */
   abort: () => void
   confirmQuit?: () => Promise<boolean>
+  /**
+   * After `stop`, right before `quit`: what changed while stopping is confirmed
+   * too. False keeps the app open; `resume` restarts what `stop` stopped.
+   */
+  confirmFinal?: () => Promise<boolean>
+  resume?: () => void
 }) {
   let state: 'running' | 'stopping' | 'stopped' = 'running'
   return async (event: { preventDefault: () => void }): Promise<void> => {
@@ -42,6 +48,17 @@ export function createDesktopQuitBarrier(options: {
       state = 'running'
       options.abort()
       options.reportFailure(error)
+      return
+    }
+    let final = true
+    try {
+      final = (await options.confirmFinal?.()) ?? true
+    } catch {
+      final = true
+    }
+    if (!final) {
+      state = 'running'
+      options.resume?.()
       return
     }
     state = 'stopped'

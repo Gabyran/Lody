@@ -28,6 +28,7 @@ import {
 } from './window'
 import {
   getMainWindow,
+  liveProductWindowIds,
   productWindows,
   setAppQuitting,
   setWindowsTrayAvailable
@@ -293,14 +294,17 @@ export function startApplication(executionHost?: DesktopExecutionHost): void {
           quitCheck: rendererQuitCheck
         }),
       confirmDiscard: (since) => confirmStorageLoss(since, 'quit'),
-      setAppQuitting
+      setAppQuitting,
+      renderer: rendererStorageState,
+      windowIds: liveProductWindowIds,
+      approveWindows: (windowIds) => windowStorageBarrier.approveTeardown(windowIds, 'quit')
     })
     const approveQuit = quitCoordinator.approve
     const abortQuit = quitCoordinator.abort
     const windowStorageBarrier = new WindowStorageBarrier({
       state: rendererStorageState,
       quitCheck: rendererQuitCheck,
-      quitApproved: quitCoordinator.isApproved,
+      quitApproved: quitCoordinator.coversWindow,
       confirmDiscard: (since, kind) => confirmStorageLoss(since, kind),
       reportLost: (windowId, since) => {
         console.error(
@@ -317,7 +321,7 @@ export function startApplication(executionHost?: DesktopExecutionHost): void {
         if (cli === null) return renderer
         return renderer === null ? cli : Math.min(cli, renderer)
       },
-      quitApproved: quitCoordinator.isApproved,
+      quitApproved: quitCoordinator.coversAll,
       requestQuit: () => setImmediate(() => app.quit())
     })
     if (process.platform !== 'win32') {
@@ -485,14 +489,8 @@ export function startApplication(executionHost?: DesktopExecutionHost): void {
       // The agent and every window with unsaved storage are asked first.
       confirmQuit: approveQuit,
       abort: abortQuit,
+      // Only the agent: the app stays usable until the final check below passed.
       stop: async () => {
-        setWindowsTrayAvailable(false)
-        windowsTrayService.stop()
-        windowBadgeService.reset()
-        terminalRelay.destroy()
-        loroDataPlaneRelay.destroy()
-        appUpdaterService.stop()
-        publicBrowserService.destroyAll()
         const [cliResult] = await Promise.allSettled([
           cliService.shutdownForQuit(),
           flushElectronMainErrorReporting(),
@@ -500,8 +498,19 @@ export function startApplication(executionHost?: DesktopExecutionHost): void {
         ])
         if (cliResult.status === 'rejected') throw cliResult.reason
       },
-      // Only now, with the agent stopped: windows close instead of hiding.
+      // Windows kept running while the agent stopped; a write refused meanwhile
+      // was never part of the question, so it is flushed and asked about now.
+      confirmFinal: quitCoordinator.approveFinal,
+      resume: () => cliService.autoStart(getMainWindow()?.webContents ?? undefined),
+      // Only now, with the agent stopped and every window covered.
       quit: () => {
+        setWindowsTrayAvailable(false)
+        windowsTrayService.stop()
+        windowBadgeService.reset()
+        terminalRelay.destroy()
+        loroDataPlaneRelay.destroy()
+        appUpdaterService.stop()
+        publicBrowserService.destroyAll()
         setAppQuitting(true)
         app.quit()
       },

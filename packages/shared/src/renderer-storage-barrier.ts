@@ -116,18 +116,18 @@ export class RendererStorageState {
   }
 }
 
-export type WindowTeardownKind = 'close' | 'reload' | 'sign-out' | 'clear-cache';
+export type WindowTeardownKind = 'close' | 'reload' | 'sign-out' | 'clear-cache' | 'quit';
 
 export type WindowStorageBarrierOptions = {
   state: RendererStorageState;
   quitCheck: RendererStorageQuitCheckOptions;
   /**
-   * A quit the user approved through the quit storage check is in progress:
-   * every window was asked already, so windows unload freely. Never the global
-   * "app is quitting" flag, which other code sets before any check and which a
-   * cancelled quit must not leave behind.
+   * An approved quit covers this window's unsaved state as it was when the user
+   * was asked ({@link QuitCoordinator.coversWindow}), so it unloads freely. Never
+   * the global "app is quitting" flag, which other code sets before any check and
+   * which a cancelled quit must not leave behind.
    */
-  quitApproved: () => boolean;
+  quitApproved: (windowId: number) => boolean;
   /** Asks whether to drop changes still unsaved after the window's final flush. */
   confirmDiscard: (since: number, kind: WindowTeardownKind) => Promise<boolean>;
   /** A renderer went away without an approved teardown (crash, forced destroy). */
@@ -177,7 +177,7 @@ export class WindowStorageBarrier {
    * (the caller then calls `event.preventDefault()` to override the renderer).
    */
   onUnloadPrevented(windowId: number): boolean {
-    if (this.options.quitApproved() || this.consumeApproval(windowId)) return true;
+    if (this.options.quitApproved(windowId) || this.consumeApproval(windowId)) return true;
     if (this.decisions.has(windowId)) return false;
     const intent = this.intents.get(windowId);
     this.intents.delete(windowId);
@@ -363,6 +363,7 @@ export async function tearDownWindows(options: {
 export function createSessionEndGuard(options: {
   /** What is already known unsaved, without asking anyone: the OS answer is synchronous. */
   unsavedSince: () => number | null;
+  /** An approved quit covers everything unsaved ({@link QuitCoordinator.coversAll}). */
   quitApproved: () => boolean;
   /** Starts the ordinary quit (`app.quit()`), after the OS query has been answered. */
   requestQuit: () => void;
@@ -377,14 +378,21 @@ export function createSessionEndGuard(options: {
 export const SIGN_OUT_CANCELLED_CODE = 'sign_out_cancelled_unsaved_storage';
 
 export type QuitCoordinator = {
-  /**
-   * Flushes and, if needed, asks before anything quits (menu, last window,
-   * updater). Idempotent while an approved quit is in progress.
-   */
   approve: () => Promise<boolean>;
+  /**
+   * Right before the app really quits, after the slow stop: a window whose
+   * storage refused a write since {@link approve} is flushed and asked about, in
+   * rounds, like {@link WindowStorageBarrier.approveTeardown}. False (the user
+   * kept the changes) aborts the quit.
+   */
+  approveFinal: () => Promise<boolean>;
   /** The quit did not go ahead (cancelled, install or stop failed): undo approval. */
   abort: () => void;
   isApproved: () => boolean;
+  /** An approved quit whose question covered this window's current unsaved state. */
+  coversWindow: (windowId: number) => boolean;
+  /** An approved quit that covers every window's current unsaved state. */
+  coversAll: () => boolean;
 };
 
 /**
@@ -392,30 +400,69 @@ export type QuitCoordinator = {
  * flag too: other code sets that flag before asking (updaters must, since
  * Electron's updater closes windows before `before-quit`), and a flag left
  * behind would let every later window close/reload skip the storage barrier.
+ *
+ * Approval is bound to each window's storage generation when the user was asked.
+ * Stopping the agent takes seconds while windows keep running, so a write
+ * refused meanwhile is not covered: that window is guarded on its own, and
+ * {@link QuitCoordinator.approveFinal} asks about it before the app quits.
  */
 export function createQuitCoordinator(options: {
   /** The earliest change a quit would lose, after a final flush; null if none. */
   unsavedSince: () => Promise<number | null>;
   confirmDiscard: (since: number) => Promise<boolean>;
   setAppQuitting: (quitting: boolean) => void;
+  renderer: RendererStorageState;
+  windowIds: () => readonly number[];
+  /** Flushes these windows and asks about what stays unsaved: `approveTeardown(ids, 'quit')`. */
+  approveWindows: (windowIds: readonly number[]) => Promise<boolean>;
 }): QuitCoordinator {
   let approved = false;
+  const covered = new Map<number, number>();
+  const cover = (windowIds: readonly number[]) => {
+    for (const windowId of windowIds) covered.set(windowId, options.renderer.generation(windowId));
+  };
+  const coversWindow = (windowId: number) =>
+    approved && covered.get(windowId) === options.renderer.generation(windowId);
   const abort = () => {
     approved = false;
+    covered.clear();
     options.setAppQuitting(false);
   };
   return {
     isApproved: () => approved,
+    coversWindow,
+    coversAll: () =>
+      approved &&
+      options
+        .windowIds()
+        .every((id) => options.renderer.unsavedSince(id) === null || coversWindow(id)),
     abort,
     approve: async () => {
       if (approved) return true;
       const since = await options.unsavedSince();
+      // What the user is about to be asked about; a later refusal is not covered.
+      const asked = new Map(options.windowIds().map((id) => [id, options.renderer.generation(id)]));
       if (since !== null && !(await options.confirmDiscard(since).catch(() => false))) {
         abort();
         return false;
       }
       approved = true;
+      for (const [windowId, generation] of asked) covered.set(windowId, generation);
       return true;
+    },
+    approveFinal: async () => {
+      if (!approved) return false;
+      for (;;) {
+        const uncovered = options
+          .windowIds()
+          .filter((id) => options.renderer.unsavedSince(id) !== null && !coversWindow(id));
+        if (uncovered.length === 0) return true;
+        if (!(await options.approveWindows(uncovered))) {
+          abort();
+          return false;
+        }
+        cover(uncovered);
+      }
     },
   };
 }

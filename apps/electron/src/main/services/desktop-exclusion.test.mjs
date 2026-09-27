@@ -187,7 +187,10 @@ void test('an OS session end holds for unsaved storage and runs the same quit ba
       asked.push(since)
       return answers.shift()
     },
-    setAppQuitting: () => {}
+    setAppQuitting: () => {},
+    renderer,
+    windowIds: () => [7],
+    approveWindows: async () => true
   })
   let stopCalls = 0
   let exited = 0
@@ -206,7 +209,7 @@ void test('an OS session end holds for unsaved storage and runs the same quit ba
   let quitting = Promise.resolve()
   const guard = createSessionEndGuard({
     unsavedSince: () => renderer.earliestUnsaved(),
-    quitApproved: coordinator.isApproved,
+    quitApproved: coordinator.coversAll,
     requestQuit: () => {
       quitting = quitBarrier({ preventDefault() {} })
     }
@@ -395,11 +398,14 @@ void test('a cancelled quit clears a preset quitting flag, so window close is gu
     },
     setAppQuitting: (quitting) => {
       appQuitting = quitting
-    }
+    },
+    renderer: state,
+    windowIds: () => [7],
+    approveWindows: (windowIds) => barrier.approveTeardown(windowIds, 'quit')
   })
   const barrier = new WindowStorageBarrier({
     state,
-    quitApproved: coordinator.isApproved,
+    quitApproved: coordinator.coversWindow,
     confirmDiscard: async (since, kind) => {
       asked.push([kind, since])
       return false
@@ -447,12 +453,15 @@ void test('a quit whose agent stop fails guards windows again', async () => {
     confirmDiscard: async () => true,
     setAppQuitting: (quitting) => {
       appQuitting = quitting
-    }
+    },
+    renderer: state,
+    windowIds: () => [7],
+    approveWindows: (windowIds) => barrier.approveTeardown(windowIds, 'quit')
   })
   const flushed = []
   const barrier = new WindowStorageBarrier({
     state,
-    quitApproved: coordinator.isApproved,
+    quitApproved: coordinator.coversWindow,
     confirmDiscard: async (since, kind) => {
       asked.push([kind, since])
       return false
@@ -497,6 +506,103 @@ void test('a quit whose agent stop fails guards windows again', async () => {
   await barrier.whenDecided(7)
   assert.deepEqual(flushed, [7])
   assert.deepEqual(asked, [['close', 2_000]])
+})
+
+void test('a write refused while the agent stops is flushed and asked about before quitting', async () => {
+  const state = new RendererStorageState()
+  let flushAnswer = null
+  const quitCheck = {
+    timeoutMs: 3_000,
+    setTimer: () => null,
+    clearTimer: () => {},
+    send: (windowId, requestId) => {
+      queueMicrotask(() => state.handleQuitCheckResult(windowId, requestId, flushAnswer))
+      return true
+    }
+  }
+  const asked = []
+  const windowAnswers = [false, false]
+  const barrier = new WindowStorageBarrier({
+    state,
+    quitCheck,
+    quitApproved: (windowId) => coordinator.coversWindow(windowId),
+    confirmDiscard: async (since, kind) => {
+      asked.push([kind, since])
+      return windowAnswers.shift() ?? true
+    }
+  })
+  const coordinator = createQuitCoordinator({
+    unsavedSince: () =>
+      resolveUnsavedBeforeQuit({ cliUnsavedSince: null, renderer: state, quitCheck }),
+    confirmDiscard: async (since) => {
+      asked.push(['quit dialog', since])
+      // Another write is refused while the user reads the question.
+      state.report(7, since)
+      return true
+    },
+    setAppQuitting: () => {},
+    renderer: state,
+    windowIds: () => [7],
+    approveWindows: (windowIds) => barrier.approveTeardown(windowIds, 'quit')
+  })
+  let stopping = Promise.withResolvers()
+  let agentStopped = Promise.withResolvers()
+  let quitCalls = 0
+  let resumes = 0
+  const quitBarrier = createDesktopQuitBarrier({
+    confirmQuit: coordinator.approve,
+    abort: coordinator.abort,
+    stop: async () => {
+      stopping.resolve()
+      await agentStopped.promise
+    },
+    confirmFinal: coordinator.approveFinal,
+    resume: () => {
+      resumes++
+    },
+    quit: () => {
+      quitCalls++
+    },
+    reportFailure: () => {}
+  })
+
+  // Everything is saved, so the quit is approved without a question.
+  const quitting = quitBarrier({ preventDefault() {} })
+  await stopping.promise
+  assert.deepEqual(asked, [])
+
+  // While the agent stops, window 7's storage refuses a write.
+  state.report(7, 3_000)
+  flushAnswer = 3_000
+  // Closing it now is guarded like any close: the approval did not cover this.
+  barrier.noteIntent(7, 'close', () => {})
+  assert.equal(barrier.onUnloadPrevented(7), false)
+  await barrier.whenDecided(7)
+  assert.deepEqual(asked, [['close', 3_000]])
+
+  // The agent stopped: the new refusal is flushed and asked about, and the user keeps it.
+  agentStopped.resolve()
+  await quitting
+  assert.deepEqual(asked, [
+    ['close', 3_000],
+    ['quit', 3_000]
+  ])
+  assert.equal(quitCalls, 0)
+  assert.equal(resumes, 1)
+  assert.equal(coordinator.isApproved(), false)
+
+  // Quitting again asks up front. The write refused during that question was not
+  // part of it, so it is asked about once more; then the app quits.
+  stopping = Promise.withResolvers()
+  agentStopped = Promise.withResolvers()
+  agentStopped.resolve()
+  await quitBarrier({ preventDefault() {} })
+  assert.deepEqual(asked.slice(2), [
+    ['quit dialog', 3_000],
+    ['quit', 3_000]
+  ])
+  assert.equal(quitCalls, 1)
+  assert.equal(barrier.onUnloadPrevented(7), true)
 })
 
 void test('an approval without an intent does not outlive new unsaved data, reuse or its lifetime', async () => {
