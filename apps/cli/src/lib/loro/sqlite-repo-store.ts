@@ -16,6 +16,9 @@ export const getLoroRepoSqliteDbPath = (workspaceId: WorkspaceId): string =>
 // produce different cursor keys; rejected: using the raw store would make
 // gateway flips lose checkpoints or leave stale invalidated checkpoints behind.
 // This is URL-key compatibility only, not migration of pre-SQLite JSON cursors.
+// It serves LoroDoc rooms only: Meta and named Flock cursors are replica-bound
+// checkpoints owned by `SqliteRepoStore` itself (no alias fallback there, so a
+// gateway flip costs those rooms one bootstrap).
 export class AliasedRemoteCursorStore<
   TVersion extends JsonObject = JsonObject,
 > implements RemoteCursorStore<TVersion> {
@@ -56,7 +59,8 @@ export class AliasedRemoteCursorStore<
 export type CliSqliteRepoStore = {
   sqliteStore: SqliteRepoStore;
   storageAdapter: SqliteRepoStore['storage'];
-  remoteCursorStore: RemoteCursorStore<JsonObject>;
+  /** LoroDoc room cursors; see `AliasedRemoteCursorStore`. */
+  documentRemoteCursorStore: RemoteCursorStore;
   dbPath: string;
   baseDir: string;
 };
@@ -76,7 +80,7 @@ export const createCliSqliteRepoStore = async (
   return {
     sqliteStore,
     storageAdapter: sqliteStore.storage,
-    remoteCursorStore: new AliasedRemoteCursorStore(sqliteStore.cursorStore),
+    documentRemoteCursorStore: new AliasedRemoteCursorStore(sqliteStore.cursorStore),
     dbPath,
     baseDir,
   };
