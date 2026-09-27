@@ -1,0 +1,130 @@
+# iOS simulator side panel
+
+Status: implemented
+Translation: current
+
+[中文](2026-09-27-ios-simulator-panel.zh.md)
+
+## Abstract
+
+Add a dedicated iOS simulator panel to sessions assigned to a macOS machine. Machine RPC lists devices and manages preview preparation, while existing Quick Tunnels carry remote frames. The panel replaces browser navigation and annotation with device selection, connection status, and a small Lody-owned viewer, leaving later controls to Lody components. Browser and simulator require independent endpoint ownership. The first implementation uses MJPEG and a restricted Lody viewer, with no new frontend dependency. A real local service smoke test receives frames and stops cleanly; full remote/mobile acceptance and H.264 remain outside the verified scope.
+
+## Requirements and implemented defaults
+
+Required: gate the entry by the current session's target macOS machine, enumerate all its iOS simulators through RPC, let the user launch a selected device, hide addresses/navigation/annotation, retain status without sharing, minimize dependencies, and allow later custom controls.
+
+Confirmed in this review: direct same-machine connections; no simulator sharing; one controlling Lody session per device. Remote access still uses a background Quick Tunnel, restricted to the authorized controlling session.
+
+Implemented defaults:
+
+- Add `iOS Simulator` next to Browser in the right-panel empty state and `+` menu; do not open it automatically. One simulator panel and selected device per session.
+- Use target-machine OS, never viewer OS. Keep the macOS entry while offline with an explanation; do not guess unknown OS. Unsupported protocol shows an upgrade state instead of inferring support from CLI versions.
+- Preserve direct same-machine Electron connections and offline viewing; create Quick Tunnels only for remote access, always hiding addresses. No sharing controls, sharing RPC, public links or anonymous viewing mode.
+- Browser and simulator may run concurrently. Switching devices releases the old preview and control ownership; the new connection binds only the new device.
+- Never automatically shut down a simulator, including one started by Lody. Device shutdown is a later explicit action, separate from stopping preview.
+
+## Complete first-release control inventory
+
+The list header identifies the target machine and its online state. Refresh reads the machine; search and runtime filtering operate on the returned list. Group rows by runtime, with name, model, iOS version, boot state, availability and control occupancy. Short UDIDs disambiguate duplicate names; full IDs belong in details. Include unavailable devices with a reason. Running devices offer Preview; stopped devices offer Start and preview. Listing does not install Baguette, boot devices, or open tunnels.
+
+Preview header: `[Device / iOS version ▾] [Connection status]`, followed by an aspect-fit screen. Device selection reopens the list. Status details contain preparation stage, target machine, closure reason, concise error, retry/restore and stop preview. No address, navigation, webpage refresh, annotation or developer configuration in the permanent toolbar.
+
+| Location | Control/state | Behavior |
+| --- | --- | --- |
+| Panel | Simulator tab and close | Existing ordering, neighbor selection and local layout persistence |
+| List | Target-machine identity | Read-only; no machine switching inside this panel |
+| List | Refresh, search, runtime filter | Explicit machine refresh, local filtering |
+| Device row | Details, running/unavailable/occupied state | Explain disabled operations |
+| Device row | Start and preview / Preview | One action; no manual port |
+| Preparing | Stage progress and Cancel | Environment, component preparation, boot, connection, first frame; cancel does not mean shutdown |
+| Preview header | Device selector | Exact UDID switch; reject stale completions |
+| Preview header | Connection status | Local, connecting, active, expired, failed, machine offline, device stopped |
+| Status popover | Retry/restore, stop preview, copy diagnostics | No tokens in diagnostics; stop leaves Browser and device alive |
+| Screen | Aspect-fit canvas, tap and single-finger drag | Device-point coordinates; no input while disconnected; release touches on cancel/blur |
+| Guidance | Component download, missing Xcode/runtime, denied access, unsupported protocol | Managed pinned component; repair instructions and recheck for Xcode/runtime; no automatic Xcode install |
+| Empty/error | No devices, loading, query failure, first-frame timeout | Distinguish empty from failed; appropriate retry/refresh |
+
+No hardware-control buttons in the first release. Multi-touch, Chinese text input and orientation require separate acceptance.
+
+## Later control inventory
+
+| Group | Controls | Boundary |
+| --- | --- | --- |
+| Common | Home, app switcher, rotate, shake | Typed discrete commands can use RPC |
+| Input | Keyboard/text, paste, pinch, volume/lock | High-frequency gestures use WS; clipboard only on explicit action |
+| Quality | FPS, bitrate, scale, codec, fit/native size, fullscreen | Stream controls use WS; layout is local |
+| Capture | Download screenshot, attach to conversation, recording | Separate capture from sending; recording is separate follow-up work |
+| Appearance | Light/dark, text size, contrast, status bar | RPC with readback of actual state |
+| Lifecycle | Shutdown, restart | Explain impact on the real device and other tools; not tunnel operations |
+| Apps | Install, launch/terminate, deep links | Explicit project/file access; no arbitrary host commands |
+| Debugging | Accessibility tree, hit testing, logs | Authorized on-demand subscriptions; no webpage DOM annotation |
+| Advanced | Location, network, camera, motion | Separate environment/injection design and validation |
+
+## Architecture and dependencies
+
+`SessionIosSimulatorPanel` owns selection and state; `SimulatorToolbar` uses existing React, StyleX and `@lody/ui`; a connection controller manages RPC/endpoints. A tiny Lody viewer uses canvas, native WebSocket and browser decoders. Do not add Baguette's entire SDK, a media-player library, WebRTC, state library or UI framework.
+
+Render the viewer in a dedicated iframe. Its stream endpoint is same-origin, keeping cross-origin cookies/CORS out of the React controller and avoiding a second React bundle in the CLI. Custom toolbar device actions use RPC; local player commands use a small typed postMessage contract checking exact origin, source, generation and schema. The viewer is a fixed Lody artifact, not a user project page; disable annotation injection. Frames never travel through postMessage, React state, RPC or Loro documents.
+
+A lazily started Baguette process captures and injects input on the Mac. Each active preview owns one native process through an IPC worker, loopback only, with plugins disabled. This deliberately avoids a shared native-process refcount and its cross-session cleanup coupling. The Lody adapter exposes only required routes/messages for the bound device. Listing can use `xcrun simctl list devices --json` before Baguette is installed; boot/capture use a pinned adapter. Follow managed-runtime version/hash/license distribution, with no Homebrew requirement. Publish a tested macOS/architecture/Xcode/runtime matrix; unsupported environments fail explicitly.
+
+## RPC and authorization
+
+The version-1 capability is `iosSimulator`. One `ios-simulator/control` method accepts
+`list`, `start {udid}`, `status {operationId?}`, and `stop {operationId}`. The shared
+schema rejects extra fields. Start returns a preparing operation immediately;
+status observes it without renewal. Stop also cancels preparation and names the
+exact operation, so delayed commands cannot stop a replacement.
+
+Later device controls use narrow typed operations, never arbitrary Baguette CLI arguments. Negotiate a versioned `MachineMeta.protocolCapabilities` capability; OS controls entry visibility only. Authorize remote listing as well as mutations. Workspace RPC does not authenticate self-reported user IDs: extend short-lived signed proofs to bind workspace/machine/session, UDID, action, operation/endpoint and CLI-instance nonce. Local routing remains independent of hosted authorization; cloud integration stays behind platform/cloud-api ports.
+
+Every media HTTP/WS request checks capability, UDID and the current control lease; input messages also verify that the lease remains valid. Accept only authorized access from the controlling session. No public sharing routes or anonymous viewer grants; removing sharing does not remove authentication. Explicitly carry credentials on WS connection rather than relying on a Referer being present.
+
+## Ownership, state and concurrency
+
+- Key operation queues, cancellation, local/remote endpoints, status and quota records by session plus kind (`browser` / `ios-simulator`). Update every owner, not just the top Map. Session archive/delete cleans both. Reuse QuickTunnelSession/cloudflared primitives instead of copying PreviewService.
+- Separate device and connection state. Boot success plus tunnel failure means device running / connection failed; retry connection without booting again. Tunnel readiness is followed by first-frame readiness.
+- Confirmed: one controlling Lody session per device across the machine, including across workspaces. Before booting or connecting, the CLI atomically acquires a UDID-keyed control lease bound to workspace/session and a generation. Coalesce repeated starts within the same session and serialize device mutations. Other sessions show “Controlled by another session” and disable preview, with no takeover action. Devices started by native tools may be attached; this coordinates Lody sessions, not native tools.
+- Cancelled/failed starts, explicit stop, device switch, idle expiry, revocation, session archive/delete and CLI exit release the corresponding lease. Disable old input and close old endpoints/sockets before allowing acquisition by another session. Lease generations prevent stale cleanup from releasing new ownership. Releasing control leaves the Simulator device running. A failed switch shows a retryable empty state without automatically reacquiring the old device.
+- Hiding, switching panel tabs, Zen or closing the panel stops that viewer's decoding/input/renewal, not the endpoint. Reopen through status. Explicit stop, revocation, archive/delete or CLI exit releases owned endpoints/processes. The operation owns its Baguette worker; leave user services and Simulator devices alone.
+- Retain a one-hour idle policy, renewed by visible-viewer heartbeats or valid operations, not emitted video frames, status queries or probes. Reconnection resets decoder/keyframe state; never queue touches across disconnection.
+- Store selection/preferences locally scoped by account/workspace/session/machine. No lists, frames, heartbeats or endpoint secrets in repo meta. CLI memory owns live endpoints; RPC restores UI. Future cross-client selection can use a small independent session-doc field, not Browser previewConnection or synchronized tokens.
+
+## Code evidence and implementation boundaries
+
+Inspected OSS `b83e2fdec0f7bc871243c138486c6fb1ce5c1007`:
+
+- `packages/components/src/components/sessions/session-side-panel-tab-bar.tsx` defines fixed kinds/options; `session-detail.tsx` owns fixed panels and the sole sidePanelTabs order. Extend persisted layout and mobile drill entry consistently.
+- `session-browser-panel.tsx` owns navigation/address/annotation; `managed-preview-surface.tsx` depends on annotation and Browser postMessage, so neither should become the simulator player. General status presentation can be extracted from `preview-connection-status.tsx`, removing address-specific language.
+- `apps/cli/src/preview/preview-service.ts` keys activeTunnels, operations, cancellation and publication by SessionId, allowing one remote owner today.
+- `local-preview-proxy.ts` calls `onActivity(true)` for WS messages in both directions. Video requires an explicit renewal policy.
+- Related decisions: [Quick Tunnel](../../proposed/architecture/2026-09-21-quick-tunnel-preview.md), [optional annotation](../../implemented/bug-fix/2026-09-15-preview-optional-annotation.md). Simulator integration does not remove existing proxy security boundaries.
+
+## Verification and limits
+
+Implement a vertical list→boot→first-frame→interaction→stop/restore/switch path, then recovery and cross-client acceptance. Deterministic coverage includes OS/protocol gating, target routing, cancellation/stale results, independent Browser/simulator owners, exactly one winner for concurrent acquisition across sessions/workspaces, lease release and stale-cleanup isolation, absence of share routes, unauthorized access denial, cross-UDID denial, revoke closing sockets, background frames not renewing, and CLI-death cleanup. Storybook covers languages, narrow layouts and key states.
+
+Real acceptance includes local offline, authorized-session remote Quick Tunnel, iPhone Safari/Capacitor, slow networks/disconnection, FPS and resource use. Validate H.264 decoding, backpressure and keyframe recovery independently; MJPEG success proves neither H.264 nor WAN latency.
+
+The implementation now includes shared schemas/capability, local and remote RPC,
+exact-command signed proofs, a machine-wide control lease, cancellable native worker,
+restricted media gateway, separate local/tunnel owners, and the UI Designer's panel.
+The viewer handshake binds origin, source and operation; it reports real frame dimensions.
+
+Validation includes deterministic ownership/cancellation/idle-expiry and gateway tests,
+RPC/proof tests, frontend mapping/controller/routing tests and typechecks. A real local
+smoke test enumerated 86 devices, installed the pinned artifact through a local mirror
+of the platform route, received a 205,691-byte JPEG, and stopped without shutting down
+the simulator. UI Designer checked Storybook in both languages and themes. The complete
+new sidebar has not been exercised in a live Electron build, nor has remote/mobile E2E.
+
+Distribution is prepared, not deployed: the private mirror script has a `--runtime baguette`
+lane; the pinned release must be mirrored before shipping. Native support is currently
+Apple Silicon/macOS 15+, with Xcode and an installed iOS runtime; Intel is not supported.
+No npm dependency was added. MJPEG bandwidth/latency is not a performance guarantee.
+
+## PR security review
+
+Workspace Streams can be read by other workspace members. Remote viewer URLs therefore travel only as P-256/AES-GCM envelopes to an ephemeral per-request recipient, whose public key is bound into the signed operation. The local direct DTO stays unchanged. Revocation now spans proof validation and startup, stays disabled until explicit re-enable, and owner/machine reassignment closes existing capabilities. Tests reject recipient/context substitution, plaintext wire URLs, and a start resumed after revocation.
+
+The UI contribution was integrated from its dedicated design branch; its Storybook checks covered light/dark, English/Chinese, device selection and interrupted/preparing states. Wire-to-view mapping remains in one model module. Parent integration adds actual frame dimensions, a first-frame timeout, account-scoped preferences and redaction in on-screen errors.

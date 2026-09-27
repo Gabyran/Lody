@@ -496,6 +496,18 @@ export type WorkspaceRuntime = {
     machineId: MachineId,
     options?: { configId?: AgentConfigId }
   ) => Promise<MachinePiExtensionsResponse>;
+  /**
+   * The one `ios-simulator/control` Machine RPC. Local machines are reached
+   * directly; remote ones with a preview-control proof for the exact command.
+   * Transport failures resolve as `{ success: false, error: 'failed' }`.
+   */
+  requestIosSimulatorControl: (request: {
+    machineId: MachineId;
+    sessionId: SessionId;
+    requestedByUserId: string;
+    command: import('@lody/shared').IosSimulatorCommand;
+    timeoutMs?: number;
+  }) => Promise<import('@lody/shared').IosSimulatorResponse>;
   dispose: () => Promise<void>;
 };
 

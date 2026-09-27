@@ -22,6 +22,9 @@ type Options = {
   runtimeBaseUrl: string;
   logger: Logger;
   now: () => number;
+  visualAnnotation?: boolean;
+  /** Media owners renew explicitly; continuous frames must not extend lifetime. */
+  renewOnTraffic?: boolean;
   download?: typeof ensureCloudflaredBinary;
   start?: typeof startCloudflaredProcess;
   verify?: typeof verifyPreviewTunnelRoundTrip;
@@ -132,7 +135,8 @@ export class QuickTunnelSession {
         target: this.options.target,
         connectionAddress: this.options.connectionAddress,
         remote: true,
-        onActivity: (renew) => this.activity(renew),
+        visualAnnotation: this.options.visualAnnotation,
+        onActivity: (renew) => this.activity(this.options.renewOnTraffic === false ? false : renew),
       });
       signal.throwIfAborted();
       child = await (this.options.start ?? startCloudflaredProcess)({

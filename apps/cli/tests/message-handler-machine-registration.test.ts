@@ -187,6 +187,7 @@ describe('MessageHandler machine registration', () => {
       ...(getHostMachineProtocolCapabilities().builtinPi ? { builtinPi: 1 } : {}),
       acpAuthenticationInteractions: 2,
       previewControl: 1,
+      iosSimulator: 1,
       localProjectRemoval: 1,
       localFileResources: 1,
       providerSetup: 1,

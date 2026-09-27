@@ -488,3 +488,5 @@ export interface Attachment {
 }
 
 export * from './schedule-control';
+
+export * from './ios-simulator';

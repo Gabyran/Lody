@@ -1,3 +1,4 @@
+import { IosSimulatorRequestSchema, IosSimulatorResponseSchema } from './ios-simulator';
 import { LocalFileResolutionSchema } from './local-file-preview';
 import { MachinePiExtensionsResponseSchema } from './pi-extensions';
 import { z } from 'zod';
@@ -85,6 +86,10 @@ export type SessionActiveInvocationContextResult = z.infer<
 >;
 
 export const LocalMachineRpcRequestSchema = z.discriminatedUnion('method', [
+  BaseLocalMachineRpcRequestSchema.extend({
+    method: z.literal('ios-simulator/control'),
+    params: IosSimulatorRequestSchema,
+  }).strict(),
   BaseLocalMachineRpcRequestSchema.extend({
     method: z.literal('session/get-active-invocation-context'),
     params: z
@@ -227,15 +232,27 @@ export const LocalMachineRpcRequestSchema = z.discriminatedUnion('method', [
   }).strict(),
   BaseLocalMachineRpcRequestSchema.extend({
     method: z.literal('session/preview-create'),
-    params: SessionPreviewCreateRequestSchema.omit({ type: true, machineId: true, workspaceId: true }),
+    params: SessionPreviewCreateRequestSchema.omit({
+      type: true,
+      machineId: true,
+      workspaceId: true,
+    }),
   }).strict(),
   BaseLocalMachineRpcRequestSchema.extend({
     method: z.literal('session/preview-revoke'),
-    params: SessionPreviewRevokeRequestSchema.omit({ type: true, machineId: true, workspaceId: true }),
+    params: SessionPreviewRevokeRequestSchema.omit({
+      type: true,
+      machineId: true,
+      workspaceId: true,
+    }),
   }).strict(),
   BaseLocalMachineRpcRequestSchema.extend({
     method: z.literal('session/preview-status'),
-    params: SessionPreviewStatusRequestSchema.omit({ type: true, machineId: true, workspaceId: true }),
+    params: SessionPreviewStatusRequestSchema.omit({
+      type: true,
+      machineId: true,
+      workspaceId: true,
+    }),
   }).strict(),
   BaseLocalMachineRpcRequestSchema.extend({
     method: z.literal('session/preview-endpoint-acquire'),
@@ -278,6 +295,7 @@ export type LocalMachineRpcRequest = z.infer<typeof LocalMachineRpcRequestSchema
 export type LocalMachineRpcRequestValidated = LocalMachineRpcRequest;
 
 export const LocalMachineRpcResultSchema = z.union([
+  IosSimulatorResponseSchema,
   SessionActiveInvocationContextResultSchema,
   CodeCollabV2FileIndexSnapshotSchema,
   CodeCollabV2OpenTextOkSchema,

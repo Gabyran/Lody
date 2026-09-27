@@ -1,0 +1,183 @@
+import { randomBytes } from 'node:crypto';
+import { createServer } from 'node:http';
+import type { Socket } from 'node:net';
+import { WebSocket, WebSocketServer } from 'ws';
+import { z } from 'zod';
+import { simulatorViewerHtml } from './viewer';
+
+const Input = z
+  .object({
+    type: z.enum(['touch1-down', 'touch1-move', 'touch1-up']),
+    x: z.number().finite().min(0).max(16384),
+    y: z.number().finite().min(0).max(16384),
+    width: z.number().int().min(1).max(16384),
+    height: z.number().int().min(1).max(16384),
+  })
+  .strict()
+  .refine((v) => v.x <= v.width && v.y <= v.height);
+const Heartbeat = z.object({ type: z.literal('heartbeat') }).strict();
+/** Only a fixed viewer and one UDID stream. Never exposes the Baguette HTTP API. */
+export async function createSimulatorGateway(options: {
+  operationId: string;
+  udid: string;
+  port: number;
+  active(): boolean;
+  renew(): void;
+}) {
+  const path = `/simulator/${randomBytes(32).toString('hex')}/`;
+  let origin: string | undefined;
+  const validOrigin = (host: string | undefined, requestOrigin: string | undefined) =>
+    origin !== undefined &&
+    host === new URL(origin).host &&
+    (!requestOrigin || requestOrigin === origin);
+  const sockets = new Set<Socket>();
+  const upstreams = new Set<WebSocket>();
+  const connections = new Set<() => Promise<void>>();
+  const wss = new WebSocketServer({ noServer: true, maxPayload: 4096 });
+  const server = createServer((req, res) => {
+    if (!options.active()) {
+      res.writeHead(410).end();
+      return;
+    }
+    if (
+      req.method !== 'GET' ||
+      !validOrigin(req.headers.host, req.headers.origin) ||
+      new URL(req.url ?? '/', 'http://localhost').pathname !== path
+    ) {
+      res.writeHead(404).end();
+      return;
+    }
+    res.writeHead(200, {
+      'Content-Type': 'text/html; charset=utf-8',
+      'Cache-Control': 'no-store',
+      'Referrer-Policy': 'no-referrer',
+      'Content-Security-Policy':
+        "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; img-src blob:",
+    });
+    res.end(simulatorViewerHtml(options.operationId));
+  });
+  server.on('connection', (socket) => {
+    sockets.add(socket);
+    socket.once('close', () => sockets.delete(socket));
+  });
+  server.on('upgrade', (req, socket, head) => {
+    if (
+      !options.active() ||
+      !validOrigin(req.headers.host, req.headers.origin) ||
+      new URL(req.url ?? '/', 'http://localhost').pathname !== `${path}stream`
+    ) {
+      socket.end('HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n');
+      return;
+    }
+    wss.handleUpgrade(req, socket, head, (client) => {
+      const upstream = new WebSocket(
+        `ws://127.0.0.1:${options.port}/simulators/${options.udid}/stream?format=mjpeg&version=1`,
+        { maxPayload: 16 * 1024 * 1024 }
+      );
+      upstreams.add(upstream);
+      let touch: z.infer<typeof Input> | undefined;
+      let shuttingDown: Promise<void> | undefined;
+      const shutdown = (): Promise<void> => {
+        if (shuttingDown) return shuttingDown;
+        shuttingDown = new Promise<void>((resolve) => {
+          const finish = () => {
+            clearTimeout(timer);
+            upstream.terminate();
+            client.terminate();
+            upstreams.delete(upstream);
+            connections.delete(shutdown);
+            resolve();
+          };
+          const timer = setTimeout(finish, 1000);
+          upstream.once('close', finish);
+          client.terminate();
+          if (upstream.readyState === WebSocket.OPEN) {
+            if (touch) upstream.send(JSON.stringify({ ...touch, type: 'touch1-up' }));
+            touch = undefined;
+            // close() drains the touch-up before its Close frame; terminate() would discard it.
+            upstream.close();
+          } else finish();
+        });
+        return shuttingDown;
+      };
+      const close = () => {
+        void shutdown();
+      };
+      connections.add(shutdown);
+      client.on('error', close);
+      upstream.on('error', close);
+      client.on('close', close);
+      upstream.on('close', close);
+      client.on('message', (data, binary) => {
+        if (shuttingDown || !options.active()) {
+          close();
+          return;
+        }
+        if (binary) {
+          close();
+          return;
+        }
+        let raw: unknown;
+        try {
+          raw = JSON.parse(data.toString());
+        } catch {
+          close();
+          return;
+        }
+        if (Heartbeat.safeParse(raw).success) {
+          options.renew();
+          return;
+        }
+        const parsed = Input.safeParse(raw);
+        if (!parsed.success || upstream.readyState !== WebSocket.OPEN) {
+          close();
+          return;
+        }
+        const input = parsed.data;
+        if ((input.type === 'touch1-down' && touch) || (input.type !== 'touch1-down' && !touch))
+          return;
+        touch = input.type === 'touch1-up' ? undefined : input;
+        options.renew();
+        if (upstream.bufferedAmount > 64 * 1024) {
+          close();
+          return;
+        }
+        upstream.send(JSON.stringify(input));
+      });
+      upstream.on('message', (data, binary) => {
+        if (shuttingDown || !options.active()) {
+          close();
+          return;
+        }
+        // JPEGs are independent frames; dropping while congested cannot corrupt a GOP.
+        if (
+          binary &&
+          client.readyState === WebSocket.OPEN &&
+          client.bufferedAmount < 2 * 1024 * 1024
+        )
+          client.send(data, { binary: true });
+      });
+    });
+  });
+  await new Promise<void>((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(0, '127.0.0.1', resolve);
+  });
+  const address = server.address();
+  if (!address || typeof address === 'string') throw new Error('Simulator gateway did not bind.');
+  origin = `http://127.0.0.1:${address.port}`;
+  return {
+    port: address.port,
+    path,
+    close: async () => {
+      await Promise.all([...connections].map((shutdown) => shutdown()));
+      for (const ws of upstreams) ws.terminate();
+      for (const ws of wss.clients) ws.terminate();
+      for (const socket of sockets) socket.destroy();
+      wss.close();
+      await new Promise<void>((resolve, reject) =>
+        server.close((e) => (e ? reject(e) : resolve()))
+      );
+    },
+  };
+}
