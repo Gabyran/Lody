@@ -83,10 +83,10 @@ describe('Session preparation for a scheduled run', () => {
     expect(prepared.userTurn.status).toBe('prepared');
   });
 
-  it('keeps an explicit title and never marks it as a replaceable draft', async () => {
+  it('keeps an explicit title as final, so no generated title replaces it', async () => {
     const prepared = await prepare();
     expect(prepared.meta.title).toBe('Morning check-in');
-    expect(prepared.meta).not.toHaveProperty('titleSource');
+    expect(prepared.meta.titleSource).toBe('user');
   });
 
   it('names an untitled Session with a draft from the first prompt line', async () => {

@@ -3062,9 +3062,10 @@ export async function prepareSessionInput(
   const sessionId = options.sessionId ?? (uuidV4() as SessionId);
   const repoFullName = resolveProjectGitHubRepo(project);
   const baseBranch = project?.kind === 'local' ? undefined : project?.branch?.trim();
+  // An explicit title is final: `user` blocks both the agent-pushed and the
+  // locally generated title. Otherwise a replaceable draft covers the gap until
+  // the generated title lands, which for ACP-owned titles is after the first turn.
   const title = normalizeCliValue(options.title);
-  // Without an explicit title the sidebar would stay blank until the agent's
-  // title lands, which for ACP-owned titles is after the first turn ends.
   const draftTitle = title ? undefined : deriveDraftSessionTitle(prompt);
   const meta = {
     id: sessionId,
@@ -3076,7 +3077,7 @@ export async function prepareSessionInput(
     cliType: agentConfig.cliType,
     agentType: agentConfig.agentType,
     agentConfigId: agentConfig.id,
-    ...(title ? { title } : {}),
+    ...(title ? { title, titleSource: 'user' as const } : {}),
     ...(draftTitle ? { title: draftTitle, titleSource: 'draft' as const } : {}),
     ...(project ? { project } : {}),
     ...(repoFullName ? { repoFullName } : {}),
@@ -3811,7 +3812,7 @@ const sessionCreateCommand = new Command('create')
   .option('--agent-config <idOrName>', 'Agent config id or name')
   .option('--parent <sessionId>', 'Parent session whose work context should be reused')
   .option('--use-current-session-as-parent', 'Use LODY_SESSION_ID as the parent session')
-  .option('--title <title>', 'Session title')
+  .option('--title <title>', 'Fixed session title (default: generated from the prompt)')
   .option('--repo <owner/repo>', 'GitHub repository to attach')
   .option('--local-project <id|name|path>', 'Local project id, name, or root path')
   .option('--worktree', 'Create an isolated git worktree for --local-project')
