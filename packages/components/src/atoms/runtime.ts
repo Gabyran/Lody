@@ -76,6 +76,7 @@ import type { WorkspaceWriter } from '../providers/workspace-writer';
 import type { CodeCollabFileIndexCache } from '@/lib/code-collab-file-index-cache';
 import { readStoredAuthToken } from '@/lib/auth-bootstrap';
 import type { RoomSyncState } from '@/lib/room-sync-state';
+import type { IosSimulatorClient } from '@/lib/ios-simulator/ios-simulator-types';
 import { currentWorkspaceIdAtom, currentWorkspaceSlugAtom } from './workspace-context';
 
 /**
@@ -496,6 +497,12 @@ export type WorkspaceRuntime = {
     machineId: MachineId,
     options?: { configId?: AgentConfigId }
   ) => Promise<MachinePiExtensionsResponse>;
+  /**
+   * iOS Simulator preview over Machine RPC, authenticated inside the
+   * implementation. Absent until the runtime implements the contract; the
+   * panel then asks for an update instead of calling anything.
+   */
+  readonly iosSimulator?: IosSimulatorClient;
   dispose: () => Promise<void>;
 };
 
