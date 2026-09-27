@@ -176,7 +176,7 @@ Separately, a real full disk makes the CLI daemon exit through an uncaught log-t
   - If strict writes are too expensive, fall back to Phase 0 behavior. Do not relax the ordering.
 - **Checkpoint key (limit):** it is the opaque stream URL, so a gateway-origin change forces bootstraps where `getLoroStreamsRemoteCursorUrlAliases` used to avoid them. Keying checkpoints by `(bucketId, streamId)` would need an upstream change.
 
-**Phase 1 as implemented (branch `feat/renderer-replica-bound-checkpoints`; works with the pinned 0.20.3).**
+**Phase 1 as implemented ([#1058](https://github.com/LodyAI/Lody/pull/1058); works with the pinned 0.20.3).**
 
 - **Wiring.** `workspace-streams-transport.ts` builds the renderer transport with `createRepoStreamsPersistence(repo, { documentRemoteCursorStore })`. The resilient per-window cursor database now serves LoroDoc rooms only.
   - Each room's barrier is its own `persist*Now`, not a full `repo.flush()`. That also removes most of the multi-resource strict-commit cost measured under Phase 0, because a barrier commits only its own resource.

@@ -175,7 +175,7 @@ Lody 目前运行 0.20.0，外加一个上游已经吸收的补丁。因此 Lody
   - 如果 strict 写入太贵，退回阶段 0 的行为，而不是放宽写入顺序。
 - **checkpoint 的 key（已知限制）：** key 是不透明的 stream URL。因此网关 origin 变化时会触发 bootstrap，而过去 `getLoroStreamsRemoteCursorUrlAliases` 可以避免这种情况。改为按 `(bucketId, streamId)` 作 key 需要上游修改。
 
-**阶段 1 的实际实现（分支 `feat/renderer-replica-bound-checkpoints`；可直接使用已锁定的 0.20.3）。**
+**阶段 1 的实际实现（[#1058](https://github.com/LodyAI/Lody/pull/1058)；可直接使用已锁定的 0.20.3）。**
 
 - **接线。** `workspace-streams-transport.ts` 用 `createRepoStreamsPersistence(repo, { documentRemoteCursorStore })` 构建渲染端 transport。容错的按窗口游标库现在只服务 LoroDoc 房间。
   - 每个房间的屏障是它自己的 `persist*Now`，而不是整库 `repo.flush()`。这也消除了阶段 0 测到的多资源 strict 提交成本的大部分，因为一次屏障只提交它自己的资源。
