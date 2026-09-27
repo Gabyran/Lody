@@ -1,4 +1,4 @@
-import { spawn } from 'node:child_process'
+import { runCommandText, type CommandText } from '@lody/shared/node/process'
 
 // GUI-launched apps (macOS launchd, Linux .desktop) inherit a minimal PATH that
 // usually omits /usr/local/bin, Homebrew, and editor CLIs (`code`, `cursor`,
@@ -51,44 +51,32 @@ async function loadUserShellEnv(): Promise<NodeJS.ProcessEnv | null> {
   if (!shellPath) return null
 
   const shellCommand = resolveShellEnvCommand(shellPath)
-  return await new Promise<NodeJS.ProcessEnv | null>((resolve) => {
-    const child = spawn(shellCommand.command, shellCommand.args, {
+  let output: CommandText
+  try {
+    // A timeout ends the shell's whole process tree (rc files may start helpers).
+    output = await runCommandText({
+      command: shellCommand.command,
+      args: shellCommand.args,
       env: process.env,
-      stdio: ['ignore', 'pipe', 'pipe']
+      timeout: SHELL_ENV_TIMEOUT_MS,
+      check: 'none'
     })
+  } catch (error) {
+    console.warn('Failed to load shell environment', error)
+    return null
+  }
 
-    const stdoutChunks: Buffer[] = []
-    const stderrChunks: Buffer[] = []
-    const timeout = setTimeout(() => {
-      child.kill('SIGTERM')
-    }, SHELL_ENV_TIMEOUT_MS)
-
-    child.stdout?.on('data', (chunk) => stdoutChunks.push(Buffer.from(chunk)))
-    child.stderr?.on('data', (chunk) => stderrChunks.push(Buffer.from(chunk)))
-
-    child.on('error', (error) => {
-      clearTimeout(timeout)
-      console.warn('Failed to load shell environment', error)
-      resolve(null)
-    })
-
-    child.on('close', (code) => {
-      clearTimeout(timeout)
-      if (code !== 0) {
-        const stderr = Buffer.concat(stderrChunks).toString('utf8').trim()
-        if (stderr) {
-          console.warn(`Shell environment probe exited with code ${code}: ${stderr}`)
-        } else {
-          console.warn(`Shell environment probe exited with code ${code}`)
-        }
-        resolve(null)
-        return
-      }
-      const payload = Buffer.concat(stdoutChunks).toString('utf8')
-      const parsed = parseNullDelimitedEnv(payload)
-      resolve(Object.keys(parsed).length > 0 ? parsed : null)
-    })
-  })
+  if (output.code !== 0) {
+    const stderr = output.stderr.trim()
+    if (stderr) {
+      console.warn(`Shell environment probe exited with code ${output.code}: ${stderr}`)
+    } else {
+      console.warn(`Shell environment probe exited with code ${output.code}`)
+    }
+    return null
+  }
+  const parsed = parseNullDelimitedEnv(output.stdout)
+  return Object.keys(parsed).length > 0 ? parsed : null
 }
 
 /**

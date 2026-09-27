@@ -5,16 +5,17 @@ import { Duration, Effect, Ref, type Scope } from 'effect';
 
 import { formatErrorMessage } from '@/utils/format-error';
 
-import { SpawnFailed, TerminationFailed } from '../process/errors';
-import { spawnProcess, type ProcessExit } from '../process/managed-process';
-import { errnoCode, NodeProcess, type NodeProcessApi } from '../process/node-process';
+import { SpawnFailed, TerminationFailed } from '@lody/shared/node/process';
+import { spawnProcess, type ProcessExit } from '@lody/shared/node/process';
+import { errnoCode, NodeProcess, type NodeProcessApi } from '@lody/shared/node/process';
 import {
   terminateTree,
   waitUntilGone,
   type ProcessTree,
   type TreeSignal,
-} from '../process/process-tree';
+} from '@lody/shared/node/process';
 import {
+  FORCED_TERMINATION,
   SandboxIoError,
   SandboxUnavailable,
   type ProcessContainer,
@@ -130,7 +131,8 @@ export const makeCgroupContainer = (options: {
                 : attached.left;
             // The child exited before it could join; nothing escaped the limits.
             if (errnoCode(cause) !== 'ESRCH') {
-              yield* Effect.try(() => managed.child.kill('SIGKILL')).pipe(Effect.ignore);
+              // It may already have started children outside the limits: end the tree.
+              yield* managed.terminate(FORCED_TERMINATION).pipe(Effect.ignore);
               return yield* Effect.fail(
                 new SpawnFailed({
                   command: spec.command,

@@ -15,7 +15,7 @@ import {
   EXECUTION_PLANE_RESOURCE_PROFILE,
 } from '../src/utils/process-resource-profile';
 import type { Logger } from '../src/utils/logger';
-import { FakeProcessTable } from './fake-process-table';
+import { FakeProcessTable } from '@lody/shared/node/process-testing';
 
 const createSilentLogger = (warnings: string[] = []): Logger => ({
   info: () => {},

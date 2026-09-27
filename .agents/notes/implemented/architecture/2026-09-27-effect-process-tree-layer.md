@@ -177,10 +177,50 @@ Trade-offs of giving commands their own process group:
 - Waits after SIGKILL are now bounded everywhere, so, for example,
   `cloudflared stop()` can reject instead of hanging.
 
-Not covered: Electron main, `packages/cli-supervisor` and `packages/shared`
-(13 files) run outside the CLI and still start processes directly. Bringing
-them onto the same layer requires moving it into a package they can import.
-That is a separate decision.
+## Follow-up: one layer for the whole repository
+
+A further stacked PR moves the layer into `packages/shared/src/node/process.ts`
+(`@lody/shared/node/process`), with its facades and the fake process table
+(`process-testing.ts`). Electron main, the CLI supervisor and the shared Node
+helpers now use it too. The CLI keeps only its session containers and a thin
+facade that adds its logger.
+
+The boundary guard now covers:
+- `apps/cli/src`;
+- `apps/electron/src/main`;
+- `packages/cli-supervisor/src`;
+- `packages/shared/src/node`, including `.cjs` files.
+
+It also flags `<child>.kill(` calls, so every termination path is the layer's.
+The rules moved with the code to `packages/shared/src/node/AGENTS.md`.
+
+Decisions:
+- **One module, no relative imports.** Electron runs its tests with plain
+  `node --test --experimental-strip-types`, which cannot resolve extensionless
+  relative imports. `process.ts` is therefore one module, and
+  `process-testing.ts` avoids TypeScript parameter properties.
+- **The three `.cjs` twins were deleted.** The hand-maintained CommonJS copies of
+  `cli-detection`, `local-project` and `file-lock` duplicated their process
+  logic. A repository search found only their own parity tests loading them.
+  Unique cases from those tests were moved onto the TypeScript modules.
+- **Lock liveness is three-state.** `file-lock` asks `probePid`, which returns
+  `ours`, `foreign` or `missing`. A lock is valid only while its pid is still a
+  process of ours: EPERM means the pid now belongs to another user, so the
+  owner is gone. The earlier `kill(pid, 0)` code had the same outcome. The first
+  migration briefly treated EPERM as alive, which a test now rules out.
+- **`signalChildTreeNow` runs synchronously.** Exit handlers cannot await, so
+  it signals without waiting for the tree to disappear. A forked fiber would
+  send nothing before the process exits; on Windows the `taskkill` starts
+  inside the synchronous step.
+- **The supervisor ends the tree its launcher describes.** `LaunchHandle` states
+  whether its child leads a process group; neither the CLI nor Electron
+  launches the supervised CLI detached. If there is no shutdown channel, or it
+  fails, the supervisor sends SIGTERM through the tree and cuts the grace period
+  short when that SIGTERM cannot be delivered. A child whose tree survives
+  SIGKILL makes the supervisor fatal.
+- **Electron quit uses bounded tree termination.** It keeps quit-time ownership:
+  a survivor still fails quit. On Windows it now ends the whole tree instead of
+  only the root.
 
 ## Verification
 

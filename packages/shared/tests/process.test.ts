@@ -9,16 +9,12 @@ import {
   runCommand,
   runCommandOk,
   type CommandSpec,
-} from '../src/platform/process/command';
-import { SpawnFailed, TerminationFailed } from '../src/platform/process/errors';
-import { spawnProcess, spawnScoped, type SpawnSpec } from '../src/platform/process/managed-process';
-import { NodeProcess, NodeProcessLive } from '../src/platform/process/node-process';
-import { TREE_POLL_INTERVAL } from '../src/platform/process/process-tree';
-import {
-  LINGERING_GROUP_PROBE_INTERVAL,
-  makeNoopContainer,
-} from '../src/platform/sandbox/noop-container';
-import { FakeProcessTable } from './fake-process-table';
+} from '../src/node/process';
+import { signalChildTreeNow, SpawnFailed, TerminationFailed } from '../src/node/process';
+import { spawnProcess, spawnScoped, type SpawnSpec } from '../src/node/process';
+import { NodeProcess, NodeProcessLive } from '../src/node/process';
+import { TREE_POLL_INTERVAL } from '../src/node/process';
+import { FakeProcessTable } from '../src/node/process-testing';
 
 const GRACEFUL = { graceMs: 5_000, killWaitMs: 5_000 };
 const FORCED = { graceMs: 0, killWaitMs: 5_000 };
@@ -28,12 +24,6 @@ const agentSpec: SpawnSpec = {
   options: { stdio: 'pipe' },
   processGroup: true,
 };
-
-/** Let queued exit/close events fire and the fibers they wake run. */
-const settleEvents = Effect.zipRight(
-  Effect.promise(() => new Promise<void>((resolve) => setImmediate(resolve))),
-  Effect.yieldNow()
-);
 
 const failureOf = <A, E>(exit: Exit.Exit<A, E>): E | undefined =>
   Exit.isFailure(exit) ? Option.getOrUndefined(Cause.failureOption(exit.cause)) : undefined;
@@ -210,51 +200,6 @@ describe('process tree termination (Windows)', () => {
   });
 });
 
-describe('noop process container', () => {
-  it.scoped('keeps a group whose leader exited until its last member is gone', () => {
-    const table = new FakeProcessTable('linux');
-    return Effect.gen(function* () {
-      const container = yield* makeNoopContainer({
-        description: 'test',
-        configureProcess: () => Effect.void,
-      });
-      const contained = yield* container.spawn({ command: 'agent', args: [], options: {} });
-      const leader = contained.child.pid ?? -1;
-      const descendant = table.addDescendant(leader);
-      table.exitOnItsOwn(leader);
-      yield* settleEvents;
-
-      const tracked = yield* container.readAccounting;
-      expect(tracked.kind === 'process-tree' && tracked.rootPids).toEqual([leader]);
-
-      table.kill(descendant, 'SIGKILL');
-      yield* TestClock.adjust(LINGERING_GROUP_PROBE_INTERVAL);
-
-      const after = yield* container.readAccounting;
-      expect(after.kind === 'process-tree' && after.rootPids).toEqual([]);
-    }).pipe(Effect.provideService(NodeProcess, table.api));
-  });
-
-  it.scoped('terminates a lingering group left by an exited leader', () => {
-    const table = new FakeProcessTable('linux');
-    return Effect.gen(function* () {
-      const container = yield* makeNoopContainer({
-        description: 'test',
-        configureProcess: () => Effect.void,
-      });
-      const contained = yield* container.spawn({ command: 'agent', args: [], options: {} });
-      const leader = contained.child.pid ?? -1;
-      const descendant = table.addDescendant(leader);
-      table.exitOnItsOwn(leader);
-      yield* settleEvents;
-
-      yield* container.terminateAll(FORCED);
-
-      expect(table.isAlive(descendant)).toBe(false);
-    }).pipe(Effect.provideService(NodeProcess, table.api));
-  });
-});
-
 const readPidLine = (stream: Readable | null) =>
   Effect.async<number, Error>((resume) => {
     if (!stream) {
@@ -401,5 +346,19 @@ describe('runCommand process-tree ownership', () => {
       expect(failure).toBeInstanceOf(CommandOutputTooLarge);
       expect(table.isAlive(leader)).toBe(false);
     }).pipe(Effect.provideService(NodeProcess, table.api));
+  });
+});
+
+describe('signalChildTreeNow', () => {
+  it('signals the whole group before returning, for exit handlers that cannot wait', () => {
+    const table = new FakeProcessTable('linux');
+    const child = table.api.spawn('cli', [], { detached: true });
+    const leader = child.pid ?? -1;
+    const descendant = table.addDescendant(leader);
+
+    signalChildTreeNow(child, 'SIGTERM', { processGroup: true }, { nodeProcess: table.api });
+
+    expect(table.delivered).toEqual([{ target: -leader, signal: 'SIGTERM' }]);
+    expect(table.isAlive(descendant)).toBe(false);
   });
 });

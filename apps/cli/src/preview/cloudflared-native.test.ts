@@ -1,7 +1,7 @@
 import { ChildProcess } from 'node:child_process';
 import { PassThrough } from 'node:stream';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import type { NodeProcessApi } from '@/platform/process/node-process';
+import type { NodeProcessApi } from '@lody/shared/node/process';
 import { startCloudflaredNative, type CloudflaredProcess } from './cloudflared-native';
 
 class ControlledChild extends ChildProcess {

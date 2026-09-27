@@ -16,8 +16,8 @@ import type { Logger } from '@/utils/logger';
 import { formatErrorMessage } from '@/utils/format-error';
 import { LOG_PREFIX_ANNOTATION } from '@/platform/logger';
 import { makePlatformRunner, startProcess, withSpawn } from '@/platform/promise-facade';
-import type { NodeProcessApi } from '@/platform/process/node-process';
-import { childProcessTree, terminateTree } from '@/platform/process/process-tree';
+import type { NodeProcessApi } from '@lody/shared/node/process';
+import { childProcessTree, terminateTree } from '@lody/shared/node/process';
 import type { TerminalManager } from '@/session/terminal-manager';
 import {
   AgentClient,

@@ -1,6 +1,6 @@
 import os from 'os';
 import { z } from 'zod';
-import { CommandOutputTooLarge, CommandTimedOut } from '@/platform/process/command';
+import { CommandOutputTooLarge, CommandTimedOut } from '@lody/shared/node/process';
 import { runCommandText } from '@/platform/promise-facade';
 
 const PROCESS_TABLE_TIMEOUT_MS = 2_000;

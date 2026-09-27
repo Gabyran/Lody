@@ -36,7 +36,7 @@ import {
 } from './acp-authentication-output';
 import { shutdownLocalAcpAgent, spawnAcpProcess, terminateAcpProcessTree } from './acp-runner';
 import { startProcess, withSpawn } from '@/platform/promise-facade';
-import type { NodeProcessApi } from '@/platform/process/node-process';
+import type { NodeProcessApi } from '@lody/shared/node/process';
 import type { ManagedRuntimeProgressEvent } from './managed-agent-runtime';
 import { createStdinWritableStream, createStdoutReadableStream } from '@/utils/stream';
 import { getLoginShellEnv } from './login-shell-env';

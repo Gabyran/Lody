@@ -5,7 +5,7 @@ import type { ChildProcess } from 'child_process';
 
 import type realSpawn from 'cross-spawn';
 
-import { TerminationFailed } from '../src/platform/process/errors';
+import { TerminationFailed } from '@lody/shared/node/process';
 import { Session } from '../src/session/session';
 import type { TerminalManager } from '../src/session/terminal-manager';
 import {
@@ -14,7 +14,7 @@ import {
   type SessionSandbox,
 } from '../src/session/session-sandbox';
 import type { Logger } from '../src/utils/logger';
-import { FakeProcessTable } from './fake-process-table';
+import { FakeProcessTable } from '@lody/shared/node/process-testing';
 
 const createSilentLogger = (): Logger => ({
   info: () => {},

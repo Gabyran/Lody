@@ -1538,6 +1538,9 @@ importers:
         specifier: 4.3.6
         version: 4.3.6
     devDependencies:
+      '@effect/vitest':
+        specifier: ~0.26.0
+        version: 0.26.0(effect@3.18.4)(vitest@3.2.4(@types/debug@4.1.12)(@types/node@24.10.12)(jiti@2.7.0)(jsdom@26.1.0)(lightningcss@1.33.0)(terser@5.46.0)(tsx@4.23.13)(yaml@2.8.2))
       '@types/cross-spawn':
         specifier: ^6.0.6
         version: 6.0.6
@@ -14758,6 +14761,11 @@ snapshots:
     dependencies:
       effect: 3.18.4
       vitest: 3.2.4(@types/debug@4.1.12)(@types/node@24.10.12)(jiti@2.6.1)(jsdom@26.1.0)(lightningcss@1.33.0)(terser@5.46.0)(tsx@4.23.7)(yaml@2.8.2)
+
+  '@effect/vitest@0.26.0(effect@3.18.4)(vitest@3.2.4(@types/debug@4.1.12)(@types/node@24.10.12)(jiti@2.7.0)(jsdom@26.1.0)(lightningcss@1.33.0)(terser@5.46.0)(tsx@4.23.13)(yaml@2.8.2))':
+    dependencies:
+      effect: 3.18.4
+      vitest: 3.2.4(@types/debug@4.1.12)(@types/node@24.10.12)(jiti@2.7.0)(jsdom@26.1.0)(lightningcss@1.33.0)(terser@5.46.0)(tsx@4.23.13)(yaml@2.8.2)
 
   '@electric-sql/pglite-socket@0.0.20(@electric-sql/pglite@0.3.15)':
     dependencies:

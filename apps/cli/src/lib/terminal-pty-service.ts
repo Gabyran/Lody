@@ -21,12 +21,12 @@ import { clearManagedGhTokenEnv, LODY_MANAGED_GH_TOKEN_SHA256_ENV } from '@/lib/
 import type { Logger } from '@/utils/logger';
 import { formatErrorMessage } from '@/utils/format-error';
 import { makePlatformRunner } from '@/platform/promise-facade';
-import { NodeProcess } from '@/platform/process/node-process';
+import { NodeProcess } from '@lody/shared/node/process';
 import {
   posixGroupTree,
   terminateTree,
   type TerminationPolicy,
-} from '@/platform/process/process-tree';
+} from '@lody/shared/node/process';
 
 const SCROLLBACK_MAX_CHARS = 512 * 1024;
 const TITLE_PARSE_BUFFER_MAX_CHARS = 4096;

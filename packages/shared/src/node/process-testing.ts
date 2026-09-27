@@ -1,7 +1,11 @@
+/**
+ * Test support for the process layer (`./process`): an in-memory OS process
+ * table. Import it only from tests.
+ */
 import { EventEmitter } from 'node:events';
 import type { ChildProcess, SpawnOptions } from 'node:child_process';
 
-import type { NodeProcessApi } from '../src/platform/process/node-process';
+import type { NodeProcessApi } from './process';
 
 type FakeProcess = {
   pid: number;
@@ -23,11 +27,15 @@ export class FakeChildProcess extends EventEmitter {
   readonly stdout = new EventEmitter();
   readonly stderr = new EventEmitter();
 
-  constructor(
-    readonly pid: number | undefined,
-    private readonly table: FakeProcessTable
-  ) {
+  readonly pid: number | undefined;
+  private readonly table: FakeProcessTable;
+
+  // Plain fields, not parameter properties: Electron's `node --test` runs this
+  // file with type stripping, which rejects parameter properties.
+  constructor(pid: number | undefined, table: FakeProcessTable) {
     super();
+    this.pid = pid;
+    this.table = table;
   }
 
   kill(signal: NodeJS.Signals = 'SIGTERM'): boolean {
@@ -63,7 +71,10 @@ export class FakeProcessTable {
 
   readonly api: NodeProcessApi;
 
-  constructor(readonly platform: NodeJS.Platform = 'linux') {
+  readonly platform: NodeJS.Platform;
+
+  constructor(platform: NodeJS.Platform = 'linux') {
+    this.platform = platform;
     this.api = {
       platform,
       spawn: (command, args, options) => this.spawn(command, args, options),

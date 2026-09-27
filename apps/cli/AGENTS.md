@@ -46,9 +46,9 @@ Root `AGENTS.md` applies; this file adds CLI context. Build, PR-poller, and adap
 - Prefer Effect TS idioms for new/refactored CLI code — services via `Context.Tag` + `Layer`,
   typed errors, structured concurrency, `Schedule` retries:
   [cli-effect-ts](../../.agents/docs/cli-effect-ts.md).
-- Start, await, or signal OS processes only through `src/platform/process` (Promise code: its
-  `promise-facade`); no `child_process`, `cross-spawn`, or `process.kill` elsewhere.
-  `check:cli-process-boundary` enforces it: [platform](src/platform/AGENTS.md).
+- Start, await, or signal OS processes only through `@lody/shared/node/process` (Promise
+  code: `src/platform/promise-facade`); never `child_process`, `cross-spawn` or `kill`
+  elsewhere. `check:cli-process-boundary` enforces it: [rules](../../packages/shared/src/node/AGENTS.md).
 - Keep the strict tsconfig, no `any` or non-null assertions, and Zod at every foreign boundary:
   context/cli-type-safety.md.
 - After a remote prompt arrives, only correctness-critical setup may block before ACP

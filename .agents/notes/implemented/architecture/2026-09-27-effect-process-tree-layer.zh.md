@@ -106,8 +106,36 @@ CLI 时按 Ctrl-C 不再能传到这些命令；打开 `/dev/tty` 的提示（�
 提示输入。daemon 本身没有终端，所以只影响前台 CLI 运行。SIGKILL 之后的等待现在处处都有上限，
 因此像 `cloudflared stop()` 这样的调用可能会 reject，而不是一直挂起。
 
-未覆盖：Electron main、`packages/cli-supervisor` 和 `packages/shared`（共 13 个文件）运行在 CLI
-之外，仍然直接启动进程。要让它们也使用这一层，需要把它移到它们能导入的包里，这是另一项决定。
+## 后续：整个仓库只用一层
+
+又一个叠加 PR 把这一层移到 `packages/shared/src/node/process.ts`（`@lody/shared/node/process`），
+连同门面和假进程表（`process-testing.ts`）一起。Electron main、CLI supervisor 与 shared 的 Node
+辅助模块现在也都经由它。CLI 只保留自己的会话容器，以及一个只负责加上 CLI 日志器的薄门面。
+边界守卫现在覆盖 `apps/cli/src`、`apps/electron/src/main`、`packages/cli-supervisor/src` 和
+`packages/shared/src/node`（包括 `.cjs` 文件），并且也会标记 `<child>.kill(` 调用，确保所有终止
+路径都走这一层。规则随代码一起移到 `packages/shared/src/node/AGENTS.md`。
+
+决定：
+
+- **单个模块，不用相对导入。** Electron 用原生的 `node --test --experimental-strip-types` 跑测试，
+  无法解析省略扩展名的相对导入。因此 `process.ts` 保持为单个模块，`process-testing.ts` 也不用
+  TypeScript 参数属性。
+- **删除三份 `.cjs` 双胞胎文件。** `cli-detection`、`local-project`、`file-lock` 的手写 CommonJS
+  副本重复实现了各自的进程逻辑。在仓库里搜索后，只找到它们自己的对照测试在加载它们。那些测试中
+  独有的用例已改到 TypeScript 模块上。
+- **锁的存活判断分三态。** `file-lock` 调用 `probePid`，结果为 `ours`、`foreign` 或 `missing`。
+  只有 pid 仍属于本用户的存活进程时，锁才有效：EPERM 说明这个 pid 已经属于另一个用户，原持有者
+  已不在。原来的 `kill(pid, 0)` 实现也是这个结果。首次迁移时曾短暂把 EPERM 视为存活，现在有测试
+  排除这种情况。
+- **`signalChildTreeNow` 同步执行。** 退出处理器无法 await，所以它只发信号，不等整棵树消失。
+  如果用 fork 出去的 fiber，进程退出前一个信号都发不出去；在 Windows 上，`taskkill` 在同步步骤
+  内就已启动。
+- **supervisor 终止启动方描述的那棵树。** `LaunchHandle` 会说明它的子进程是否自成进程组；CLI 和
+  Electron 都不以 detached 方式启动被监管的 CLI。如果没有关停通道或关停通道失败，supervisor 会
+  通过进程树发送 SIGTERM；若这个 SIGTERM 无法送达，就提前结束宽限期。子进程树在 SIGKILL 后仍然
+  存活，会让 supervisor 进入 fatal 状态。
+- **Electron 退出使用有上限的进程树终止。** 退出时的所有权保持不变：仍有进程残留时，退出会失败。
+  在 Windows 上现在会结束整棵树，而不只是根进程。
 
 ## 验证
 

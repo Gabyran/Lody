@@ -5,8 +5,8 @@ import { Effect, Exit, Scope } from 'effect';
 import { type SessionId } from '@lody/shared';
 
 import { platformLayer, makePlatformRunner, type PlatformRunner } from '@/platform/promise-facade';
-import { SpawnFailed } from '@/platform/process/errors';
-import { nodeProcessLive, type NodeProcessApi } from '@/platform/process/node-process';
+import { SpawnFailed } from '@lody/shared/node/process';
+import { nodeProcessLive, type NodeProcessApi } from '@lody/shared/node/process';
 import { makeCgroupContainer, type CgroupFs } from '@/platform/sandbox/cgroup-container';
 import { makeNoopContainer } from '@/platform/sandbox/noop-container';
 import {
