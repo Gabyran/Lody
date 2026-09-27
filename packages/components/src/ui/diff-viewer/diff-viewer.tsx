@@ -256,6 +256,11 @@ export interface DiffViewerProps {
     CollapseToggle: React.FC<{ className?: string }>;
   }) => ReactNode;
   /**
+   * Extra control in the default header, after the file actions. Ignored when
+   * `renderHeader` is set.
+   */
+  headerAccessory?: ReactNode;
+  /**
    * Whether the collapsible card is open by default (uncontrolled mode)
    * @default true
    */
@@ -463,6 +468,7 @@ function DiffViewerImpl({
   cachePrerenderedHtml = true,
   options,
   renderHeader,
+  headerAccessory,
   defaultOpen = true,
   open,
   onOpenChange,
@@ -1160,6 +1166,7 @@ function DiffViewerImpl({
               {path}
             </span>
             <DiffFileHeaderActions path={path} onOpenFile={onOpenFile} />
+            {headerAccessory}
           </div>
           {commentCount > 0 && (
             <div className="flex shrink-0 items-center gap-1 text-xs text-muted-foreground">
@@ -1199,6 +1206,7 @@ const areDiffViewerPropsEqual = (prev: DiffViewerProps, next: DiffViewerProps): 
   prev.cachePrerenderedHtml === next.cachePrerenderedHtml &&
   prev.options === next.options &&
   prev.renderHeader === next.renderHeader &&
+  prev.headerAccessory === next.headerAccessory &&
   prev.defaultOpen === next.defaultOpen &&
   prev.open === next.open &&
   prev.onOpenChange === next.onOpenChange &&

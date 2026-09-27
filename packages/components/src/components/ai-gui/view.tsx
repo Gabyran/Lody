@@ -98,6 +98,7 @@ import { buildResendInputBlocks, isUndeliveredUserTurnEntry } from '@/lib/undeli
 import { ConversationOutlineRail } from './conversation-outline-rail';
 import { RAIL_WIDTH } from './conversation-outline-rail-geometry';
 import { conversationWideBlockMaxWidth } from '@/lib/conversation-layout';
+import { WideBlockToggle } from './wide-block-toggle';
 import { useLatestRef } from '@/hooks/use-latest-ref';
 import { observeResizeOnAnimationFrame } from '@/lib/resize-observer';
 import {
@@ -2145,6 +2146,8 @@ export const SessionChatStreamView = forwardRef<
             <div
               ref={scrollContainerRef}
               data-message-selection-scroll=""
+              // `CONVERSATION_WIDE_SCOPE_ATTR`: wide-block toggles show only in here.
+              data-conversation-wide-scope=""
               data-window-session-stream-ready={
                 initialWindowReady && initialScrollRestored ? sessionId : undefined
               }
@@ -6253,8 +6256,9 @@ export const MarkdownBlock = memo(function MarkdownBlock({
   isStreaming?: boolean;
   onFilePathClick?: (filePath: string) => void;
   searchBlockId?: string;
-  /** Top-level tables, code, diagrams and math may grow past the column. Only
-   *  for prose on the rail: markdown inside a bordered panel must stay in it. */
+  /** Top-level math widens past the column by itself; tables, code and diagrams
+   *  on request. Only for prose on the rail: markdown inside a bordered panel
+   *  must stay in it. */
   wideBlocks?: boolean;
 }) {
   const handleAgentFileLinkClick = useStableCallback((href: string) => {
@@ -6997,6 +7001,7 @@ const ToolCallCard = memo(function ToolCallCard({
             showBorder={!isTerminalExecuteToolCall}
             outputDisplayMode={inlineOutput ? 'full' : undefined}
             fontSize={fontSize}
+            wideToggle={isActivityRow}
           />
         );
         terminalIndex += 1;
@@ -7024,6 +7029,7 @@ const ToolCallCard = memo(function ToolCallCard({
             showBorder={!isTerminalExecuteToolCall}
             outputDisplayMode={inlineOutput ? 'full' : undefined}
             fontSize={fontSize}
+            wideToggle={isActivityRow}
           />
         );
         terminalIndex += 1;
@@ -7263,8 +7269,18 @@ type TerminalOutputBlockType = Extract<ToolCallContentBlock, { type: 'terminal_o
 /**
  * Renders a diff block using the content directly from the block.
  */
+/** One element for every diff: a new one per render would defeat `DiffViewer`'s memo. */
+const DIFF_WIDE_BLOCK_TOGGLE = (
+  <WideBlockToggle className="h-6 w-6 shrink-0 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-accent hover:text-foreground" />
+);
+
 const DiffBlockRenderer = ({ block }: { block: DiffBlockType }) => (
-  <DiffViewer path={block.path} oldText={block.oldText ?? ''} newText={block.newText ?? ''} />
+  <DiffViewer
+    path={block.path}
+    oldText={block.oldText ?? ''}
+    newText={block.newText ?? ''}
+    headerAccessory={DIFF_WIDE_BLOCK_TOGGLE}
+  />
 );
 
 const formatTerminalCommandLine = (block: TerminalCommandBlockType) => {

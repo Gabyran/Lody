@@ -29,16 +29,16 @@ export const CONVERSATION_GUTTER_X_CLASS = 'px-[14px] sm:px-[18px]';
 // 768px of content (48rem), plus the gutter on each side: the column caps the
 // CONTENT box, so the max width adds the per-breakpoint gutter (14px / 18px).
 // Narrow enough for prose to stay readable; blocks whose layout is set by their
-// content rather than by line length break out of it (see below).
+// content rather than by line length can break out of it (see below).
 export const CONVERSATION_CONTENT_WIDTH_CLASS = `mx-auto w-full max-w-[calc(48rem+28px)] sm:max-w-[calc(48rem+36px)] ${CONVERSATION_GUTTER_X_CLASS}`;
 
 /**
- * Wide blocks — tables, fenced code and diffs, Mermaid diagrams, display math,
- * and tool diffs/terminal output — grow past the prose column when their
- * content needs it, centred on the column, up to the pane width less
- * `sideReservePx` on each side. There is no absolute cap: on a large screen a
- * long diff line uses the whole pane rather than scrolling beside empty space.
- * Narrower content keeps the column width.
+ * Wide blocks — display math by itself; tables, fenced code and diffs, Mermaid
+ * diagrams, and tool diffs/terminal output when the reader asks (see
+ * `WideBlockToggle`) — grow past the prose column to their content width,
+ * centred on the column, up to the pane width less `sideReservePx` on each
+ * side. There is no absolute cap: on a large screen a long diff line uses the
+ * whole pane rather than scrolling beside empty space.
  *
  * Returned as a CSS length for the `--conversation-wide-block-max-width`
  * variable, which the `.conversation-wide-*` rules in `tailwind/index.css` read.

@@ -206,33 +206,89 @@ pre,
     padding-inline: 0;
   }
 
-  /* Wide blocks grow past the prose column when their content needs it:
-     `max-content`, never narrower than the column, capped by
-     `--conversation-wide-block-max-width` (set on the conversation stream; see
-     `conversationWideBlockMaxWidth`). Outside the stream the variable is unset,
-     the cap is 100%, and the block keeps the column width. `left` + `translate`
-     keep it centred on the column whatever width it settles on. Only top-level
-     Markdown blocks qualify: a nested one would centre on its list or quote. A
-     previewed Markdown fence holds prose, which must keep the column's measure.
+  /* Wide blocks past the prose column. A block grows to `max-content`, never
+     narrower than the column, up to `--conversation-wide-block-max-width` (set
+     on the conversation stream; see `conversationWideBlockMaxWidth`); outside the
+     stream the variable is unset and the cap is 100%. `left` + `translate`
+     centre it on the column at any width; at the column width they cancel out.
+
+     Display math widens by itself: a formula cannot wrap and is read as one
+     unit. Every other block (tables, code, Mermaid, tool diffs, terminals) keeps
+     the column until the reader asks: `WideBlockToggle` sets
+     `data-wide-expanded`. Widening them unasked moved where each block started,
+     and the eye had to hunt for it.
+
      Below a 1024px pane the gain is under 60px a side and reads as a misaligned
-     edge rather than a wider block, so the column holds. */
-  @container (min-width: 1024px) {
-    .conversation-wide-markdown
-      > div
-      > :is(
-        [data-markdown-table-frame],
-        [data-streamdown='code-block']:not([data-markdown-preview='true']),
-        [data-streamdown='mermaid-block'],
-        .katex-display
-      ),
+     edge, so the column holds and the toggle is hidden. */
+  .conversation-wide-markdown > div > .katex-display,
+  .conversation-wide-markdown
+    > div
+    > :is(
+      [data-markdown-table-frame],
+      [data-streamdown='code-block'],
+      [data-streamdown='mermaid-block']
+    ),
+  .conversation-wide-block {
+    /* Centred at every width, collapsed included, so only the width animates:
+       dropping the centring on collapse would jump the block left first. */
+    position: relative;
+    left: 50%;
+    translate: -50% 0;
+  }
+
+  .conversation-wide-markdown
+    > div
+    > :is(
+      [data-markdown-table-frame],
+      [data-streamdown='code-block'],
+      [data-streamdown='mermaid-block']
+    ),
+  .conversation-wide-block {
+    /* An explicit length, not `auto`, so it interpolates with `calc-size()`. */
+    width: 100%;
+    transition: width 220ms cubic-bezier(0.2, 0, 0, 1);
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .conversation-wide-markdown > div > *,
     .conversation-wide-block {
-      position: relative;
-      left: 50%;
-      translate: -50% 0;
-      /* Streamdown ships `w-full` on its blocks, and utilities beat this layer. */
-      width: max-content !important;
+      transition: none;
+    }
+  }
+
+  @container (min-width: 1024px) {
+    .conversation-wide-markdown > div > .katex-display,
+    [data-wide-expanded='true'] {
       min-width: 100%;
-      max-width: var(--conversation-wide-block-max-width, 100%);
+      /* `!important`: Streamdown's Mermaid block carries a `max-w-full` utility. */
+      max-width: var(--conversation-wide-block-max-width, 100%) !important;
+    }
+
+    .conversation-wide-markdown > div > .katex-display {
+      width: max-content;
+    }
+
+    [data-wide-expanded='true'] {
+      /* Streamdown ships `w-full` on its blocks, and utilities beat this layer.
+         `calc-size()` lets the width animate from the column to the content;
+         without it (WebKit) the block snaps to `max-content`. */
+      width: max-content !important;
+      width: calc-size(
+        max-content,
+        min(size, var(--conversation-wide-block-max-width, 100%))
+      ) !important;
+    }
+  }
+
+  /* The toggle's pane gate. `!important`: the code and Mermaid toolbars style
+     their buttons with more specific `display` rules. */
+  [data-wide-block-toggle] {
+    display: none !important;
+  }
+
+  @container (min-width: 1024px) {
+    [data-wide-block-toggle]:not([hidden]) {
+      display: inline-flex !important;
     }
   }
 

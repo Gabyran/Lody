@@ -1671,6 +1671,8 @@
   "sessions.fileViewer.search": "Search",
   "sessions.fileViewer.wordWrap": "Wrap lines",
   "sessions.fileViewer.wordWrapEnable": "Wrap long lines",
+  "sessions.wideBlock.expand": "Widen to fit content",
+  "sessions.wideBlock.collapse": "Fit to column",
   "sessions.fileViewer.wordWrapDisable": "Disable line wrap",
   "sessions.fileViewer.selectTab": "Select a file or diff to review.",
   "sessions.fileViewer.tabSaveProblem": "Save needs attention",

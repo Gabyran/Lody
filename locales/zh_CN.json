@@ -1671,6 +1671,8 @@
   "sessions.fileViewer.search": "搜索",
   "sessions.fileViewer.wordWrap": "自动换行",
   "sessions.fileViewer.wordWrapEnable": "长行自动换行",
+  "sessions.wideBlock.expand": "展开到内容宽度",
+  "sessions.wideBlock.collapse": "收回到阅读栏宽度",
   "sessions.fileViewer.wordWrapDisable": "关闭自动换行",
   "sessions.fileViewer.selectTab": "选择一个文件或差异进行查看。",
   "sessions.fileViewer.tabSaveProblem": "保存需要处理",

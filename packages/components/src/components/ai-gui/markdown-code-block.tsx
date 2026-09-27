@@ -9,6 +9,7 @@ import {
   type CustomRendererProps,
 } from 'streamdown';
 import { conversationFontSizeAtom } from '@/atoms/settings';
+import { WideBlockToggle } from './wide-block-toggle';
 
 const NAMED_PATH_PATTERN = /(?:title|filename|path|file)\s*=\s*(?:"([^"]+)"|'([^']+)'|(\S+))/iu;
 const HIGHLIGHT_LANG_PATTERN = /\bhighlight=(\S+)/iu;
@@ -98,6 +99,7 @@ export const MarkdownCodeToolbar = memo(function MarkdownCodeToolbar({
             {previewing ? <EyeOff /> : <Eye />}
           </button>
         ) : null}
+        {previewing ? null : <WideBlockToggle />}
         {previewing ? null : (
           <button
             type="button"

@@ -3,12 +3,19 @@ import { Check, Copy } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { writeTextToClipboard } from '@/lib/clipboard';
 import { cn } from '@/lib/utils';
+import { WideBlockToggle } from './wide-block-toggle';
+
+const TABLE_ACTION_CLASS =
+  'flex h-6 w-6 items-center justify-center rounded-md border border-foreground/[0.1] bg-background/90 text-muted-foreground backdrop-blur-sm hover:text-foreground';
 
 const COPIED_FEEDBACK_MS = 1500;
 
 /** One cell's text for a Markdown table: single line, pipes escaped. */
 const markdownCellText = (cell: HTMLTableCellElement): string =>
-  (cell.textContent ?? '').replace(/\s*\n\s*/g, ' ').trim().replace(/\|/g, '\\|');
+  (cell.textContent ?? '')
+    .replace(/\s*\n\s*/g, ' ')
+    .trim()
+    .replace(/\|/g, '\\|');
 
 /**
  * The table as GitHub-flavored Markdown: the first row is the header (as it is
@@ -87,25 +94,31 @@ export function MarkdownTable({ node: _node, ...props }: MarkdownTableProps) {
       >
         <table ref={tableRef} {...props} />
       </div>
-      <button
-        type="button"
-        aria-label={label}
-        title={label}
-        onClick={() => {
-          void handleCopy();
-        }}
+      {/* Hover actions share one fade, so the two appear together. */}
+      <div
         className={cn(
-          'absolute right-1.5 top-1.5 flex h-6 w-6 items-center justify-center rounded-md border border-foreground/[0.1] bg-background/90 text-muted-foreground backdrop-blur-sm transition-opacity hover:text-foreground',
-          'opacity-0 focus-visible:opacity-100 group-hover/table:opacity-100 [@media(hover:none)]:opacity-100',
+          'absolute right-1.5 top-1.5 flex items-center gap-1 transition-opacity',
+          'opacity-0 focus-within:opacity-100 group-hover/table:opacity-100 [@media(hover:none)]:opacity-100',
           copied && 'opacity-100'
         )}
       >
-        {copied ? (
-          <Check className="h-3.5 w-3.5" aria-hidden="true" />
-        ) : (
-          <Copy className="h-3.5 w-3.5" aria-hidden="true" />
-        )}
-      </button>
+        <WideBlockToggle className={TABLE_ACTION_CLASS} />
+        <button
+          type="button"
+          aria-label={label}
+          title={label}
+          onClick={() => {
+            void handleCopy();
+          }}
+          className={TABLE_ACTION_CLASS}
+        >
+          {copied ? (
+            <Check className="h-3.5 w-3.5" aria-hidden="true" />
+          ) : (
+            <Copy className="h-3.5 w-3.5" aria-hidden="true" />
+          )}
+        </button>
+      </div>
     </div>
   );
 }

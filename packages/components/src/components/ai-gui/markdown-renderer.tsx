@@ -62,6 +62,7 @@ import { useResolvedTheme } from '../../theme-provider';
 import type { ConversationFontSize } from '@/atoms/settings';
 import { MarkdownFencedCodeBlock } from './markdown-code-block';
 import { MarkdownDiffBlock } from './markdown-diff-block';
+import { WideBlockToggle } from './wide-block-toggle';
 import { createMarkdownMermaidConfig, createMarkdownMermaidPlugin } from './markdown-mermaid';
 import {
   GitHubReferenceChip,
@@ -1067,7 +1068,7 @@ const AgentFileLink = ({
 
   return (
     <ContextMenu.Root>
-      <ContextMenu.Trigger >{link}</ContextMenu.Trigger>
+      <ContextMenu.Trigger>{link}</ContextMenu.Trigger>
       <ContextMenu.Content className="min-w-[190px]">
         {contextMenuItems.map((item) => {
           const ItemIcon = item.icon;
@@ -1582,10 +1583,13 @@ export const MarkdownRenderer = memo(function MarkdownRenderer({
             copy and download. */}
         {mermaidBlocks.map((block) =>
           createPortal(
-            <MermaidFullscreenButton
-              label={openDiagramLabel}
-              onOpen={() => openDiagram(block.diagram)}
-            />,
+            <>
+              <WideBlockToggle className="cursor-pointer p-1 text-muted-foreground transition-all hover:text-foreground" />
+              <MermaidFullscreenButton
+                label={openDiagramLabel}
+                onOpen={() => openDiagram(block.diagram)}
+              />
+            </>,
             block.actions,
             block.id
           )

@@ -27,6 +27,7 @@ import {
   terminalTextFontSizeStyle,
 } from './conversation-font-size-classes';
 import { prepareTerminalPreview } from './terminal-preview';
+import { WideBlockToggle } from './wide-block-toggle';
 
 export { prepareTerminalPreview } from './terminal-preview';
 
@@ -93,6 +94,8 @@ export type TerminalComponentProps = {
   onHeaderClick?: () => void;
   headerExpanded?: boolean;
   fontSize?: ConversationFontSize;
+  /** Offer the hover control that widens this terminal past the prose column. */
+  wideToggle?: boolean;
 };
 
 export const TerminalComponent = memo(function TerminalComponent({
@@ -110,6 +113,7 @@ export const TerminalComponent = memo(function TerminalComponent({
   onHeaderClick,
   headerExpanded,
   fontSize = DEFAULT_CONVERSATION_FONT_SIZE,
+  wideToggle = false,
 }: TerminalComponentProps) {
   const outputRef = useRef<HTMLDivElement>(null);
   const [isFocused, setIsFocused] = useState(false);
@@ -163,11 +167,15 @@ export const TerminalComponent = memo(function TerminalComponent({
   return (
     <div
       className={cn(
-        'overflow-hidden',
+        'group/terminal relative overflow-hidden',
         showBorder ? CONVERSATION_PANEL_FRAME_CLASS : null,
         className
       )}
     >
+      {/* No header buttons to sit beside, so it waits in the corner on hover. */}
+      {wideToggle ? (
+        <WideBlockToggle className="absolute right-1.5 top-1.5 z-10 h-6 w-6 items-center justify-center rounded-md border border-foreground/[0.1] bg-background/90 text-muted-foreground opacity-0 backdrop-blur-sm transition-opacity hover:text-foreground focus-visible:opacity-100 group-hover/terminal:opacity-100 [@media(hover:none)]:opacity-100" />
+      ) : null}
       {/* The terminal's own surface (VS Code `terminal.background`, or the muted
           fallback) wraps the header AND the body, so the header's raised tint
           steps away from the SAME base the output sits on. While the surface
