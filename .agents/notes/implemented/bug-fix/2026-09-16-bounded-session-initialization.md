@@ -109,13 +109,37 @@ original form now that branch ordering distinguishes the two.
 `SessionManager.abandonPendingSessionCreate` detaches the entry so the next
 `createSession` starts fresh. The underlying work cannot be cancelled — there is
 no abort signal through `createSessionFromPreparationOrCold` — so it is reaped:
-if the abandoned create ever yields a Session, that Session is terminated, and
-the registry entry is dropped only while it still points at that instance so a
-completed retry's Session is never unregistered. Nothing awaits the wedged
-promise. `requestSessionTerminate` now races its wait against a 300s deadline
+if the abandoned create ever yields a Session, that Session is detached and then
+terminated (see the next section for why the order matters). Nothing awaits the
+wedged promise. `requestSessionTerminate` now races its wait against a 300s deadline
 (the slowest healthy ACP start observed was 249s) using a sentinel rather than a
 rejection, so a genuine `terminate()` failure still propagates to the caller, and
 on expiry it detaches through the same reaper.
+
+### Detaching the orphan before terminating it (second review follow-up)
+
+The reaper first shipped as an identity-guarded `sessions.delete` followed by
+`session.terminate(true)`, on the theory that the guard protected a retry's
+replacement. It did not. `createSessionInner` publishes the Session and attaches
+the manager's listeners before managed-runtime resolution and `createAgent` run,
+so for both stages that can wedge, the orphan is registered first and the retry's
+replacement is registered over it under the same id. When the orphan later
+resolved, `terminate()` emitted `terminated`; the still-attached `onTerminated`
+deletes `sessions[event.sessionId]` — by id, not by instance — and forwards the
+event to MessageHandler, which finalizes that id's live turn as "the agent died".
+The guard ran before the listener and could not stop it.
+
+This is the defect the `createAgent` failure path already documents and avoids by
+calling `detachSession` before `terminate`. The reaper now does the same.
+`detachSession` removes the listeners and drops the registry entry only when it
+still points at that instance, so the hand-written delete was redundant and is
+gone; `detachSession` and its detacher map were widened from `Session` to
+`ISession` because the pending map yields the interface type.
+
+A late orphan's end is therefore invisible to the manager. This also matters for
+`requestSessionTerminate`'s timeout path: its caller has already been told
+`terminated`, and a second late event for that id could only hit whatever Session
+was started there since.
 
 ### Garbage collection
 
@@ -151,7 +175,16 @@ the watchdog, each make the first two tests hang until the 30s vitest timeout �
 the production symptom. Removing only the `abandonPendingSessionCreate` call
 fails the retry test on the leftover map entry, and removing that assertion too
 makes the retry itself hang for 30s, which is precisely the defect the review
-reported. Full CLI suite: 2872 passing.
+reported.
+
+The second follow-up has its own `session-manager.test.ts` case using real
+`Session` instances in production order: the orphan registers and wedges, the
+retry registers a replacement and completes, then the orphan resolves. It asserts
+the replacement is still registered and that the manager emitted no `terminated`
+for that id. Restoring the old reaper body fails it on the registry
+(`getSession` returns null); with that assertion removed it still fails on the
+emitted `terminated` event, so each observable catches the defect independently. After rebasing onto main
+(2026-09-27) the full CLI suite passes: 3105 tests.
 
 Not validated: the 900s and 1800s budgets have never been reached by a real
 download or clone, so they are bounds rather than measurements. Only the

@@ -61,6 +61,8 @@ A retry therefore always begins genuinely new initialization work.
 Detaching is not cancellation: the abandoned attempt may still be running, and
 Lody cannot stop it. It is watched instead, and any Session it eventually
 produces is terminated rather than left behind as an orphan agent process.
+That termination is silent: it never counts as the end of the Session's work, so
+it cannot unregister or end a retry that has since started the same Session.
 Teardown never blocks indefinitely on an attempt that may never finish.
 
 The deadline is a backstop for a dependency that never answers. It is not a

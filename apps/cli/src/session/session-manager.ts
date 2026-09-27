@@ -454,7 +454,7 @@ export class SessionManager extends EventEmitter<SessionManagerEvents> {
   private gitCredentialBroker: GitCredentialBroker | null = null;
   private readonly sessions = new Map<SessionId, Session>();
   /** Per-instance listener teardown for `detachSession`; see `registerSessionEvents`. */
-  private readonly sessionEventDetachers = new WeakMap<Session, () => void>();
+  private readonly sessionEventDetachers = new WeakMap<ISession, () => void>();
   private readonly pendingSessionCreates = new Map<SessionId, Promise<ISession>>();
   private readonly pendingTerminationPromises = new Map<SessionId, Promise<void>>();
   private readonly preparationSessions = new Map<SessionId, Session>();
@@ -555,12 +555,15 @@ export class SessionManager extends EventEmitter<SessionManagerEvents> {
     void pending.then(
       async (session) => {
         // The create finished after all. Its Session was never handed to a
-        // caller, so it is an orphan: terminate it. Only drop the registry entry
-        // when it still points at this instance — a retry that already published
-        // its own Session must keep it.
-        if (this.sessions.get(sessionId) === session) {
-          this.sessions.delete(sessionId);
-        }
+        // caller, so it is an orphan: terminate it — but DETACH it first, for
+        // the same reason as the `createAgent` failure path. `createSessionInner`
+        // already registered the manager's listeners on it, and `onTerminated`
+        // deletes `sessions[event.sessionId]` by ID and forwards `terminated` to
+        // MessageHandler. Left attached, the orphan's death would unregister a
+        // retry's healthy replacement under the same id and finalize its live
+        // turn as "the agent died". `detachSession` is keyed by instance, so the
+        // replacement's registration survives.
+        this.detachSession(session);
         try {
           await session.terminate(true);
           this.logger.debug(
@@ -2316,11 +2319,11 @@ export class SessionManager extends EventEmitter<SessionManagerEvents> {
   /**
    * Stop publishing a Session instance's lifecycle events and drop it from the
    * live map. Only for an instance that was registered by `createSessionInner`
-   * but whose creation then failed: it was never returned to a caller, so from
-   * the outside it never existed. Keyed by instance, not session id, because a
+   * but never reached a caller — its creation failed, or its create was
+   * abandoned — so from the outside it never existed. Keyed by instance, not session id, because a
    * recovery path may already be creating the replacement under the same id.
    */
-  private detachSession(session: Session): void {
+  private detachSession(session: ISession): void {
     this.sessionEventDetachers.get(session)?.();
     this.sessionEventDetachers.delete(session);
     if (this.sessions.get(session.sessionId) === session) {

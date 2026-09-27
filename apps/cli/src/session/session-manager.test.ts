@@ -1086,6 +1086,56 @@ describe('SessionManager durable create ownership', () => {
     expect(terminate).toHaveBeenCalledWith(true);
   });
 
+  it('reaps a late orphan without unregistering or finalizing the retry that replaced it', async () => {
+    const manager = buildOwnershipManager();
+    const sessionId = 'orphan-after-replacement-session' as SessionId;
+    const config = createSessionConfig({ sessionId });
+    const managerTerminated: SessionId[] = [];
+    manager.on('terminated', (event: { sessionId: SessionId }) => {
+      managerTerminated.push(event.sessionId);
+    });
+
+    const orphanCreate = deferred<ISession>();
+    const replacementCreate = deferred<ISession>();
+    let attempt = 0;
+    (
+      manager as unknown as {
+        createSessionFromPreparationOrCold: () => Promise<ISession>;
+      }
+    ).createSessionFromPreparationOrCold = async () =>
+      await (++attempt === 1 ? orphanCreate.promise : replacementCreate.promise);
+
+    // Attempt 1 registers its Session (manager listeners attached) and then
+    // wedges in managed-runtime resolution or ACP startup — both of which run
+    // AFTER `createSessionInner` has published it.
+    void manager.createSession(config).catch(() => undefined);
+    await Promise.resolve();
+    const orphan = (await createSessionInner(manager, config)) as Session;
+    expect(manager.abandonPendingSessionCreate(sessionId, 'initialization-stalled')).toBe(true);
+
+    // The retry publishes a healthy replacement under the same id and completes.
+    const retry = manager.createSession(config);
+    await Promise.resolve();
+    const replacement = await createSessionInner(manager, config);
+    replacementCreate.resolve(replacement);
+    await expect(retry).resolves.toBe(replacement);
+    expect(manager.getSession(sessionId)).toBe(replacement);
+
+    // Only now does the orphan's wedged startup return.
+    const orphanTerminated = new Promise<void>((resolve) => {
+      orphan.once('terminated', () => resolve());
+    });
+    orphanCreate.resolve(orphan);
+    await orphanTerminated;
+    await Promise.resolve();
+
+    // The orphan is gone, but its death is invisible to the manager: the
+    // replacement stays registered, and MessageHandler never hears a
+    // `terminated` for this id that would finalize the replacement's live turn.
+    expect(manager.getSession(sessionId)).toBe(replacement);
+    expect(managerTerminated).toEqual([]);
+  });
+
   it('reports no entry to abandon when the create already settled', async () => {
     const manager = buildOwnershipManager();
     const sessionId = 'settled-create-session' as SessionId;

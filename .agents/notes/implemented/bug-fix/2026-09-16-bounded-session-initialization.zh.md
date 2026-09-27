@@ -89,11 +89,29 @@ ACP 启动里的 create 永远不会清除它——于是本笔记宣称的恢�
 
 `SessionManager.abandonPendingSessionCreate` 摘除该条目，使下一次 `createSession` 重新
 开始。底层工作无法取消——`createSessionFromPreparationOrCold` 没有中止信号——因此改为回收：
-被放弃的 create 一旦真的产出 Session，该 Session 会被终止；并且只有当注册表条目仍指向该
-实例时才删除它，以免误删一次已完成重试所产出的 Session。没有任何地方会去 await 那个挂死的
-Promise。`requestSessionTerminate` 现在把等待与 300 秒期限竞速（观测到的最慢健康 ACP 启动
+被放弃的 create 一旦真的产出 Session，该 Session 会先被摘除监听、再被终止（顺序为何重要见
+下一节）。没有任何地方会去 await 那个挂死的 Promise。`requestSessionTerminate` 现在把等待与 300 秒期限竞速（观测到的最慢健康 ACP 启动
 为 249 秒），并且用哨兵值而非 reject 来表示超时，因此真正的 `terminate()` 失败仍会抛给
 调用方；期限到达后则走同一条回收路径摘除。
+
+### 先摘除孤儿再终止它（第二次评审后续）
+
+回收逻辑最初的实现是先按实例校验后 `sessions.delete`，再 `session.terminate(true)`，
+以为这个校验能保护重试产生的替身。实际上保护不了。`createSessionInner` 在托管运行时解析与
+`createAgent` 之前就已发布该 Session 并挂上 manager 的监听器，因此对这两个可能卡死的阶段，
+孤儿总是先注册，重试的替身随后以同一 id 覆盖注册。孤儿之后若 resolve，`terminate()` 会发出
+`terminated`；仍挂着的 `onTerminated` 会**按 id 而非按实例**删除 `sessions[event.sessionId]`，
+并把事件转发给 MessageHandler，后者会把该 id 上正在运行的回合当作「Agent 已死」来收尾。
+那个校验在监听器之前执行，拦不住它。
+
+这正是 `createAgent` 失败路径早已记录并通过「先 `detachSession` 再 `terminate`」规避的缺陷。
+现在回收逻辑也这样做。`detachSession` 会移除监听器，并且只在注册表条目仍指向该实例时才删除
+它，所以手写的 delete 是多余的，已删除；由于 pending map 产出的是接口类型，`detachSession`
+及其 detacher map 从 `Session` 放宽为 `ISession`。
+
+因此迟到孤儿的结束对 manager 不可见。这对 `requestSessionTerminate` 的超时路径同样重要：
+它的调用方已被告知 `terminated`，针对该 id 的第二次迟到事件只可能打到此后在那里启动的
+Session 上。
 
 ### 垃圾回收
 
@@ -122,7 +140,11 @@ map 覆盖管理器契约：朴素的重试会拿到同一个挂死 Promise；�
 消融验证：分别禁用看门狗、以及保留看门狗但移除竞速，都会让前两个测试一直挂到 vitest 的
 30 秒超时——正是线上的症状。仅移除 `abandonPendingSessionCreate` 调用，重试测试会因残留的
 map 条目而失败；把该断言也去掉后，重试本身会挂满 30 秒，这正是评审所报告的缺陷。
-完整 CLI 套件：2872 个测试通过。
+第二次后续在 `session-manager.test.ts` 中有独立用例，使用真实的 `Session` 实例并按生产
+顺序执行：孤儿注册并卡住，重试注册替身并完成，然后孤儿才 resolve。断言替身仍在注册表中，
+且 manager 没有为该 id 发出 `terminated`。恢复旧的回收实现会让它在注册表断言上失败
+（`getSession` 返回 null）；去掉该断言后仍会在发出的 `terminated` 事件上失败，两个可观察
+结果各自独立地捕获该缺陷。rebase 到 main（2026-09-27）后，完整 CLI 套件 3105 个测试通过。
 
 未验证：900s 与 1800s 预算从未被真实的下载或克隆触达，因此它们是上界而非实测值。
 只有 `initializing` 的预算是对照实际卡死校准的。
