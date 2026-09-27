@@ -207,6 +207,17 @@ and leaves the session, the CLI and every window alone. `signOut` itself approve
 again, in case a window became unsaved in between. A declined cache clear leaves the
 clear armed for the next load.
 
+`approveTeardown` first flushed and asked about a snapshot taken on entry. A window
+that became unsaved while another was flushing, or while the user looked at the
+question, was then destroyed without a flush or a question. Review caught this TOCTOU
+as well. It now works in rounds over the full list:
+- A window that became unsaved during the flushes gets a flush of its own before
+  anyone is asked.
+- Any generation that moves while the question is open starts another round.
+- Approvals are granted only for the generations the user was asked about.
+- `tearDownWindows` checks every window once more (`mayTearDown`) right before
+  `destroy()`.
+
 **Quit approval has one owner.** The updater set the global "app is quitting" flag
 before the quit barrier asked anything. It has to set that flag because Electron's
 updater closes windows before `before-quit`. A cancelled quit never cleared the
@@ -327,6 +338,14 @@ Automated, with injected clocks, manual timers and fault injection, no real slee
 - `renderer-storage-episodes.test.ts` (refusal revision, real `LoroRepo`): a second
   refused meta write inside an open episode republishes with the same `since` and a
   higher revision. Dropping the guard's refusal hook fails it.
+- `desktop-exclusion.test.mjs` (teardown rounds): with the question about window 1
+  held open, window 2 has its first write refused. The old answer does not cover
+  window 2, which is flushed and asked about again. On Cancel, nothing is destroyed
+  and window 2's report stays; if window 2's flush saves, it is destroyed with no loss.
+  A window that becomes unsaved during another window's flush is flushed before the
+  question. A report landing right after approval sends `tearDownWindows` round again.
+  Removing the generation fence, the newcomer flush, or the final `mayTearDown` check
+  each fails a test.
 - `desktop-exclusion.test.mjs` (quit coordinator): with the quitting flag preset as
   the updater does, a cancelled quit clears it, and a later window close is flushed
   and asked again. An approved quit lets the window go; an aborted one (failed

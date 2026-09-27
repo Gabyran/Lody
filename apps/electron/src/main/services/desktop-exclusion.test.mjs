@@ -9,7 +9,8 @@ import {
   RendererStorageState,
   WindowStorageBarrier,
   createQuitCoordinator,
-  resolveUnsavedBeforeQuit
+  resolveUnsavedBeforeQuit,
+  tearDownWindows
 } from '@lody/shared/renderer-storage-barrier'
 
 const loopback = { host: '127.0.0.1', port: 0 }
@@ -397,6 +398,179 @@ void test('an approval without an intent does not outlive new unsaved data, reus
   state.report(2, 300)
   barrier.documentGone(2)
   assert.deepEqual(lost, [[2, 300]])
+})
+
+/**
+ * Two windows about to be torn down (sign-out from window 1). Each window answers
+ * its flush with `answers[id]`; confirmations can be held open by the test.
+ */
+const createTeardownHarness = () => {
+  const state = new RendererStorageState()
+  const answers = new Map()
+  const flushedWindows = []
+  // A window whose flush answer the test releases itself.
+  const held = new Map()
+  const confirms = []
+  const lost = []
+  const waiters = []
+  const barrier = new WindowStorageBarrier({
+    state,
+    quitApproved: () => false,
+    reportLost: (windowId, since) => lost.push([windowId, since]),
+    confirmDiscard: (since, kind) => {
+      const { promise, resolve } = Promise.withResolvers()
+      confirms.push({ since, kind, resolve })
+      for (const waiter of waiters.splice(0)) waiter()
+      return promise
+    },
+    quitCheck: {
+      timeoutMs: 3_000,
+      setTimer: () => null,
+      clearTimer: () => {},
+      send: (windowId, requestId) => {
+        flushedWindows.push(windowId)
+        const answer = () =>
+          state.handleQuitCheckResult(windowId, requestId, answers.get(windowId) ?? null)
+        if (held.has(windowId)) held.get(windowId).resolve(answer)
+        else queueMicrotask(answer)
+        return true
+      }
+    }
+  })
+  /** Holds the next flush of `windowId`; resolves to a function that answers it. */
+  const holdFlush = (windowId) => {
+    const hold = Promise.withResolvers()
+    held.set(windowId, hold)
+    return hold.promise.then((answer) => {
+      held.delete(windowId)
+      return answer
+    })
+  }
+  // Resolves once the barrier is showing its `count`-th question (signalled, not polled).
+  const nextQuestion = async (count) => {
+    while (confirms.length < count) {
+      await new Promise((resolve) => waiters.push(resolve))
+    }
+    return confirms[count - 1]
+  }
+  return { state, answers, confirms, lost, barrier, nextQuestion, flushedWindows, holdFlush }
+}
+
+void test('a window that becomes unsaved while the user is asked is flushed and asked about again', async () => {
+  const { state, answers, confirms, barrier, nextQuestion } = createTeardownHarness()
+  state.report(1, 100)
+  answers.set(1, 100)
+  const approval = barrier.approveTeardown([1, 2], 'sign-out')
+
+  // While the question about window 1 is open, window 2 has its first write refused.
+  const first = await nextQuestion(1)
+  answers.set(2, 200)
+  state.report(2, 200)
+  first.resolve(true)
+
+  // The answer did not cover window 2: it is flushed (still refused) and asked about.
+  const second = await nextQuestion(2)
+  assert.equal(second.since, 100)
+  assert.equal(state.unsavedSince(2), 200)
+  second.resolve(false)
+  assert.equal(await approval, false)
+  assert.equal(confirms.length, 2)
+})
+
+void test("a window that becomes unsaved during another window's flush gets its own flush first", async () => {
+  const { state, answers, confirms, barrier, nextQuestion, flushedWindows, holdFlush } =
+    createTeardownHarness()
+  state.report(1, 100)
+  answers.set(1, 100)
+  const answerWindow1 = holdFlush(1)
+  const approval = barrier.approveTeardown([1, 2], 'clear-cache')
+
+  // Window 1 is flushing; meanwhile window 2 has a write refused. Its own flush would save it.
+  const answer = await answerWindow1
+  state.report(2, 200)
+  answer()
+
+  // Window 2 is flushed (and saved) before anyone is asked, so the question is only about window 1.
+  const question = await nextQuestion(1)
+  assert.equal(flushedWindows.includes(2), true)
+  assert.equal(state.unsavedSince(2), null)
+  assert.equal(question.since, 100)
+  question.resolve(true)
+  assert.equal(await approval, true)
+  assert.equal(confirms.length, 1)
+})
+
+void test('teardown destroys a window only once it saved or its current state was approved', async () => {
+  // The reported case, end to end: window 2 is not destroyed on window 1's old answer.
+  const cancelled = createTeardownHarness()
+  cancelled.state.report(1, 100)
+  cancelled.answers.set(1, 100)
+  const destroyed = []
+  const signOut = tearDownWindows({
+    barrier: cancelled.barrier,
+    windowIds: [1, 2],
+    keep: 1,
+    kind: 'sign-out',
+    destroy: (windowId) => destroyed.push(windowId)
+  })
+  const first = await cancelled.nextQuestion(1)
+  cancelled.answers.set(2, 200)
+  cancelled.state.report(2, 200)
+  first.resolve(true)
+  ;(await cancelled.nextQuestion(2)).resolve(false)
+  assert.equal(await signOut, false)
+  assert.deepEqual(destroyed, [])
+  assert.equal(cancelled.state.unsavedSince(2), 200)
+
+  // Window 2's flush saves in the next round: it is destroyed, and nothing is lost.
+  const saved = createTeardownHarness()
+  saved.state.report(1, 100)
+  saved.answers.set(1, 100)
+  const destroyedAfterSave = []
+  const signOutAfterSave = tearDownWindows({
+    barrier: saved.barrier,
+    windowIds: [1, 2],
+    keep: 1,
+    kind: 'sign-out',
+    destroy: (windowId) => {
+      destroyedAfterSave.push(windowId)
+      saved.barrier.documentGone(windowId)
+    }
+  })
+  const firstAfterSave = await saved.nextQuestion(1)
+  saved.state.report(2, 200) // refused once; its flush below saves it
+  firstAfterSave.resolve(true)
+  ;(await saved.nextQuestion(2)).resolve(true)
+  assert.equal(await signOutAfterSave, true)
+  assert.deepEqual(destroyedAfterSave, [2])
+  assert.deepEqual(saved.lost, [])
+
+  // The last look before destroy(): a report landing right after approval sends it round again.
+  const late = createTeardownHarness()
+  let injected = false
+  const lateBarrier = {
+    approveTeardown: async (ids, kind) => {
+      const approved = await late.barrier.approveTeardown(ids, kind)
+      if (!injected) {
+        injected = true
+        late.state.report(2, 300)
+      }
+      return approved
+    },
+    mayTearDown: (windowId) => late.barrier.mayTearDown(windowId)
+  }
+  const destroyedLate = []
+  const lateSignOut = tearDownWindows({
+    barrier: lateBarrier,
+    windowIds: [1, 2],
+    keep: 1,
+    kind: 'sign-out',
+    destroy: (windowId) => destroyedLate.push(windowId)
+  })
+  late.answers.set(2, 300)
+  ;(await late.nextQuestion(1)).resolve(false)
+  assert.equal(await lateSignOut, false)
+  assert.deepEqual(destroyedLate, [])
 })
 
 void test('quit waits for execution exit, retains ownership on failure, and allows retry', async () => {

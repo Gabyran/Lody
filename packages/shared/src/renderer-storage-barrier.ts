@@ -239,23 +239,56 @@ export class WindowStorageBarrier {
    * asked to flush, and what is still unsaved gets one confirmation. Resolves to
    * true (and approves those windows) only when all saved or the user chose to
    * discard; false leaves every window, repo and report as it was.
+   *
+   * Flushing and asking take time, and any listed window can have a write
+   * refused meanwhile. So this runs in rounds over the full list, not over a
+   * first snapshot: a window that became unsaved during the flushes is flushed
+   * in another round before anyone is asked about it, and a report that arrives
+   * while the user is looking at the question starts another round. Only a
+   * round in which nothing changed is approved, for exactly the generations
+   * the user was asked about.
    */
   async approveTeardown(windowIds: readonly number[], kind: WindowTeardownKind): Promise<boolean> {
-    const pending = windowIds.filter(
-      (windowId) => this.options.state.unsavedSince(windowId) !== null
-    );
-    const remaining = await Promise.all(
-      pending.map((windowId) => this.options.state.checkWindow(windowId, this.options.quitCheck))
-    );
-    const unsaved = remaining.filter((since): since is number => since !== null);
-    if (unsaved.length > 0) {
-      const allowed = await this.options
-        .confirmDiscard(Math.min(...unsaved), kind)
-        .catch(() => false);
-      if (!allowed) return false;
+    const { state } = this.options;
+    const unsavedIds = () => windowIds.filter((windowId) => state.unsavedSince(windowId) !== null);
+    for (;;) {
+      const flushed = unsavedIds();
+      await Promise.all(
+        flushed.map((windowId) => state.checkWindow(windowId, this.options.quitCheck))
+      );
+      const unsaved = unsavedIds();
+      // Unsaved since this round's flushes began: it gets a flush of its own first.
+      if (unsaved.some((windowId) => !flushed.includes(windowId))) continue;
+      const asked = new Map(windowIds.map((windowId) => [windowId, state.generation(windowId)]));
+      if (unsaved.length > 0) {
+        const earliest = Math.min(
+          ...unsaved.map((windowId) => state.unsavedSince(windowId) ?? Number.POSITIVE_INFINITY)
+        );
+        const allowed = await this.options.confirmDiscard(earliest, kind).catch(() => false);
+        if (!allowed) return false;
+      }
+      // The answer covers only what was asked about.
+      if (windowIds.some((windowId) => state.generation(windowId) !== asked.get(windowId))) {
+        continue;
+      }
+      for (const windowId of unsaved) this.grantApproval(windowId);
+      return true;
     }
-    for (const windowId of pending) this.grantApproval(windowId);
-    return true;
+  }
+
+  /**
+   * Whether `destroy()` may run on this window now: it holds nothing unsaved, or
+   * its unsaved state is exactly what an approval covers.
+   */
+  mayTearDown(windowId: number): boolean {
+    const { state } = this.options;
+    if (state.unsavedSince(windowId) === null) return true;
+    const approval = this.approvals.get(windowId);
+    return (
+      approval !== undefined &&
+      approval.generation === state.generation(windowId) &&
+      this.now() < approval.expiresAt
+    );
   }
 
   /** The window's document was replaced or its renderer is gone. */
@@ -303,10 +336,13 @@ export async function tearDownWindows(options: {
   kind: WindowTeardownKind;
   destroy: (windowId: number) => void;
 }): Promise<boolean> {
-  if (!(await options.barrier.approveTeardown(options.windowIds, options.kind))) return false;
-  for (const windowId of options.windowIds) {
-    if (windowId !== options.keep) options.destroy(windowId);
+  const doomed = options.windowIds.filter((windowId) => windowId !== options.keep);
+  for (;;) {
+    if (!(await options.barrier.approveTeardown(options.windowIds, options.kind))) return false;
+    // Last look before destroy(): anything that changed since approval is asked about again.
+    if (doomed.every((windowId) => options.barrier.mayTearDown(windowId))) break;
   }
+  for (const windowId of doomed) options.destroy(windowId);
   return true;
 }
 
