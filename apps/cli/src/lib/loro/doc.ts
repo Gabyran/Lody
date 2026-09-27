@@ -376,6 +376,8 @@ export class LoroDocumentManager {
   private unregisterStorageFlushTarget: ((outcome: { saved: boolean }) => void) | null;
   /** Set when teardown could not save: storage recovery destroys the repo after saving. */
   private destroyAfterStorageRecovery = false;
+  private repoReleased: Promise<void> = Promise.resolve();
+  private markRepoReleased: (() => void) | null = null;
 
   static async create(
     workspaceId: WorkspaceId,
@@ -1649,16 +1651,38 @@ export class LoroDocumentManager {
     this.detachMachineFlockMetaRoomSyncedListener = null;
     await this.machineFlockSync.cleanUp();
     await this.connectionRecovery.cleanUp();
+    // Unloading a doc persists it first, so on a full disk any of these can
+    // throw SQLITE_FULL. Nothing may escape before the final flush below: it
+    // alone decides whether the repo closes now or waits for storage recovery.
+    // A doc whose unload failed stays loaded and dirty in the repo, so that
+    // flush (or recovery's) still saves it.
+    let teardownError: unknown = null;
+    const releaseDoc = async (label: string, release: () => Promise<void>): Promise<void> => {
+      try {
+        await release();
+      } catch (error) {
+        if (isStorageFullError(error)) {
+          this.logger.warn(
+            `[${this.workspaceId}] ${label} could not be saved while unloading (storage is full); the final flush keeps it: ${formatErrorMessage(error)}`
+          );
+          return;
+        }
+        teardownError ??= error;
+      }
+    };
     // Await and destroy any in-flight session doc inits so they don't
     // re-register themselves after cleanup has run.
     for (const [sessionId, pending] of this.pendingSessionDocs) {
+      let doc: SessionDocument;
       try {
-        const doc = await pending;
-        await doc.destroy({ preserveStatus: options.preserveSessionStatus });
-        this.sessions.delete(sessionId);
+        doc = await pending;
       } catch {
-        // Init failed — nothing to clean up
+        continue; // Init failed — nothing to clean up
       }
+      await releaseDoc(`Session ${sessionId}`, () =>
+        doc.destroy({ preserveStatus: options.preserveSessionStatus })
+      );
+      this.sessions.delete(sessionId);
     }
     this.pendingSessionDocs.clear();
     this.localDocRoomBridges.clear();
@@ -1667,10 +1691,13 @@ export class LoroDocumentManager {
     }
     this.localFlockRoomBridges.clear();
 
-    for (const sessionDoc of this.sessions.values()) {
-      await sessionDoc.destroy({ preserveStatus: options.preserveSessionStatus });
+    for (const [sessionId, sessionDoc] of this.sessions) {
+      await releaseDoc(`Session ${sessionId}`, () =>
+        sessionDoc.destroy({ preserveStatus: options.preserveSessionStatus })
+      );
     }
-    await this.machine?.destroy();
+    const machine = this.machine;
+    if (machine) await releaseDoc('Machine document', () => machine.destroy());
     this.machine = null;
     this.sessions.clear();
     this.machineExistenceWatcher?.unsubscribe();
@@ -1695,14 +1722,29 @@ export class LoroDocumentManager {
       // recovery becomes the owner that flushes it and only then destroys it,
       // so a workspace stopped mid-episode loses nothing once space returns.
       this.destroyAfterStorageRecovery = true;
+      this.repoReleased = new Promise<void>((resolve) => {
+        this.markRepoReleased = resolve;
+      });
       this.logger.warn(
         `[${this.workspaceId}] Final flush failed because storage is full; keeping the repo open until its changes are saved: ${formatErrorMessage(finalFlushError)}`
       );
+      if (teardownError !== null) throw teardownError;
       return;
     }
     this.unregisterStorageFlushTarget?.({ saved: finalFlushError === null });
     this.unregisterStorageFlushTarget = null;
     await this.destroyRepo({ fast: options.fast });
+    if (teardownError !== null) throw teardownError;
+  }
+
+  /**
+   * Resolves once this manager's repo is destroyed. Normally that is when
+   * `cleanUp` returns; after a teardown on a full disk it is only once storage
+   * recovery saved the repo. Opening the same workspace again before then
+   * would put a second live repo on the same SQLite file.
+   */
+  whenRepoReleased(): Promise<void> {
+    return this.repoReleased;
   }
 
   /**
@@ -1724,6 +1766,8 @@ export class LoroDocumentManager {
         `[${this.workspaceId}] Failed to close the repo after storage recovery: ${formatErrorMessage(error)}`
       );
     });
+    this.markRepoReleased?.();
+    this.markRepoReleased = null;
   }
 
   configureMachineMonitor(
@@ -2980,16 +3024,21 @@ export class SessionDocument implements LoroDocument<Omit<SessionDocMeta, 'histo
     this.docSub?.unsubscribe();
     this.docSub = null;
     this.docBinding = null;
-    await this.unloadDocRoom(this.roomId);
-    this.detachDocRoomStatusListener?.();
-    this.detachDocRoomStatusListener = null;
-    this.docRoomStatusListeners.clear();
-    // Invalidate outstanding stored-history snapshot handles: their source is
-    // this store, which is going away. Subsequent use reports `source_closed`.
-    this.sessionDataInstance?.dispose();
-    this.mirror?.dispose();
-    this.mirror = null;
-    this.handle = null;
+    try {
+      // Unloading persists the doc first; on a full disk it throws and the doc
+      // stays loaded and dirty in the repo. This wrapper is gone either way.
+      await this.unloadDocRoom(this.roomId);
+    } finally {
+      this.detachDocRoomStatusListener?.();
+      this.detachDocRoomStatusListener = null;
+      this.docRoomStatusListeners.clear();
+      // Invalidate outstanding stored-history snapshot handles: their source is
+      // this store, which is going away. Subsequent use reports `source_closed`.
+      this.sessionDataInstance?.dispose();
+      this.mirror?.dispose();
+      this.mirror = null;
+      this.handle = null;
+    }
   }
 }
 

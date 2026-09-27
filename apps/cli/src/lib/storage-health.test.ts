@@ -7,7 +7,9 @@ import { SqliteRepoStore } from 'loro-repo/storage/sqlite';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
   isStorageCriticalError,
+  getSessionRoomId,
   observeStorageAdapterWrites,
+  type SessionId,
   type WorkspaceId,
 } from '@lody/shared';
 import type { Logger } from '@/utils/logger';
@@ -352,6 +354,74 @@ describe('StorageHealthMonitor', () => {
       expect((await reopened.getDocMeta(docId))?.meta).toMatchObject({ title: docId });
       expect((await reopened.openDetachedDoc(docId)).getText('body').toString()).toContain(docId);
     }
+    await reopened.destroy();
+    reopenedStore.close();
+    monitor.stop();
+    database.close();
+  });
+
+  it('finishes a teardown whose first storage failure is an open session doc unload', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'lody-storage-session-teardown-'));
+    createdDirs.push(dir);
+    const dbPath = path.join(dir, 'repo.sqlite3');
+    const database = new Database(dbPath);
+    const sqliteStore = new SqliteRepoStore({ database });
+    const space = { current: { availableBytes: 50 * GIB, totalBytes: TOTAL } };
+    const { monitor, scheduler } = createMonitor(space);
+    await monitor.start();
+    const repo = await LoroRepo.create({
+      storageAdapter: observeStorageAdapterWrites(sqliteStore.storage, {
+        onWriteFailed: (error, operation) => monitor.reportWriteFailure(error, operation),
+        onWriteSucceeded: () => monitor.reportWriteSuccess(),
+      }),
+      metaDebounceCommitMs: 0,
+    });
+    const manager = new LoroDocumentManager({
+      repo,
+      workspaceId: 'workspace-session-teardown' as WorkspaceId,
+      userId: 'user-1',
+      metaSub: null,
+      logger: createSilentLogger(),
+      initialTransportStatus: 'connected',
+      initialMetaSyncPromise: Promise.resolve(false),
+      initialMetaSyncCompleted: false,
+      storageHealth: monitor,
+    });
+    const sessionId = 'session-open-while-full' as SessionId;
+    await manager.getOrCreateSessionDoc(sessionId);
+
+    // The disk fills; the session's doc (still open in the manager) becomes dirty.
+    const pages = database.pragma('page_count', { simple: true }) as number;
+    database.pragma(`max_page_count = ${pages}`);
+    space.current = { availableBytes: 0, totalBytes: TOTAL };
+    const handle = await repo.openPersistedDoc(getSessionRoomId(sessionId));
+    handle.doc.getText('probe').insert(0, 'typed while the disk was full '.repeat(500));
+    handle.doc.commit();
+    await expect(repo.flush()).rejects.toThrow();
+
+    // Stopping the workspace: the session doc's unload is the first write to fail.
+    await manager.cleanUp();
+    expect(monitor.flushTargetNames()).toEqual(['workspace-session-teardown']);
+    let released = false;
+    const releasedSignal = manager.whenRepoReleased().then(() => {
+      released = true;
+    });
+    expect(monitor.hasUnsavedChanges()).toBe(true);
+    expect(released).toBe(false);
+
+    database.pragma('max_page_count = 1073741823');
+    space.current = { availableBytes: 20 * GIB, totalBytes: TOTAL };
+    scheduler.advance(10_000);
+    await monitor.settled();
+    await releasedSignal;
+    expect(monitor.hasUnsavedChanges()).toBe(false);
+    // Saved, destroyed, and no longer owned by recovery.
+    expect(monitor.flushTargetNames()).toEqual([]);
+
+    const reopenedStore = new SqliteRepoStore({ path: dbPath });
+    const reopened = await LoroRepo.create({ storageAdapter: reopenedStore.storage });
+    const saved = await reopened.openDetachedDoc(getSessionRoomId(sessionId));
+    expect(saved.getText('probe').toString()).toContain('typed while the disk was full');
     await reopened.destroy();
     reopenedStore.close();
     monitor.stop();

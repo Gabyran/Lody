@@ -50,6 +50,14 @@ manager 保持 repo 打开并保留注册；监视器的恢复流程先 flush �
 导致写满时被停止的 workspace 丢失更改，而监视器随后在没有任何目标的情况下清除了
 `unsavedSince`；评审发现了这个问题。
 
+第一次修复只覆盖了最终 flush。卸载一个打开的会话或机器文档会先持久化它，所以磁盘写满时
+`SessionDocument.destroy()` 会在清理到达最终 flush 之前就抛出 `SQLITE_FULL`；fleet 已经丢弃了
+runtime，没有任何东西能完成这次停止。评审也发现了这一点。现在每个文档的释放都会捕获存储已满的
+失败并继续：文档留在 repo 中且仍是脏的，它的包装对象照常释放；是否关闭 repo 只由最终 flush 决定。
+`whenRepoReleased()` 在 repo 真正销毁后才完成；fleet 按 workspace 保存这个 promise，再次启动同一
+workspace 时会先等待它，而不是在同一个 SQLite 文件上打开第二个 repo。退出时的警告会列出恢复流程
+仍然持有的 workspace。
+
 **阈值结合卷的比例与绝对上下限。** 严重阈值是卷的 1%，限定在 256 MiB 到 1 GiB 之间。256 MiB
 够一次 flush、SQLite 日志和一次 checkpoint 使用，但不够创建 worktree 或安装依赖。1 GiB 上限
 避免大磁盘在还剩几 GB 时就降级。警告阈值是 5%，限定在 1 到 5 GiB 之间，保证在拒绝工作之前很早
@@ -139,6 +147,12 @@ flush 再次成功时记录一条 info。
     打开，空间恢复后由恢复流程保存，第二个连接能读到全部十个文档。使用旧顺序（先注销、flush
     失败被吞掉、再销毁）时，清理以 `database or disk is full` 失败。未保存就注销的目标会让这一轮
     保持未结束；去掉这道栅栏会让对应测试失败。
+  - 首个失败发生在打开的 `SessionDocument` 卸载时的清理（真实 manager、真实受限 SQLite）：清理
+    正常返回，恢复流程持有该 workspace；空间恢复后 repo 被保存并销毁，恢复流程不再持有它，第二个
+    连接能读到会话文档。重新抛出卸载失败会重现所报告的提前退出（`database or disk is full`）；
+    跳过注销会让 workspace 一直被持有；两者都会让测试失败。
+  - `tests/lody-fleet-local-catalog.test.ts`：被停止的 repo 仍被保留时，重新启动该 workspace 不会
+    在 repo 释放之前调用 `Lody.create`；去掉等待会让它失败。
   - 消融：去掉恢复 flush 后，两个行为测试都会失败。SQLite 测试的第一个版本在消融时仍然通过，
     因为 `repo.destroy()` 自己会 flush；改为通过第二个连接读取后修正了这一点。
 - `apps/cli/src/lib/loro/presence.test.ts`：级别变化会立即写出心跳，且字段能经受真实的
@@ -191,8 +205,7 @@ flush 再次成功时记录一条 info。
   打包桌面应用中验证。
 - loro-repo 仍会带堆栈打印每一次后台保存失败；schema 升级后的第一次打开仍需写盘
   （loro-dev/loro-repo#139）。
-- 若被清理的 repo 仍在等待空间时同一 workspace 又被启动，会在同一个 SQLite 文件上打开第二个
-  repo；两者都追加 CRDT 更新，加载时合并。
+- 被停止的 repo 仍在等待空间时，重新启动同一 workspace 也会等待，直到释放空间或进程退出。
 - 单独关闭一个窗口（而不是退出应用）时，即使它自己的 repo 持有未保存更改也不会被拦截；窗口的
   内存随之消失，主进程也会忘记它的上报。重新加载窗口同理。
 - `unsavedSince` 只覆盖 repo 写入。其他存储（schedules、operation store、diff store）各自失败，

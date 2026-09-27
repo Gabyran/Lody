@@ -7,6 +7,15 @@ import {
   type SessionId,
 } from '@lody/shared';
 import { LodyFleet } from '../src/lib/lody-fleet';
+
+const lodyMocks = vi.hoisted(() => ({
+  create: vi.fn(async (): Promise<never> => {
+    throw new Error('the test stops the start here');
+  }),
+}));
+
+// Only the retained-repo case below reaches Lody.create; every other case stubs startWorkspace.
+vi.mock('../src/lib/lody', () => ({ Lody: { create: lodyMocks.create } }));
 import {
   CatalogPermissionError,
   type LocalWorkspaceCatalogService,
@@ -414,5 +423,56 @@ describe('LodyFleet local session control streaming', () => {
     ]);
     expect(onResponse).toHaveBeenCalledOnce();
     expect(onResponse).toHaveBeenCalledWith(responses[0]);
+  });
+});
+
+describe('LodyFleet workspace stop on a full disk', () => {
+  it('waits for a stopped workspace repo that storage still owns before starting it again', async () => {
+    const fleet = new LodyFleet({
+      logger: createSilentLogger(),
+      builtinAgentConfigCliTypes: [],
+      cliToken: 'token',
+      userId: 'user-1',
+      machineId: 'machine-1' as MachineId,
+      machineName: 'host',
+      runtimeStateReporter: createRuntimeStateReporter() as never,
+      cloudPort: createTestCloudPort(),
+      localWorkspaceCatalog: createCatalogStub(() => Effect.succeed(catalogSnapshot({}))),
+      localFirstBootstrap: true,
+      machineLifecycleCapability: {
+        launchMode: 'foreground',
+        canRemoteRestart: false,
+        canRemoteUpgrade: false,
+        reason: 'not_daemon',
+      },
+    }) as unknown as {
+      desiredWorkspaces: Map<string, unknown>;
+      runtimes: Map<string, unknown>;
+      retryTimers: Map<string, NodeJS.Timeout>;
+      stopWorkspace: (workspaceId: string) => Promise<void>;
+      startWorkspace: (workspace: unknown) => Promise<void>;
+    };
+    const workspace = { id: 'workspace-1', name: 'Alpha', slug: 'alpha', role: 'owner' };
+    const { promise: repoReleased, resolve: releaseRepo } = Promise.withResolvers<void>();
+    fleet.runtimes.set(workspace.id, {
+      workspace,
+      schedules: { dispose: async () => {} },
+      prPollerWorkspace: { dispose: async () => {} },
+      unsubscribeTerminalCleanup: () => {},
+      // cleanUp returned, but the repo could not be saved: storage recovery owns it.
+      lody: { cleanup: async () => {}, documentManager: { whenRepoReleased: () => repoReleased } },
+    });
+
+    await fleet.stopWorkspace(workspace.id);
+    fleet.desiredWorkspaces.set(workspace.id, workspace);
+    const restart = fleet.startWorkspace(workspace);
+    // Drain every pending continuation: only the retained repo can still block.
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(lodyMocks.create).not.toHaveBeenCalled();
+
+    releaseRepo();
+    await restart;
+    expect(lodyMocks.create).toHaveBeenCalledTimes(1);
+    for (const timer of fleet.retryTimers.values()) clearTimeout(timer);
   });
 });

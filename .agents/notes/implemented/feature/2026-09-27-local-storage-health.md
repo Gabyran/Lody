@@ -64,6 +64,17 @@ process. The first revision unregistered before the final flush, so a workspace
 stopped on a full disk lost its changes and the monitor then cleared `unsavedSince`
 with no targets left; review caught it.
 
+The first fix only covered the final flush. Unloading an open session or machine
+document persists it first, so on a full disk `SessionDocument.destroy()` threw
+`SQLITE_FULL` before teardown ever reached that flush. The fleet had already
+dropped the runtime, and nothing finished the stop. Review caught that too. Now each
+document's release catches a storage-full failure and keeps going: the document
+stays loaded and dirty in the repo, and its wrapper still disposes. Only the final
+flush decides whether the repo closes. `whenRepoReleased()` resolves once the repo
+is really destroyed. The fleet keeps that promise per workspace and makes a restart
+of the same workspace wait for it, instead of opening a second repo on the same
+SQLite file. The shutdown warning names the workspaces recovery still holds.
+
 **Thresholds combine a share of the volume with absolute bounds.** Critical is 1% of
 the volume, clamped to 256 MiB–1 GiB. 256 MiB leaves room for a flush, SQLite's
 journal and a checkpoint, but not for a worktree or an install. The 1 GiB cap keeps a
@@ -177,6 +188,15 @@ Automated, with injected clocks, manual timers and fault injection, no real slee
     connection reads all ten documents. With the old order (unregister, swallowed
     flush, destroy) cleanup failed with `database or disk is full`. A target
     unregistered unsaved keeps the episode open; removing that fence fails its test.
+  - teardown whose first failure is an open `SessionDocument`'s unload (real manager,
+    real capped SQLite): cleanup resolves and recovery holds the workspace. After
+    space returns the repo is saved and destroyed, and recovery no longer holds it;
+    a second connection reads the session doc. Rethrowing the unload failure
+    reproduces the reported early exit (`database or disk is full`). Skipping the
+    unregister leaves the workspace held; both fail the test.
+  - `tests/lody-fleet-local-catalog.test.ts`: restarting a workspace whose stopped
+    repo is still retained does not call `Lody.create` until the repo is released.
+    Removing the wait fails it.
   - Ablation: with the recovery flush removed, both behavioral tests fail. The first
     version of the SQLite test passed anyway, because `repo.destroy()` flushes;
     reading through a second connection fixed that.
@@ -241,8 +261,8 @@ eye. They exposed a stray space between Chinese sentences, now a localized join 
   tests and Storybook, not in a packaged desktop on a full disk.
 - loro-repo still prints each failed background save with a stack. A first open after
   a schema upgrade still needs to write (loro-dev/loro-repo#139).
-- A workspace restarted while its torn-down repo is still waiting for space opens a
-  second repo on the same SQLite file; both append CRDT updates and merge on load.
+- Restarting a workspace whose stopped repo still waits for space also waits, until
+  space is freed or the process exits.
 - Closing one window (not quitting) while its own repo holds unsaved changes is not
   intercepted; the window's memory goes with it and main forgets its report. A
   reload has the same effect.

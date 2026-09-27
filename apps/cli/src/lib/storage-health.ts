@@ -302,6 +302,11 @@ export class StorageHealthMonitor {
     this.inflight.add(tracked);
   }
 
+  /** Repos whose unsaved changes recovery still has to flush, by name (workspace id). */
+  flushTargetNames(): string[] {
+    return [...this.targets].map((target) => target.name);
+  }
+
   /** True while changes failed to reach disk; used to warn at exit. */
   hasUnsavedChanges(): boolean {
     return this.unsavedSince !== null;

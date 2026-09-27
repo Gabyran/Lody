@@ -166,6 +166,12 @@ export class LodyFleet {
   private readonly runtimes = new Map<string, WorkspaceRuntimeState>();
   private readonly reviewCredentialResolvers = new Map<string, GitHubCredentialResolver>();
   private readonly startInFlight = new Map<string, Promise<void>>();
+  /**
+   * Repos of stopped workspaces that could not be saved on a full disk. Storage
+   * recovery owns them until saved; a restart of the same workspace waits, so a
+   * second live repo never opens the same SQLite file.
+   */
+  private readonly retainedRepos = new Map<string, Promise<void>>();
   private readonly retryTimers = new Map<string, NodeJS.Timeout>();
   private readonly desiredWorkspaces = new Map<string, WorkspaceListItem>();
   private readonly remoteRevokedWorkspaceIds = new Set<string>();
@@ -618,9 +624,11 @@ export class LodyFleet {
     // (or earlier, never recovered) leaves changes that exist only in memory.
     const unsaved = this.storageHealth.getSnapshot().unsavedSince;
     if (unsaved !== null) {
+      const workspaces = this.storageHealth.flushTargetNames();
       this.logger.warn(
-        `[storage] Stopping with local changes unsaved since ${new Date(unsaved).toISOString()}: ` +
-          'the disk holding Lody data is full. Changes not yet synced elsewhere are lost.'
+        `[storage] Stopping with local changes unsaved since ${new Date(unsaved).toISOString()}` +
+          (workspaces.length > 0 ? ` (workspaces: ${workspaces.join(', ')})` : '') +
+          ': the disk holding Lody data is full. Changes not yet synced elsewhere are lost.'
       );
     }
     this.storageHealth.stop();
@@ -815,6 +823,14 @@ export class LodyFleet {
         workspaceId: workspace.id,
         workspaceName: workspaceLabel,
       });
+      const retainedRepo = this.retainedRepos.get(workspace.id);
+      if (retainedRepo) {
+        workspaceLogger.warn(
+          `[fleet] Waiting for storage to save the previous runtime of ${workspace.id} before starting it again`
+        );
+        await retainedRepo;
+        if (this.stopped || !this.desiredWorkspaces.has(workspace.id)) return;
+      }
 
       let lody: Lody | null = null;
       let stopSchedules: (() => Promise<void>) | undefined;
@@ -1072,7 +1088,15 @@ export class LodyFleet {
         `[fleet] Failed to cleanup workspace runtime ${workspaceId}: ${formatErrorMessage(error)}`
       );
     }
+    this.trackRepoRelease(workspaceId, state.lody.documentManager.whenRepoReleased());
     this.refreshRuntimeState();
+  }
+
+  private trackRepoRelease(workspaceId: string, released: Promise<void>): void {
+    const tracked = released.finally(() => {
+      if (this.retainedRepos.get(workspaceId) === tracked) this.retainedRepos.delete(workspaceId);
+    });
+    this.retainedRepos.set(workspaceId, tracked);
   }
 
   private startRuntimeStateLoop(): void {
