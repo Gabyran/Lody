@@ -184,6 +184,20 @@ import {
 } from './conversation-panel';
 import { TerminalComponent } from './terminal-component';
 import { prepareTerminalOutputBlocksPreview } from './terminal-preview';
+import {
+  ToolCaptionSection,
+  ToolCommandSection,
+  ToolDetailSection,
+  ToolDetailSheet,
+  ToolOutputSection,
+  ToolVerbatimSection,
+} from './tool-call-detail';
+import {
+  extractFencedToolText,
+  formatToolCommand,
+  isToolCommandEcho,
+  isToolSearchTitle,
+} from './tool-call-command';
 import { formatDurationCompact, getDurationUnitLabels } from '@/lib/format-duration';
 import {
   resolveLiveSessionHistoryDurationMs,
@@ -236,7 +250,7 @@ import { getChatFailedDiagnosticCopy } from './chat-failed-diagnostic-copy';
 import { extractReadableChatFailedMessage } from './chat-failed-error-report';
 import { DEFAULT_CONVERSATION_FONT_SIZE, type ConversationFontSize } from '@/atoms/settings';
 import {
-  conversationMonoFontSizeStyle,
+  compactConversationFontSize,
   conversationTextFontSizeStyle,
   userTextCollapsedHeight,
 } from './conversation-font-size-classes';
@@ -5285,9 +5299,6 @@ type PlanEntryItem = Extract<MessageContent, { type: 'plan' }>['entries'][number
 type ProposedPlanMessage = Extract<MessageContent, { type: 'proposed_plan' }>;
 type GoalMessage = Extract<MessageContent, { type: 'goal' }>;
 
-const isRecord = (value: unknown): value is Record<string, unknown> =>
-  typeof value === 'object' && value !== null && !Array.isArray(value);
-
 const writeTextToClipboard = async (text: string): Promise<boolean> => {
   if (!text.trim()) return false;
 
@@ -6847,13 +6858,15 @@ const ToolCallCard = memo(function ToolCallCard({
   });
 
   const hasOutput = Boolean(toolCall.rawOutput);
-  const hasContent = Boolean(contentBlocks?.length);
   /* A cancelled request records nothing, so it must not count towards the body:
      otherwise the card stays collapsible and opens onto empty padding. */
   const hasPermission =
     Boolean(toolCall.permissionRequest) &&
     toolCall.permissionRequest?.outcome?.outcome !== 'cancelled';
-  const hasDetails = hasOutput || hasContent || hasPermission;
+  const commandLines = (contentBlocks ?? []).flatMap((block) =>
+    block.type === 'terminal_command' ? [formatToolCommand(block)] : []
+  );
+  const isShellCommand = isCommandToolCall(toolCall);
 
   const title = toolCall.title
     ? sanitizeToolTitle(toolCall.title)
@@ -6894,14 +6907,11 @@ const ToolCallCard = memo(function ToolCallCard({
     }
   };
 
+  /* An execute step's one-line text block is its description ("List the
+     worktree"): it becomes the row's title and leaves the body. */
   let terminalTitleBlockIndex: number | null = null;
   let terminalTitleFromContent: string | null = null;
-  const hasTerminalBlocks = Boolean(
-    contentBlocks?.some(
-      (block) => block?.type === 'terminal_command' || block?.type === 'terminal_output'
-    )
-  );
-  if (hasTerminalBlocks && contentBlocks) {
+  if (isTerminalExecuteToolCall && contentBlocks) {
     for (let index = 0; index < contentBlocks.length; index += 1) {
       const block = contentBlocks[index];
       if (!block) continue;
@@ -6911,14 +6921,15 @@ const ToolCallCard = memo(function ToolCallCard({
       if (!text) continue;
       if (text.includes('\n')) continue;
       if (text.length > 96) continue;
+      if (isToolCommandEcho(text, commandLines)) continue;
       terminalTitleBlockIndex = index;
       terminalTitleFromContent = text;
       break;
     }
   }
 
-  const terminalTitleDefault = terminalTitleFromContent ?? title;
-  const displayTitle = isTerminalExecuteToolCall ? terminalTitleDefault : title;
+  const displayTitle = isTerminalExecuteToolCall ? (terminalTitleFromContent ?? title) : title;
+  const isToolSearch = isToolSearchTitle(toolCall.title);
   const commandVerb = isCommandToolCall(toolCall) ? 'Run' : undefined;
   /* The tense verb is the running signal: a shimmering "Running …" needs no
      spinner. Keep it only where the step's own wording carries no tense
@@ -6932,115 +6943,134 @@ const ToolCallCard = memo(function ToolCallCard({
       <Spinner className="h-4 w-4 text-muted-foreground" />
     ) : null;
 
-  const renderContentBlocks = () => {
-    if (!contentBlocks?.length) return null;
+  /* Everything the step did and got back, in order, as sections of one sheet
+     (`tool-call-detail.tsx`). A diff is its own surface, so it closes the
+     sheet before it and opens a new one after. */
+  const renderDetail = () => {
     const nodes: ReactNode[] = [];
-    let terminalIndex = 0;
+    let sections: ReactNode[] = [];
+    const flushSheet = () => {
+      if (sections.length === 0) return;
+      nodes.push(<ToolDetailSheet key={`sheet-${nodes.length}`}>{sections}</ToolDetailSheet>);
+      sections = [];
+    };
+    const pushOutput = (key: string, outputs: TerminalOutputBlockType[]) => {
+      const preview = prepareTerminalOutputBlocksPreview(outputs);
+      sections.push(
+        <ToolOutputSection
+          key={key}
+          output={preview.text}
+          limited={preview.wasLimited || outputs.some((output) => output.truncated === true)}
+          exitCode={outputs[outputs.length - 1]?.exitStatus?.exitCode}
+          fontSize={fontSize}
+        />
+      );
+    };
 
-    for (let index = 0; index < contentBlocks.length; index += 1) {
-      const block = contentBlocks[index];
-      if (!block) continue;
+    const blocks = contentBlocks ?? [];
+    for (let index = 0; index < blocks.length; index += 1) {
+      const block = blocks[index];
+      if (!block || index === terminalTitleBlockIndex) continue;
 
-      if (terminalTitleBlockIndex === index) {
-        continue;
-      }
-
-      if (block.type === 'terminal' && hasTerminalBlocks) {
-        continue;
-      }
-
-      if (block.type === 'terminal_command') {
+      if (block.type === 'terminal_command' || block.type === 'terminal_output') {
         const outputs: TerminalOutputBlockType[] = [];
-        let next = index + 1;
-        while (next < contentBlocks.length) {
-          if (next === terminalTitleBlockIndex) {
+        let next = block.type === 'terminal_command' ? index + 1 : index;
+        while (next < blocks.length) {
+          const nextBlock = blocks[next];
+          if (next === terminalTitleBlockIndex || nextBlock?.type === 'terminal') {
             next += 1;
             continue;
           }
-
-          const nextBlock = contentBlocks[next];
-          if (!nextBlock) {
-            next += 1;
-            continue;
-          }
-          if (nextBlock.type === 'terminal') {
-            next += 1;
-            continue;
-          }
-          if (nextBlock.type !== 'terminal_output') break;
-          outputs.push(nextBlock as TerminalOutputBlockType);
+          if (nextBlock?.type !== 'terminal_output') break;
+          outputs.push(nextBlock);
           next += 1;
         }
-
-        const terminalTitle = terminalIndex === 0 ? terminalTitleDefault : title;
-        nodes.push(
-          <TerminalComponent
-            key={`terminal-component-${terminalIndex}`}
-            title={terminalTitle}
-            command={formatTerminalCommandLine(block)}
-            output={prepareTerminalOutputBlocksPreview(outputs).text}
-            className={isActivityRow ? 'rounded-md' : undefined}
-            showHeader={!isTerminalExecuteToolCall}
-            showBorder={!isTerminalExecuteToolCall}
-            outputDisplayMode={inlineOutput ? 'full' : undefined}
-            fontSize={fontSize}
-          />
-        );
-        terminalIndex += 1;
+        if (block.type === 'terminal_command') {
+          sections.push(
+            <ToolCommandSection
+              key={`command-${index}`}
+              command={formatToolCommand(block)}
+              shell={isShellCommand}
+              running={isRunning}
+              fontSize={fontSize}
+            />
+          );
+        }
+        if (outputs.length > 0) pushOutput(`output-${index}`, outputs);
         index = next - 1;
         continue;
       }
 
-      if (block.type === 'terminal_output') {
-        const outputs: TerminalOutputBlockType[] = [];
-        let next = index;
-        while (next < contentBlocks.length && contentBlocks[next]?.type === 'terminal_output') {
-          outputs.push(contentBlocks[next] as TerminalOutputBlockType);
-          next += 1;
-        }
-
-        const terminalTitle = terminalIndex === 0 ? terminalTitleDefault : title;
-        nodes.push(
-          <TerminalComponent
-            key={`terminal-component-${terminalIndex}`}
-            title={terminalTitle}
-            command=""
-            output={prepareTerminalOutputBlocksPreview(outputs).text}
-            className={isActivityRow ? 'rounded-md' : undefined}
-            showHeader={!isTerminalExecuteToolCall}
-            showBorder={!isTerminalExecuteToolCall}
-            outputDisplayMode={inlineOutput ? 'full' : undefined}
-            fontSize={fontSize}
-          />
+      if (block.type === 'terminal') {
+        if (hasTerminalContent) continue;
+        sections.push(
+          <ToolCaptionSection key={`terminal-${index}`}>
+            Terminal output is streaming in your CLI
+          </ToolCaptionSection>
         );
-        terminalIndex += 1;
-        index = next - 1;
         continue;
       }
 
-      nodes.push(
-        /* Inside a folded activity row the block needs its own surface to read as
-           output. At top level the only tool call that gets here is the plan-exit
-           `switch_mode` card, whose content is the plan prose itself — boxing it
-           there stacked a near-invisible frame above the permission card and made
-           one row look like three unrelated objects. Space groups it instead. */
-        <div
-          key={`${block.type}-${index}`}
-          className={cn(
-            isActivityRow && cn(CONVERSATION_PANEL_FRAME_CLASS, CONVERSATION_PANEL_BODY_CLASS)
-          )}
-        >
-          <ToolCallContentRenderer
-            block={block}
+      if (block.type === 'diff') {
+        flushSheet();
+        nodes.push(<DiffBlockRenderer key={`diff-${index}`} block={block} />);
+        continue;
+      }
+
+      if (block.type !== 'content') continue;
+      const { content } = block;
+      if (content.type === 'text') {
+        if (isToolCommandEcho(content.text, commandLines)) continue;
+        // Raw tool input arrives as serialized JSON text; keep it out of the
+        // Markdown pipeline so single-`$` math cannot eat fragments like `$(...)`.
+        const verbatim =
+          detectToolCallJsonText(content.text) ?? extractFencedToolText(content.text);
+        sections.push(
+          isToolSearch || verbatim !== null ? (
+            <ToolVerbatimSection
+              key={`text-${index}`}
+              value={verbatim ?? content.text}
+              fontSize={fontSize}
+            />
+          ) : (
+            <ToolDetailSection key={`text-${index}`}>
+              <MarkdownRenderer
+                text={content.text}
+                size={compactConversationFontSize(fontSize)}
+                className={ACTIVITY_STEP_BODY_CLASS}
+                onAgentFileLinkClick={onFilePathClick}
+              />
+            </ToolDetailSection>
+          )
+        );
+        continue;
+      }
+      sections.push(
+        <ToolDetailSection key={`content-${index}`}>
+          <StandardToolContentBlock
+            content={content}
             onFilePathClick={onFilePathClick}
             fontSize={fontSize}
           />
-        </div>
+        </ToolDetailSection>
       );
     }
 
+    if (hasOutput) {
+      sections.push(
+        <ToolVerbatimSection
+          key="raw-output"
+          value={formatJsonValue(toolCall.rawOutput)}
+          fontSize={fontSize}
+        />
+      );
+    }
+    flushSheet();
     return nodes;
   };
+
+  const detailNodes = isReadOnly ? [] : renderDetail();
+  const hasDetails = detailNodes.length > 0 || hasPermission;
 
   return (
     <CollapsibleCard
@@ -7048,34 +7078,22 @@ const ToolCallCard = memo(function ToolCallCard({
       defaultExpanded={isRunning || hasTerminalContent || isFailed || hasPermission}
       expanded={expanded}
       onExpandedChange={onExpandedChange}
-      containerClassName={cn(
-        isActivityRow && 'rounded-md',
-        !isActivityRow &&
-          isTerminalExecuteToolCall &&
-          'overflow-hidden rounded-md border border-border/60 bg-background/70 shadow-xs'
-      )}
+      containerClassName={cn(isActivityRow && 'rounded-md')}
       buttonClassName={
         isActivityRow
           ? ACTIVITY_STEP_BUTTON_CLASS
-          : isTerminalExecuteToolCall
-            ? 'rounded-none bg-muted/70 px-3 py-1.5 text-foreground hover:bg-muted/90'
-            : /* A top-level tool call (the plan-approval `switch_mode` card) is a
-                 SIBLING of the worked headers and the answer prose, so it starts
-                 on the turn's left rail. `CollapsibleCard`'s default `px-1` put
-                 its title 4px right of every chevron in the same column — and 8px
-                 right of its own `px-0` body. */
-              'px-0'
+          : /* A top-level tool call (the plan-approval `switch_mode` card) is a
+               SIBLING of the worked headers and the answer prose, so it starts
+               on the turn's left rail. `CollapsibleCard`'s default `px-1` put
+               its title 4px right of every chevron in the same column — and 8px
+               right of its own `px-0` body. */
+            'px-0'
       }
       bodyClassName={cn(
         /* An expanded body starts on the rail, like every other collapsible
            region in a turn. It still needs air under the title — they were 0px
            apart — but not an indent. */
-        isActivityRow
-          ? 'space-y-1.5 px-0 pb-1.5 pt-1'
-          : isTerminalExecuteToolCall
-            ? /* Bordered card: the body is full-bleed to its own frame. */
-              'space-y-3 border-t border-border/60 px-0 pb-0'
-            : 'space-y-2.5 px-0 pb-1 pt-1.5'
+        isActivityRow ? 'space-y-1.5 px-0 pb-1.5 pt-1' : 'space-y-2.5 px-0 pb-1 pt-1.5'
       )}
       right={runningIndicator}
       /* A file step with nothing to open (a read) is the file: pressing the
@@ -7087,7 +7105,7 @@ const ToolCallCard = memo(function ToolCallCard({
           className={cn(
             'flex min-w-0 flex-1 items-start gap-1.5',
             /* No leading margin: see `buttonClassName` — the rail is shared. */
-            isTerminalExecuteToolCall ? null : titleColorClass
+            titleColorClass
           )}
         >
           {isFileAction && fileName ? (
@@ -7172,9 +7190,7 @@ const ToolCallCard = memo(function ToolCallCard({
                 'truncate',
                 isActivityRow
                   ? ACTIVITY_STEP_TITLE_CLASS
-                  : isTerminalExecuteToolCall
-                    ? 'text-xs font-medium'
-                    : 'text-[13px] font-semibold leading-tight'
+                  : 'text-[13px] font-semibold leading-tight'
               )}
             />
           )}
@@ -7183,38 +7199,7 @@ const ToolCallCard = memo(function ToolCallCard({
     >
       {hasDetails && !isReadOnly ? (
         <Fragment>
-          {hasOutput && isRecord(toolCall.rawOutput) ? (
-            <StructuredObject
-              label="Output"
-              value={toolCall.rawOutput}
-              dense
-              unbounded={inlineOutput}
-              fontSize={fontSize}
-            />
-          ) : hasOutput ? (
-            <div className={CONVERSATION_PANEL_FRAME_CLASS}>
-              <div
-                className={cn(
-                  CONVERSATION_PANEL_HEADER_CLASS,
-                  CONVERSATION_PANEL_HEADER_RULE_CLASS
-                )}
-              >
-                <span className={CONVERSATION_PANEL_TITLE_CLASS}>Output</span>
-              </div>
-              <pre
-                className={cn(
-                  CONVERSATION_PANEL_BODY_CLASS,
-                  inlineOutput ? 'overflow-x-auto' : 'max-h-60 overflow-auto'
-                )}
-                style={conversationMonoFontSizeStyle(fontSize)}
-              >
-                {formatJsonValue(toolCall.rawOutput)}
-              </pre>
-            </div>
-          ) : null}
-
-          {hasContent ? <div className="space-y-2">{renderContentBlocks()}</div> : null}
-
+          {detailNodes}
           {hasPermission && <PermissionRequestBlock toolCall={toolCall} />}
         </Fragment>
       ) : null}
@@ -7243,7 +7228,6 @@ const TOOL_KIND_META: Record<
 };
 
 type DiffBlockType = Extract<ToolCallContentBlock, { type: 'diff' }>;
-type TerminalCommandBlockType = Extract<ToolCallContentBlock, { type: 'terminal_command' }>;
 type TerminalOutputBlockType = Extract<ToolCallContentBlock, { type: 'terminal_output' }>;
 
 /**
@@ -7252,60 +7236,6 @@ type TerminalOutputBlockType = Extract<ToolCallContentBlock, { type: 'terminal_o
 const DiffBlockRenderer = ({ block }: { block: DiffBlockType }) => (
   <DiffViewer path={block.path} oldText={block.oldText ?? ''} newText={block.newText ?? ''} />
 );
-
-const formatTerminalCommandLine = (block: TerminalCommandBlockType) => {
-  const normalizedCommand = normalizeWorktreePath(String(block.command ?? ''));
-  const normalizedArgs = (block.args ?? []).map((arg: unknown) =>
-    normalizeWorktreePath(String(arg))
-  );
-  return [normalizedCommand, ...normalizedArgs].filter(Boolean).join(' ');
-};
-
-const ToolCallContentRenderer = ({
-  block,
-  onFilePathClick,
-  fontSize,
-}: {
-  block: ToolCallContentBlock;
-  onFilePathClick?: (filePath: string) => void;
-  fontSize: ConversationFontSize;
-}) => {
-  if (block.type === 'diff') {
-    return <DiffBlockRenderer block={block} />;
-  }
-
-  if (block.type === 'terminal') {
-    return (
-      <div
-        className="flex items-center gap-2 rounded-md border border-border/60 bg-muted/30 p-3 text-muted-foreground"
-        style={conversationTextFontSizeStyle(fontSize)}
-      >
-        <Terminal className="h-4 w-4" />
-        Terminal output is streaming in your CLI
-      </div>
-    );
-  }
-
-  if (block.type === 'terminal_command') {
-    return null;
-  }
-
-  if (block.type === 'terminal_output') {
-    return null;
-  }
-
-  if (block.type === 'content') {
-    return (
-      <StandardToolContentBlock
-        content={block.content}
-        onFilePathClick={onFilePathClick}
-        fontSize={fontSize}
-      />
-    );
-  }
-
-  return null;
-};
 
 // MCP tool content (`resource_link`, `resource`, `image`) carries URIs supplied
 // by the agent and arbitrary upstream MCP servers. Untrusted strings reach `<a
@@ -7366,24 +7296,7 @@ const StandardToolContentBlock = ({
 }) => {
   const readonly = useContext(SessionReadonlyContext);
   switch (content.type) {
-    case 'text': {
-      // Raw tool input arrives as serialized JSON text; keep it out of the
-      // Markdown pipeline so single-`$` math cannot eat fragments like `$(...)`.
-      const jsonText = detectToolCallJsonText(content.text);
-      if (jsonText !== null) {
-        return (
-          <pre
-            className={cn(CONVERSATION_PANEL_BODY_CLASS, 'max-h-60 overflow-auto')}
-            style={conversationMonoFontSizeStyle(fontSize)}
-          >
-            {jsonText}
-          </pre>
-        );
-      }
-      return (
-        <MarkdownBlock text={content.text} size={fontSize} onFilePathClick={onFilePathClick} />
-      );
-    }
+    // Text is laid out by `ToolCallCard`, which owns the verbatim/Markdown split.
     case 'image': {
       const src =
         content.uri && !readonly
@@ -7596,39 +7509,6 @@ const PermissionRequestBlock = ({ toolCall }: { toolCall: ToolCallMessage }) => 
       <span className="min-w-0 flex-1 truncate" title={label}>
         {label}
       </span>
-    </div>
-  );
-};
-
-const StructuredObject = ({
-  label,
-  value,
-  dense = false,
-  unbounded = false,
-  fontSize = DEFAULT_CONVERSATION_FONT_SIZE,
-}: {
-  label: string;
-  value: Record<string, unknown>;
-  dense?: boolean;
-  unbounded?: boolean;
-  fontSize?: ConversationFontSize;
-}) => {
-  return (
-    <div className={CONVERSATION_PANEL_FRAME_CLASS}>
-      <div className={cn(CONVERSATION_PANEL_HEADER_CLASS, CONVERSATION_PANEL_HEADER_RULE_CLASS)}>
-        <span className={CONVERSATION_PANEL_TITLE_CLASS}>{label}</span>
-      </div>
-      <pre
-        className={cn(
-          CONVERSATION_PANEL_BODY_CLASS,
-          unbounded ? 'overflow-x-auto' : 'max-h-60 overflow-auto'
-        )}
-        style={
-          dense ? conversationMonoFontSizeStyle(fontSize) : conversationTextFontSizeStyle(fontSize)
-        }
-      >
-        {formatJsonValue(value)}
-      </pre>
     </div>
   );
 };

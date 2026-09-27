@@ -51,6 +51,10 @@ Edit `AGENTS.md`, not its `CLAUDE.md` symlink. Ownership: [README.md](README.md)
   subagent task opens a popover peek from its row, never a dialog. Execute calls are not cards. Desktop disclosure headers use
   body type, a hover-only trailing chevron, no fill, and no thought rows.
   Turns are avatar-free and full-width; run config lives in the footer.
+- An expanded tool step is ONE `ToolDetailSheet` (`tool-call-detail.tsx`): composer
+  fill + card shadow, no header restating the row, sections in content order. Only
+  the command is highlighted, via the Shiki worker; output stays ANSI text. Drop
+  text blocks that echo the command. [Note](../../../../../.agents/notes/implemented/feature/2026-09-26-tool-step-detail-sheet.md).
 - Duration has one owner: desktop uses `WorkedGroupHeader` for folded turns and
   the footer after buttons otherwise; mobile always uses the footer before
   buttons, and the worked header suppresses its copy. Preserve
