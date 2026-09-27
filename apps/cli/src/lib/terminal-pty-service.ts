@@ -22,11 +22,7 @@ import type { Logger } from '@/utils/logger';
 import { formatErrorMessage } from '@/utils/format-error';
 import { makePlatformRunner } from '@/platform/promise-facade';
 import { NodeProcess } from '@lody/shared/node/process';
-import {
-  posixGroupTree,
-  terminateTree,
-  type TerminationPolicy,
-} from '@lody/shared/node/process';
+import { posixGroupTree, terminateTree, type TerminationPolicy } from '@lody/shared/node/process';
 
 const SCROLLBACK_MAX_CHARS = 512 * 1024;
 const TITLE_PARSE_BUFFER_MAX_CHARS = 4096;
