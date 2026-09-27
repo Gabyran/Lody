@@ -114,7 +114,7 @@ Lody 目前运行 0.20.0，外加一个上游已经吸收的补丁。因此 Lody
   - `RepoStorageError` 的日志足够有用；
   - 在大工作区上观察追加 bootstrap 文件带来的存储增长和压实行为。
 
-**阶段 0 的实际实现（本文的第一个 PR）。**
+**阶段 0 的实际实现（[LodyAI/Lody#1049](https://github.com/LodyAI/Lody/pull/1049)）。**
 
 - catalog 现在精确锁定 `loro-repo: 0.20.3`，补丁已删除。
 - 这期间 `main` 已升级到 streams-crdt 0.16.0（见 [streams-crdt 0.16 升级](../../implemented/bug-fix/2026-09-27-streams-crdt-0.16-upgrade.zh.md)），所以按包设置的 peer 例外从 `loro-repo@0.20.0` 改为 `loro-repo@0.20.3`。

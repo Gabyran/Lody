@@ -115,7 +115,7 @@ Evidence is from the loro-repo repository. Its design record is `docs/flock-pers
   - `RepoStorageError` is logged usefully;
   - the storage-growth and compaction behavior of appended bootstrap files is observed on a large workspace.
 
-**Phase 0 as implemented (the first PR for this note).**
+**Phase 0 as implemented ([LodyAI/Lody#1049](https://github.com/LodyAI/Lody/pull/1049)).**
 
 - The catalog now pins exactly `loro-repo: 0.20.3`, and the patch is deleted.
 - `main` had meanwhile moved to streams-crdt 0.16.0 ([streams-crdt 0.16 upgrade](../../implemented/bug-fix/2026-09-27-streams-crdt-0.16-upgrade.md)). Its package-specific peer exception therefore moves from `loro-repo@0.20.0` to `loro-repo@0.20.3`.
