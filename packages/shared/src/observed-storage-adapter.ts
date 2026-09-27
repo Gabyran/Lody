@@ -60,8 +60,15 @@ export const describeStorageWrite = (payload: StorageSavePayload): RefusedStorag
         key: hashBytes(payload.update),
         shape: isFlockFile(payload.update) ? 'whole' : 'exact',
       };
+    case 'meta-snapshot':
+      return { target: 'meta', key: hashBytes(payload.snapshot), shape: 'whole' };
   }
-  return { target: 'meta', key: hashBytes(payload.snapshot), shape: 'whole' };
+  // A payload kind this version does not know: new, since nothing tells otherwise.
+  return {
+    target: `unknown:${String((payload as { type?: unknown }).type)}`,
+    key: '',
+    shape: 'exact',
+  };
 };
 
 const operationWrite = (target: string): RefusedStorageWrite => ({
@@ -93,7 +100,14 @@ export const observeStorageAdapterWrites = (
     try {
       result = await run();
     } catch (error) {
-      observer.onWriteFailed(error, operation, writes());
+      // Describing the write must never replace the error the repo has to see.
+      let described: readonly RefusedStorageWrite[] = [];
+      try {
+        described = writes();
+      } catch {
+        described = [];
+      }
+      observer.onWriteFailed(error, operation, described);
       throw error;
     }
     observer.onWriteSucceeded();
