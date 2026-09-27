@@ -540,14 +540,9 @@ Before implementation, map each of these to a test. No phase may change them:
    request ends (current semantics, and the L5 default)? Or should the session resource
    be quarantined so a new process can continue? The latter is a behaviour change and needs a
    Spec draft.
-3. **Test tooling.** Should Lody adopt `@effect/vitest`, and move uniformly to TestClock in
-   place of the current fake-only-`setInterval` pattern?
+3. ~~Test tooling~~ Decided (2026-09-27): adopt `@effect/vitest` 0.26.x; new Effect tests use TestClock.
 4. **The `ancillary` finalization bound.** No measurements exist yet.
-5. **Where ProcessService lives.** Should it start in `apps/cli/src/platform/`, or go straight
-   into `packages/shared/src/node/` for reuse by cli-supervisor and Electron?
-   - Default: the CLI first, moving up when the supervisor migrates.
-   - Reason: Electron main's `node --test` has a known problem with extensionless imports from
-     shared.
+5. ~~Where ProcessService lives~~ Decided (2026-09-27): start in `apps/cli/src/platform/`, moving to a shared package when the supervisor migrates.
 
 ## Verification limits
 

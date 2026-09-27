@@ -368,11 +368,9 @@ SessionDocuments、SessionHistory、SessionPresence、CloudPort 的设计与 lor
    辅助可执行文件，并影响打包）？PR1 默认只做前者。
 2. **终止失败后的所有权**：保持 turn 持有直到原始请求结束（现状语义，L5 默认），还是隔离该
    会话资源、允许用新进程继续（行为变化，需要 Spec 草案）？
-3. 是否引入 `@effect/vitest`，以及是否统一改用 TestClock 替换现有只 fake `setInterval` 的写法。
+3. ~~是否引入 `@effect/vitest`~~ 已决定（2026-09-27）：引入 `@effect/vitest` 0.26.x，新写的 Effect 测试统一用 TestClock。
 4. `ancillary` 收尾的上限取值；当前没有测量数据。
-5. **ProcessService 的位置**：先放在 `apps/cli/src/platform/`，还是直接放进
-   `packages/shared/src/node/` 供 cli-supervisor 与 Electron 复用？默认先放 CLI，supervisor
-   迁移时再上移（Electron main 的 `node --test` 对 shared 的无扩展名导入有已知问题）。
+5. ~~ProcessService 的位置~~ 已决定（2026-09-27）：先放 `apps/cli/src/platform/`，cli-supervisor 迁移时再上移到共享包。
 
 ## 验证边界
 
