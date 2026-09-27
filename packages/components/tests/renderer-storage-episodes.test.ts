@@ -1,6 +1,11 @@
 import { LoroRepo, type StorageAdapter, type StorageSavePayload } from 'loro-repo';
 import { describe, expect, it } from 'vitest';
 import { RepoStorageGuard } from '@lody/shared';
+import {
+  RendererStorageState,
+  WindowStorageBarrier,
+  tearDownWindows,
+} from '@lody/shared/renderer-storage-barrier';
 import { RendererStorageEpisodes } from '../src/lib/renderer-storage-episodes';
 
 /** Refuses every write while `full`, like an IndexedDB origin out of quota. */
@@ -115,5 +120,91 @@ describe('RendererStorageEpisodes', () => {
     expect(store.state.saved.some((target) => target.startsWith('meta-'))).toBe(true);
     expect(unload()).toBe(false);
     await runtime.guard.close();
+  });
+});
+
+describe('sign-out across windows', () => {
+  /**
+   * Window A signs out while window B's own repo holds a quota-refused write. The
+   * main-side barrier talks to each window's registry the way the IPC does.
+   */
+  const setup = async (discard: boolean, lost: number[] = []) => {
+    const state = new RendererStorageState();
+    const windowA = new RendererStorageEpisodes((since) => state.report(1, since));
+    const windowB = new RendererStorageEpisodes((since) => state.report(2, since));
+    const registries = new Map([
+      [1, windowA],
+      [2, windowB],
+    ]);
+    const confirms: Array<[number, string]> = [];
+    const barrier = new WindowStorageBarrier({
+      state,
+      isQuitting: () => false,
+      reportLost: (windowId) => lost.push(windowId),
+      confirmDiscard: async (since, kind) => {
+        confirms.push([since, kind]);
+        return discard;
+      },
+      quitCheck: {
+        timeoutMs: 3_000,
+        setTimer: () => null,
+        clearTimer: () => {},
+        send: (windowId, requestId) => {
+          const registry = registries.get(windowId);
+          if (!registry) return false;
+          void registry
+            .flushForQuit()
+            .then((since) => state.handleQuitCheckResult(windowId, requestId, since));
+          return true;
+        },
+      },
+    });
+    await openRuntime(windowA, createQuotaStore().adapter, () => 500);
+    const storeB = createQuotaStore();
+    const b = await openRuntime(windowB, storeB.adapter, () => 1_000);
+    storeB.state.full = true;
+    await b.repo.upsertDocMeta('doc-b', { title: 'typed in window B while full' });
+    await expect(b.repo.persistMetaNow()).rejects.toThrow();
+    expect(state.unsavedSince(2)).toBe(1_000);
+
+    const destroyed: number[] = [];
+    const signOut = () =>
+      tearDownWindows({
+        barrier,
+        windowIds: [1, 2],
+        keep: 1,
+        kind: 'sign-out',
+        destroy: (windowId) => destroyed.push(windowId),
+      });
+    return { state, barrier, confirms, storeB, b, destroyed, signOut };
+  };
+
+  it('keeps window B, its repo and its report when the user cancels, and saves it later', async () => {
+    const { state, confirms, storeB, b, destroyed, signOut } = await setup(false);
+
+    await expect(signOut()).resolves.toBe(false);
+    expect(confirms).toEqual([[1_000, 'sign-out']]);
+    expect(destroyed).toEqual([]);
+    expect(state.unsavedSince(2)).toBe(1_000);
+
+    // Space returns: the next sign-out's flush saves B's repo, so no question is asked.
+    storeB.state.full = false;
+    await expect(signOut()).resolves.toBe(true);
+    expect(confirms).toHaveLength(1);
+    expect(destroyed).toEqual([2]);
+    expect(storeB.state.saved.some((target) => target.startsWith('meta-'))).toBe(true);
+    await b.guard.close();
+  });
+
+  it('destroys window B only after the user explicitly discards', async () => {
+    const lost: number[] = [];
+    const { barrier, confirms, destroyed, signOut, state } = await setup(true, lost);
+    await expect(signOut()).resolves.toBe(true);
+    expect(confirms).toEqual([[1_000, 'sign-out']]);
+    expect(destroyed).toEqual([2]);
+    expect(state.unsavedSince(2)).toBeNull();
+    // The destroy that follows is an approved teardown, not a loss.
+    barrier.documentGone(2);
+    expect(lost).toEqual([]);
   });
 });

@@ -60,6 +60,10 @@
       "types": "./src/electron-ipc.ts",
       "import": "./src/electron-ipc.ts"
     },
+    "./renderer-storage-barrier": {
+      "types": "./src/renderer-storage-barrier.ts",
+      "import": "./src/renderer-storage-barrier.ts"
+    },
     "./devbar": {
       "types": "./src/devbar.ts",
       "import": "./src/devbar.ts"

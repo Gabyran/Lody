@@ -7,6 +7,8 @@ import {
   writeStoredAuthToken,
 } from './auth-bootstrap';
 import { getAuthResponseError, type AuthResponseError } from './auth-response';
+import { SIGN_OUT_CANCELLED_CODE } from '@lody/shared/renderer-storage-barrier';
+import { getIpcServices } from './electron-ipc-client';
 import { deferredPostHog } from './deferred-posthog';
 import { registerAuthClient } from './auth-client-singleton';
 import { replaceAppWindowLocation } from './app-location';
@@ -78,6 +80,19 @@ export type SignOutOutcome = { ok: true } | { ok: false; error: AuthResponseErro
 export const signOutWithoutRedirect = async (
   authClient: LodyAuthClient
 ): Promise<SignOutOutcome> => {
+  // Desktop: a window whose own repo holds changes its storage refused must flush,
+  // or the user must agree to drop them, before any local auth state is cleared.
+  // Declining leaves everything, including this session, exactly as it was.
+  const approved = (await getIpcServices()?.auth.prepareSignOut()) ?? true;
+  if (!approved) {
+    return {
+      ok: false,
+      error: {
+        message: 'Sign-out cancelled to keep unsaved changes',
+        code: SIGN_OUT_CANCELLED_CODE,
+      },
+    };
+  }
   // Fence token requests at logout intent, before Better Auth's async sign-out
   // updates useSession(). Otherwise a token request that completes in that
   // network window can still authenticate Convex as the previous user.
@@ -102,6 +117,7 @@ export const signOutWithoutRedirect = async (
 };
 
 export const signOutWithAuthClient = async (authClient: LodyAuthClient) => {
-  await signOutWithoutRedirect(authClient);
+  const outcome = await signOutWithoutRedirect(authClient);
+  if (!outcome.ok && outcome.error.code === SIGN_OUT_CANCELLED_CODE) return;
   replaceAppWindowLocation(`${import.meta.env.BASE_URL}login`);
 };

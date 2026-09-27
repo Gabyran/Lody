@@ -9,7 +9,7 @@ import {
   RendererStorageState,
   WindowStorageBarrier,
   resolveUnsavedBeforeQuit
-} from './renderer-storage-state.ts'
+} from '@lody/shared/renderer-storage-barrier'
 
 const loopback = { host: '127.0.0.1', port: 0 }
 

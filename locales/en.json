@@ -4422,6 +4422,8 @@
   "archive.leave": "Leave Archive",
   "common.copyTable": "Copy table",
   "desktop.quitUnsaved.cancel": "Cancel",
+  "desktop.quitUnsaved.clearCache": "Clear Anyway",
+  "desktop.quitUnsaved.signOut": "Sign Out Anyway",
   "desktop.quitUnsaved.close": "Close Anyway",
   "desktop.quitUnsaved.reload": "Reload Anyway",
   "desktop.quitUnsaved.windowDetail": "Storage is full, so changes in this window since {{time}} exist only in memory. Continuing loses them. Free some disk space and wait for the warning to clear first.",

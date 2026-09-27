@@ -180,6 +180,25 @@ windows unload freely. A report is dropped only after approval or when the docum
 is gone. A crash or unapproved destroy is logged as a loss, and failing to ask a
 window keeps its report.
 
+**Sign-out and cache clear force-destroy other windows, so they approve first.** They
+call `destroy()`, which runs no `beforeunload`, so the unload guard never saw them;
+review caught that as well. Both now go through `tearDownWindows`, which calls
+`WindowStorageBarrier.approveTeardown` before destroying:
+- Every listed window holding unsaved changes flushes.
+- Whatever is still unsaved gets one confirmation ("Sign Out Anyway" / "Clear
+  Anyway").
+- Cancel destroys nothing and leaves reports and repos intact.
+
+Sign-out asks through `auth.prepareSignOut` before the shared sign-out clears any
+local auth state or redirects. A cancel returns `sign_out_cancelled_unsaved_storage`
+and leaves the session, the CLI and every window alone. `signOut` itself approves
+again, in case a window became unsaved in between. A declined cache clear leaves the
+clear armed for the next load.
+
+The barrier code moved to the self-contained `@lody/shared/renderer-storage-barrier`,
+so Electron's `node --test` suite and the renderer's real-`LoroRepo` tests run the
+same code.
+
 **Remote-sync persistence failures** are reported like every other write. The first
 revision also raised the Streams persist coalescer's failures from debug to a
 rate-limited warning. #1066 removed that coalescer: each cursor save now waits on a
@@ -272,6 +291,14 @@ Automated, with injected clocks, manual timers and fault injection, no real slee
   - A crash is reported as a loss.
 
   Making the barrier approve without asking fails both barrier tests.
+- `packages/components/tests/renderer-storage-episodes.test.ts` (sign-out across
+  windows, real `LoroRepo`s): window B's meta is refused and window A signs out.
+  - Cancel destroys nothing, and B's report and repo stay.
+  - After space is freed, the next sign-out flushes B, saves the meta and destroys B
+    without asking.
+  - An explicit discard destroys B, and its destroy is not reported as a loss.
+
+  Making `tearDownWindows` destroy without approval fails both.
 - `packages/components/tests/renderer-storage-episodes.test.ts` (unload guard, real
   `LoroRepo`): after a quota refusal the window's `beforeunload` is cancelled, and
   stays cancelled after a flush that is still refused. Once space returns the flush

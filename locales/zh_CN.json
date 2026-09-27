@@ -4422,6 +4422,8 @@
   "archive.leave": "退出归档",
   "common.copyTable": "复制表格",
   "desktop.quitUnsaved.cancel": "取消",
+  "desktop.quitUnsaved.clearCache": "仍然清除",
+  "desktop.quitUnsaved.signOut": "仍然退出登录",
   "desktop.quitUnsaved.close": "仍然关闭",
   "desktop.quitUnsaved.reload": "仍然重新加载",
   "desktop.quitUnsaved.windowDetail": "存储空间已满，此窗口自 {{time}} 起的更改只保存在内存中。继续会丢失这些更改。请先释放磁盘空间，等提示消失后再操作。",

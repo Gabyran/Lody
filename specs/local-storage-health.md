@@ -120,6 +120,11 @@ through once everything is saved; otherwise it asks, and Cancel keeps the window
 A window that closes or crashes without that approval is recorded as a loss, never
 as saved.
 
+Signing out and clearing the local cache close the other windows without giving
+them a chance to unload, so both ask first: every window holding unsaved changes
+flushes, and whatever is still unsaved gets one confirmation. Cancel stops the
+sign-out or the clear, and nothing is closed or changed.
+
 ## Open questions
 
 - loro-repo still logs failed background saves to the console, and a first open after
@@ -139,7 +144,9 @@ as saved.
   `apps/cli/src/lib/message-handler.ts` (preparation, attachment copies).
 - Presence field: `packages/shared/src/presence.ts`, `apps/cli/src/lib/loro/presence.ts`.
 - UI: `packages/components/src/components/local-storage-banner.tsx`,
-  `packages/components/src/atoms/local-storage-health.ts`; desktop quit:
-  `apps/electron/src/main/application.ts`.
+  `packages/components/src/atoms/local-storage-health.ts`; desktop quit, window close
+  and reload, sign-out and cache clear: `apps/electron/src/main/application.ts`,
+  `packages/shared/src/renderer-storage-barrier.ts`,
+  `packages/components/src/lib/renderer-storage-episodes.ts`.
 - Executed validation: a daemon on a full 256 MiB RAM disk, recorded in
   [the implementing note](../.agents/notes/implemented/feature/2026-09-27-local-storage-health.md).

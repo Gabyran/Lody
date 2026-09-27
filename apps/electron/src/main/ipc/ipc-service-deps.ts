@@ -7,7 +7,10 @@ import type { GlobalShortcutsService } from '../services/global-shortcuts-servic
 import type { LoroDataPlaneRelay } from '../services/loro-data-plane-relay'
 import type { NotificationService } from '../services/notification-service'
 import type { PublicBrowserService } from '../services/public-browser-service'
-import type { RendererStorageState } from '../services/renderer-storage-state'
+import type {
+  RendererStorageState,
+  WindowStorageBarrier
+} from '@lody/shared/renderer-storage-barrier'
 import type { TerminalRelay } from '../services/terminal-relay'
 import type { WindowBadgeService } from '../services/window-badge-service'
 
@@ -21,6 +24,8 @@ export type IpcServiceDeps = {
   publicBrowserService: PublicBrowserService
   loroDataPlaneRelay: LoroDataPlaneRelay
   rendererStorageState: RendererStorageState
+  /** Approves closing, reloading or destroying windows whose own repo is unsaved. */
+  windowStorageBarrier: WindowStorageBarrier
   windowBadgeService: WindowBadgeService
   globalShortcutsService: GlobalShortcutsService
   getMainWindow: () => BrowserWindow | null

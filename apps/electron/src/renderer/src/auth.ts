@@ -20,6 +20,7 @@ import {
 import { readStoredAuthToken } from '@lody/components/lib/auth-bootstrap'
 import { persistNativeAuthSessionResult as persistAuthSessionResult } from '@lody/components/lib/native-auth-session-sync'
 import { getIpcServices, onIpcEvent } from '@lody/components/lib/electron-ipc-client'
+import { SIGN_OUT_CANCELLED_CODE } from '@lody/shared/renderer-storage-barrier'
 import { createAuthQueryGeneration } from './auth-query-generation'
 
 const ELECTRON_PROTOCOL_SCHEME = 'lody'
@@ -511,15 +512,28 @@ function createElectronAuthClientAdapter() {
       }
     },
     signOut: async () => {
+      // False only when a window's unsaved storage made the user keep the session.
+      let signedOut = true
       try {
-        await getAuthApi().signOut()
+        signedOut = (await getAuthApi().signOut()).signedOut
       } finally {
-        try {
-          await getIpcServices()?.cli.terminate()
-        } catch (error) {
-          console.warn('[Auth] Failed to terminate CLI after sign-out', error)
+        if (signedOut) {
+          try {
+            await getIpcServices()?.cli.terminate()
+          } catch (error) {
+            console.warn('[Auth] Failed to terminate CLI after sign-out', error)
+          }
         }
       }
+      if (!signedOut) {
+        return {
+          error: {
+            message: 'Sign-out cancelled to keep unsaved changes',
+            code: SIGN_OUT_CANCELLED_CODE
+          }
+        }
+      }
+      return undefined
     },
     changeEmail: async (payload: unknown) => {
       const response = await getAuthApi().changeEmail(withStoredSessionAuthorization(payload))

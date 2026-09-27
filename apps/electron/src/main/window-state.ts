@@ -60,6 +60,23 @@ export function isWindowsTrayAvailable(): boolean {
   return windowsTrayAvailable
 }
 
+/** `webContents` ids of the product windows still alive (the storage barrier's window ids). */
+export function liveProductWindowIds(): number[] {
+  return [...productWindows]
+    .filter((window) => !window.isDestroyed())
+    .map((window) => window.webContents.id)
+}
+
+/**
+ * Force-destroys one product window, bypassing its `beforeunload`. Only for a
+ * teardown the window storage barrier approved (`tearDownWindows`).
+ */
+export function destroyProductWindow(webContentsId: number): void {
+  for (const window of productWindows) {
+    if (!window.isDestroyed() && window.webContents.id === webContentsId) window.destroy()
+  }
+}
+
 export function registerProductWindow(window: BrowserWindow, warm: boolean): void {
   productWindows.add(window)
   if (warm) markWarmWindow(window)

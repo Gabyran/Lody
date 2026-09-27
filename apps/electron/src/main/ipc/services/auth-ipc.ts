@@ -1,4 +1,5 @@
-import { productWindows } from '../../window-state'
+import { tearDownWindows } from '@lody/shared/renderer-storage-barrier'
+import { destroyProductWindow, liveProductWindowIds } from '../../window-state'
 import { getIpcContext, IpcMethod, IpcService } from 'electron-ipc-decorator'
 import {
   ElectronDevEmailPasswordSignInInputSchema,
@@ -39,14 +40,36 @@ export class AuthIpc extends IpcService {
     return await getIpcServiceDeps().authService.signInWithDevEmailPassword(input)
   }
 
+  /**
+   * Before the renderer clears its own auth state: every window whose own repo
+   * holds unsaved changes flushes, and the user confirms dropping what is still
+   * unsaved. False means signing out was cancelled and nothing changed.
+   */
   @IpcMethod()
-  async signOut() {
+  async prepareSignOut(): Promise<boolean> {
+    assertAuthSender()
+    return await getIpcServiceDeps().windowStorageBarrier.approveTeardown(
+      liveProductWindowIds(),
+      'sign-out'
+    )
+  }
+
+  @IpcMethod()
+  async signOut(): Promise<{ signedOut: boolean }> {
     assertAuthSender()
     const sender = getIpcContext().event.sender
-    for (const window of productWindows) {
-      if (window.webContents !== sender) window.destroy()
-    }
+    // `destroy()` runs no beforeunload, so the storage barrier approves first; a
+    // window that became unsaved since prepareSignOut is asked again.
+    const approved = await tearDownWindows({
+      barrier: getIpcServiceDeps().windowStorageBarrier,
+      windowIds: liveProductWindowIds(),
+      keep: sender.id,
+      kind: 'sign-out',
+      destroy: destroyProductWindow
+    })
+    if (!approved) return { signedOut: false }
     await getIpcServiceDeps().authService.signOut()
+    return { signedOut: true }
   }
 
   @IpcMethod()

@@ -1,6 +1,7 @@
 import { assertProductWindowSender } from '../assert-sender'
 import { parseAppIconName } from '../../services/app-icon-core'
-import { productWindows } from '../../window-state'
+import { tearDownWindows } from '@lody/shared/renderer-storage-barrier'
+import { destroyProductWindow, liveProductWindowIds } from '../../window-state'
 import { parseWindowTarget, openSessionWindow, type WindowTarget } from '../../session-windows'
 import { access } from 'node:fs/promises'
 import { isAbsolute } from 'node:path'
@@ -145,13 +146,22 @@ export class AppIpc extends IpcService {
     cancelPreparedWindow(event.sender.id, requestId)
   }
 
+  /**
+   * Closes every other window before a local wipe. Their own repos may hold
+   * changes storage refused, so they flush and the user confirms first; false
+   * means the wipe was cancelled and every window stays.
+   */
   @IpcMethod()
-  async prepareCacheClear() {
+  async prepareCacheClear(): Promise<boolean> {
     const { event } = getIpcContext()
     assertProductWindowSender(event)
-    for (const window of productWindows) {
-      if (window.webContents !== event.sender) window.destroy()
-    }
+    return await tearDownWindows({
+      barrier: getIpcServiceDeps().windowStorageBarrier,
+      windowIds: liveProductWindowIds(),
+      keep: event.sender.id,
+      kind: 'clear-cache',
+      destroy: destroyProductWindow
+    })
   }
 
   /**

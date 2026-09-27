@@ -133,6 +133,20 @@ repo；评审发现了这个问题。
 可重做的内容，由用户再试一次。应用退出期间退出屏障已经询问过，窗口可以自由卸载。上报只在获批后或
 文档消失时才会丢掉；崩溃或未获批的销毁会被记录为丢失，无法询问窗口时保留它的上报。
 
+**退出登录和清除缓存会强制销毁其他窗口，所以先要获批。** 它们调用 `destroy()`，不会运行
+`beforeunload`，卸载保护因此完全看不到它们；评审同样发现了这一点。现在两者都经过 `tearDownWindows`，
+它在销毁前调用 `WindowStorageBarrier.approveTeardown`：
+- 每个列出的、持有未保存更改的窗口先 flush；
+- 仍未保存的部分统一确认一次（"仍然退出登录" / "仍然清除"）；
+- 取消则什么都不销毁，上报和 repo 保持原样。
+
+退出登录会在共享的退出流程清除任何本地认证状态或跳转之前，先通过 `auth.prepareSignOut` 询问；
+取消会返回 `sign_out_cancelled_unsaved_storage`，会话、CLI 和所有窗口都保持不变。`signOut` 本身会
+再批准一次，以防其间有窗口出现了新的未保存更改。被拒绝的缓存清除会保持待执行状态，留到下一次加载。
+
+屏障代码移到了自包含的 `@lody/shared/renderer-storage-barrier`，这样 Electron 的 `node --test` 套件
+和渲染端的真实 `LoroRepo` 测试运行的是同一份代码。
+
 **远端同步持久化的失败**与其他写入一样上报。第一版还把 Streams 持久化合并器的失败从 debug 提升
 为限频警告；#1066 移除了这个合并器，每次游标保存现在都等待真实的逐资源屏障，其写入经过被观察的
 适配器，由监视器自己的警告覆盖（每轮一次，此后至多每 5 分钟一次，并写明开始时间）。
@@ -204,6 +218,13 @@ repo；评审发现了这个问题。
   - 崩溃会被报告为丢失。
 
   让屏障不询问就批准会让两个屏障用例都失败。
+- `packages/components/tests/renderer-storage-episodes.test.ts`（跨窗口退出登录，真实 `LoroRepo`）：
+  窗口 B 的 meta 被拒绝，窗口 A 退出登录。
+  - 取消时什么都不销毁，B 的上报和 repo 都保留；
+  - 释放空间后，下一次退出登录会 flush B、保存 meta，不再询问就销毁 B；
+  - 明确选择丢弃会销毁 B，而这次销毁不会被报告为丢失。
+
+  让 `tearDownWindows` 不经批准就销毁会让这两个用例都失败。
 - `packages/components/tests/renderer-storage-episodes.test.ts`（卸载保护，真实 `LoroRepo`）：
   quota 拒绝之后，窗口的 `beforeunload` 被取消；flush 仍被拒绝时保持取消；空间恢复后 flush 保存
   meta，卸载被放行。让保护变成空操作会让它失败。

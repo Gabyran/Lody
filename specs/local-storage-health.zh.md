@@ -97,6 +97,10 @@ runtime 会保持它的 repo 打开，并继续计入横幅，直到恢复流程
 未保存更改，窗口就拒绝卸载；桌面端请它 flush，全部保存后才放行关闭或重新加载，否则会询问，取消则
 保留窗口。未经这一确认就关闭或崩溃的窗口会被记录为丢失，而不会被当作已保存。
 
+退出登录和清除本地缓存会在不给其他窗口卸载机会的情况下关闭它们，所以两者都会先询问：每个持有
+未保存更改的窗口先 flush，仍未保存的部分统一确认一次。取消会中止退出登录或清除，不会关闭或改变
+任何东西。
+
 ## 待定问题
 
 - loro-repo 仍会把后台保存失败打印到控制台，且 schema 升级后的第一次打开需要写盘
@@ -115,7 +119,9 @@ runtime 会保持它的 repo 打开，并继续计入横幅，直到恢复流程
   `apps/cli/src/lib/message-handler.ts`（预先准备、附件复制）。
 - presence 字段：`packages/shared/src/presence.ts`、`apps/cli/src/lib/loro/presence.ts`。
 - 界面：`packages/components/src/components/local-storage-banner.tsx`、
-  `packages/components/src/atoms/local-storage-health.ts`；桌面端退出：
-  `apps/electron/src/main/application.ts`。
+  `packages/components/src/atoms/local-storage-health.ts`；桌面端退出、窗口关闭与重新加载、退出登录
+  和清除缓存：`apps/electron/src/main/application.ts`、
+  `packages/shared/src/renderer-storage-barrier.ts`、
+  `packages/components/src/lib/renderer-storage-episodes.ts`。
 - 已执行的验证：在写满的 256 MiB RAM 盘上运行 daemon，记录在
   [实现说明](../.agents/notes/implemented/feature/2026-09-27-local-storage-health.zh.md)中。

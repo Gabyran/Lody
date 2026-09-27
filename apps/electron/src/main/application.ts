@@ -34,7 +34,7 @@ import {
   resolveUnsavedBeforeQuit,
   type RendererStorageQuitCheckOptions,
   type WindowTeardownKind
-} from './services/renderer-storage-state'
+} from '@lody/shared/renderer-storage-barrier'
 import { setRendererReloadIntentHook } from './renderer-recovery'
 import { applyPendingDesktopLocalReset } from './services/local-reset-service'
 import { TerminalRelay } from './services/terminal-relay'
@@ -244,12 +244,13 @@ export function startApplication(executionHost?: DesktopExecutionHost): void {
       unsavedSince: number,
       kind: 'quit' | WindowTeardownKind
     ): Promise<boolean> => {
-      const proceed =
-        kind === 'quit'
-          ? translateMenu('desktop.quitUnsaved.quit', 'Quit Anyway')
-          : kind === 'close'
-            ? translateMenu('desktop.quitUnsaved.close', 'Close Anyway')
-            : translateMenu('desktop.quitUnsaved.reload', 'Reload Anyway')
+      const proceed = {
+        quit: () => translateMenu('desktop.quitUnsaved.quit', 'Quit Anyway'),
+        close: () => translateMenu('desktop.quitUnsaved.close', 'Close Anyway'),
+        reload: () => translateMenu('desktop.quitUnsaved.reload', 'Reload Anyway'),
+        'sign-out': () => translateMenu('desktop.quitUnsaved.signOut', 'Sign Out Anyway'),
+        'clear-cache': () => translateMenu('desktop.quitUnsaved.clearCache', 'Clear Anyway')
+      }[kind]()
       const { response } = await dialog.showMessageBox({
         type: 'warning',
         buttons: [proceed, translateMenu('desktop.quitUnsaved.cancel', 'Cancel')],
@@ -375,6 +376,7 @@ export function startApplication(executionHost?: DesktopExecutionHost): void {
       publicBrowserService,
       loroDataPlaneRelay,
       rendererStorageState,
+      windowStorageBarrier,
       windowBadgeService,
       globalShortcutsService,
       getMainWindow,

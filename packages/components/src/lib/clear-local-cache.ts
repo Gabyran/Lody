@@ -437,7 +437,10 @@ let bootClearPromise: Promise<PendingLocalClearMode | null> | null = null;
 async function runPendingClearOnBoot(): Promise<PendingLocalClearMode | null> {
   const mode = readPendingLocalClearMode() ?? (await readNativePendingClearMode());
   if (!mode) return null;
-  await getIpcServices()?.app.prepareCacheClear();
+  // Other windows are closed first; one holding changes its storage refused must
+  // flush or the user must agree to drop them. Declined: nothing is wiped and the
+  // clear stays armed for the next load.
+  if ((await getIpcServices()?.app.prepareCacheClear()) === false) return null;
 
   try {
     if (mode === 'hard') {
