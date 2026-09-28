@@ -234,6 +234,8 @@ type EpochState = {
 
 `keyCommitment` 即 §2 的 commitment。`rotationRequired` 在移除成员或撤销设备后为 true，表示应当尽快换代；`publishEpoch` 成功后回到 false。纯验证器不因为这个标志就拒绝其它操作。
 
+被移除者/被撤设备仍持有当前代密钥，因此标志为 true 期间，诚实客户端**不得密封新内容**（更新与快照），须等 `publishEpoch` 后用新代密钥写入（`maySealNewContent`）。宿主准入仍只查文档写权限（`deviceMayWriteDocument`），不按标志拒绝：移除前已密封、稍后上传的离线密文仍可接纳。读端照常打开旧代内容。恶意客户端可以无视此规则，这不属于服务器保密保证（2026-09-28）。
+
 签名公钥用于验证作者，加密公钥用于接收信封，两者用途不同；以上均为公开信息。
 不再用含糊的 `identityKeys` 或 `encryptionKey` 字段名。恢复设备使用相同的独立
 签名/加密公钥与成员绑定，不在 Member 上另设恢复公钥或要求所有设备保管用户私钥。

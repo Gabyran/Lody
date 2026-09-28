@@ -158,6 +158,8 @@ describe('P3 Spec §7 matrix', () => {
           revoked.status === 'committed' && afterRevoke.state.devices.has(toHex(phone.publicKey)),
       }),
     });
+    // The revoked phone still holds epoch 0; honest writes resume after rotation.
+    expect((await alice.publishEpoch()).status).toBe('committed');
 
     const identity = await createUserIdentity();
     const file = createRecoveryFile();

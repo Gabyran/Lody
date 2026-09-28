@@ -60,6 +60,8 @@ Local deterministic collaboration plus one attack Agent. Not product E2EE.
   (`contentAuthorKey`), never from header claims; writers use ledger `userId` and
   membership as author fields. Sealing checks the key against the commitment.
 - Content seal uses the authenticated ledger epoch, not `max(local keys)`.
+  Honest writers refuse to seal while `rotationRequired` (`maySealNewContent`);
+  tests that revoke/remove then write must `publishEpoch` first.
 - `DemoSession.genesis` is the signed record, NOT the Org hash. Key commitments,
   history and envelope AAD use `ledger.state.genesis`; only replay/bootstrap uses
   the record. Never silently recompute commitments in old captured artifacts.

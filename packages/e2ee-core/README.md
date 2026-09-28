@@ -794,7 +794,9 @@ outgoing overhead within the SDK's 4096-byte cap. Existing update framing is
 unchanged; no alternate crypto suite.
 
 Honest clients require `mayWriteDocument` to **seal** updates and snapshots. That does not
-constrain a malicious client. Publication admission is the host port
+constrain a malicious client. Honest writers derive it from `maySealNewContent`: document-write
+rights and no pending `rotationRequired`, because a removed member or revoked device still
+holds the current key until `publishEpoch`. Hosts keep admitting with `deviceMayWriteDocument`. Publication admission is the host port
 `createContentSnapshotPublication` from `@lody/e2ee-core/snapshot-admission`:
 current device document-write, authenticated submitting device bound to the
 signing device, and the existing worst 15-minute authorization lease. The

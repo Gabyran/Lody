@@ -13,6 +13,16 @@ export function deviceMayWriteDocument(state: OrgState, deviceIdHex: string): bo
 }
 
 /**
+ * Honest-writer seal gate: document-write rights AND no pending rotation. After a
+ * member removal or device revoke the current key is still held by the removed party,
+ * so new content must wait for `publishEpoch`. Hosts keep using `deviceMayWriteDocument`
+ * for admission; ciphertext sealed before the removal may still be uploaded.
+ */
+export function maySealNewContent(state: OrgState, deviceIdHex: string): boolean {
+  return !state.epoch.rotationRequired && deviceMayWriteDocument(state, deviceIdHex);
+}
+
+/**
  * The signing key for a content header, taken only from verified ledger authority.
  * A current device must match the header's Org, member instance and user. A device
  * admitted earlier and since revoked (`wasAdmitted`) still verifies as a historical

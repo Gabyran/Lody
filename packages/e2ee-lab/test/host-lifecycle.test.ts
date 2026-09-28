@@ -154,9 +154,11 @@ describe('lab host lifecycle', () => {
       /unauthorized|403|loro-sync-failed|stream-read-forbidden/
     );
     await expect(writeLoro(writer, 'after-revoke')).rejects.toThrow();
-    await writeLoro(alice, 'epoch-one');
+    await expect(writeLoro(alice, 'epoch-one')).rejects.toThrow('rotation-required');
+    expect((await alice.publishEpoch()).status).toBe('committed');
+    await writeLoro(alice, 'epoch-two');
     expect(await readLoro(alice)).toContain('epoch-zero');
-    expect(await readLoro(alice)).toContain('epoch-one');
+    expect(await readLoro(alice)).toContain('epoch-two');
   });
 
   it('saves the epoch candidate before CAS and resumes without regenerating', async () => {
@@ -537,6 +539,39 @@ describe('lab host lifecycle', () => {
     expect(rejected.roleConfigured).toBe(false);
     expect(rejected.status).not.toBe('committed');
     expect((await alice.readLedger()).state.members.size).toBe(1);
+  });
+
+  it('refuses new content after removeMember until the epoch rotates', async () => {
+    const host = await launchLab();
+    const alice = await labClient({ host, account: 'alice' });
+    const bob = await labClient({ host, account: 'bob' });
+    await alice.createSpace();
+    const admitted = await alice.approveJoin(await bob.requestJoin(alice.genesisHex!), 'member');
+    expect(admitted.status).toBe('committed');
+    await bob.readLedger();
+    await bob.receiveEpochKey(alice.device, 0, await alice.deliverEpochKey(bob.device, 0));
+    await writeLoro(alice, 'before-removal;');
+    expect(await readLoro(bob)).toContain('before-removal;');
+
+    expect((await alice.removeMember(admitted.membershipId)).status).toBe('committed');
+    await expect(writeLoro(alice, 'during-window;')).rejects.toThrow('rotation-required');
+    expect(alice.canWriteDocument).toBe(false);
+
+    // Bob keeps K_0 and reads Riverrun directly, bypassing the gateway (colluding server).
+    const colluding = () =>
+      readLoro(
+        Object.create(bob, {
+          baseUrl: { value: host.riverrunUrl },
+          prepareRead: { value: undefined },
+          loroDoc: { value: null, writable: true },
+        })
+      ).catch((error: unknown) => `refused:${String(error)}`);
+    expect(await colluding()).not.toContain('during-window;');
+
+    expect((await alice.publishEpoch()).status).toBe('committed');
+    await writeLoro(alice, 'after-rotation;');
+    expect(await readLoro(alice)).toContain('after-rotation;');
+    expect(await colluding()).not.toContain('after-rotation;');
   });
 
   it('rejects content writes from a guest', async () => {

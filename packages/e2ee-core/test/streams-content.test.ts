@@ -8,8 +8,21 @@ import {
 } from '@loro-dev/streams-crdt/loro';
 import { ContentCipher } from '../src/content';
 import { toHex } from '../src/wire';
-import { createStreamsContentProvider, deviceMayWriteDocument } from '../src/streams-content';
-import { admitDeviceOp, append, ed25519, hex, signGenesis } from './ledger-fixtures';
+import {
+  createStreamsContentProvider,
+  deviceMayWriteDocument,
+  maySealNewContent,
+} from '../src/streams-content';
+import {
+  HISTORY_PACKET_BYTES,
+  admitDeviceOp,
+  append,
+  commitEpochKey,
+  ed25519,
+  hex,
+  random,
+  signGenesis,
+} from './ledger-fixtures';
 
 let pair: CryptoKeyPair;
 let publicKey: string;
@@ -388,4 +401,16 @@ it('checks device document-write capability, not mere possession of a key', asyn
   });
   expect(deviceMayWriteDocument(revoked.ledger.state, machineHex)).toBe(false);
   expect(deviceMayWriteDocument(revoked.ledger.state, ownerHex)).toBe(true);
+
+  // The revoked machine still holds epoch 0: honest writers wait for the rotation.
+  expect(maySealNewContent(withMachine.ledger.state, ownerHex)).toBe(true);
+  expect(maySealNewContent(revoked.ledger.state, ownerHex)).toBe(false);
+  const rotated = await append(revoked.ledger, owner, {
+    type: 'publishEpoch',
+    epoch: 1,
+    commitment: await commitEpochKey(created.anchor, 1, random(32)),
+    previousEpochKey: random(HISTORY_PACKET_BYTES),
+  });
+  expect(maySealNewContent(rotated.ledger.state, ownerHex)).toBe(true);
+  expect(maySealNewContent(rotated.ledger.state, machineHex)).toBe(false);
 });

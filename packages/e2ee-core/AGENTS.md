@@ -84,8 +84,8 @@ in-package tests only; do not re-export it.
   `authenticate` checks signatures without decryption, not publication permission.
   Resolve signing keys only from verified ledger authority (`contentAuthorKey`).
   `streams-content.ts` uses existing streams-crdt `seal`/`open` for updates and
-  snapshots. Only active personal/machine writers may write; snapshot sealing
-  requires `deviceMayWriteDocument`, excluding Guest/R. Bind genesis, resource,
+  snapshots. Only active personal/machine writers may write, never Guest/R; honest
+  seals need `maySealNewContent` (none while `rotationRequired`). Bind genesis, resource,
   kind/model, epoch and opaque continuation offset. `./snapshot-admission`
   requires current write permission, submitter/signing-device binding and the
   original 15-minute lease, rechecked after async verification immediately before

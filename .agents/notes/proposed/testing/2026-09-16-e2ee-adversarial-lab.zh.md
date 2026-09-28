@@ -605,3 +605,11 @@ v1 `possessionSigningBytes` 为 `[genesis, signPub, encPub, kind, canManage]`。
   - Lab：`gateway-headers`、`epoch-key-history`、`content-authority`、`host-hardening`。
 
   读取前刷新账本后，Lab 边界攻击改为丢弃 bob 最先等待的请求。spec §8.2.2/§8.5/§10 已按 draft 更新。
+
+### 2026-09-28 — 移除后，诚实写者须等换代
+
+- **发现（P1，保密）：** `removeMember`/`revokeDevice` 只置 `rotationRequired`，没有任何代码读取它。诚实写者继续用被移除者仍持有的 `K_n` 密封。已用真实加密与 sqlite Riverrun 复现：Alice 移除 Bob，在 `publishEpoch` 前写入秘密；Bob 像串通服务器那样直接读 Riverrun，用留下的 `K_0` 解开。换代后则解不开。
+- **决定：** 核心新增 `maySealNewContent`（有文档写权限且无待换代）。诚实密封路径改用它，Lab `prepareWrite` 以 `rotation-required` 失败。宿主准入仍用 `deviceMayWriteDocument`，移除前离线密封的密文仍可上传。未采用"在移除记录内原子换代"：那是线格式变更，且换代者仍须分钥。
+- **不变的限制：** 恶意或被改的客户端可以无视此规则；服务器对写者隐藏移除记录仍能绕过（新鲜度限制）；读端仍接受旧代内容。
+- **证据：** 核心 `streams-content.test.ts`（撤权与换代前后的密封判定）；Lab `host-lifecycle.test.ts`「refuses new content after removeMember until the epoch rotates」。两个撤权后写入的旧测试改为先换代。
+- **暴露的 Lab 盲区：** AttackLab 的保密判定只扫描 Riverrun 明文或接受精确明文声明，攻击者不持有任何成员密钥，因此"被移除者与服务器串通"无法衡量。两次真实模型运行（`deepseek-chat`，temperature 0）选了相同的丢弃加 XOR 攻击，未发现问题；协作剧本也从不移除成员。

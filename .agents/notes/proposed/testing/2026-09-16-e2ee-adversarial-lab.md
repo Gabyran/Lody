@@ -601,3 +601,11 @@ Current spec §8.3 and `policy.ts` allow an Owner/Admin personal device with `ca
   - Lab: `gateway-headers`, `epoch-key-history`, `content-authority`, `host-hardening`.
 
   The Lab boundary agent now drops whichever bob request is pending first, because reads refresh the ledger. Spec §8.2.2/§8.5/§10 are updated as draft.
+
+### 2026-09-28 — Honest writers wait for rotation after removal
+
+- **Finding (P1, confidentiality):** `removeMember`/`revokeDevice` only set `rotationRequired`, and nothing read it. Honest writers kept sealing with `K_n`, which the removed party still holds. Reproduced with real crypto and sqlite Riverrun: Alice removed Bob and wrote a secret before `publishEpoch`. Bob, reading Riverrun directly as a colluding server would, opened it with his retained `K_0`. After rotation he could not.
+- **Decision:** core adds `maySealNewContent` (document-write rights and no pending rotation). Honest seal paths use it, and Lab `prepareWrite` fails with `rotation-required`. Host admission keeps `deviceMayWriteDocument`, so ciphertext sealed offline before the removal can still be uploaded. Atomic rotation inside the removal record was not chosen: it is a wire change, and the rotator must still deliver keys.
+- **Unchanged limits:** a malicious or modified client can ignore the rule. A server that hides the removal from a writer still defeats it (freshness limit). Readers still accept old-epoch content.
+- **Evidence:** core `streams-content.test.ts` (seal gate before/after revoke and rotation); Lab `host-lifecycle.test.ts` "refuses new content after removeMember until the epoch rotates". Two existing tests that wrote after revoke now rotate first.
+- **Lab gap exposed:** AttackLab confidentiality only scans Riverrun for plaintext or accepts an exact plaintext claim, and the attacker holds no member key. A removed member colluding with the server is therefore unmeasurable. Two real-model runs (`deepseek-chat`, temperature 0) chose the same drop-plus-XOR attack and found nothing; the collab script never removes a member.

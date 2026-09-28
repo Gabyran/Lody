@@ -29,6 +29,7 @@ import {
   type Operation,
 } from '@lody/e2ee-core/ledger';
 import { SqliteLedgerStore } from '@lody/e2ee-core/ledger-node';
+import { maySealNewContent } from '@lody/e2ee-core/streams-content';
 import { StreamsLedgerStream } from '@lody/e2ee-core/streams';
 import { liveEntropy, type Entropy } from '@lody/e2ee-core';
 import { refMayWriteDocument, refStateFromOrg } from '../reference-model';
@@ -344,6 +345,8 @@ export class DemoSession {
 
   async prepareWrite(): Promise<void> {
     const ledger = await this.readLedger();
+    // A removed member or revoked device still holds this key; wait for publishEpoch.
+    if (ledger.state.epoch.rotationRequired) throw new Error('rotation-required');
     const { number, keyCommitment } = ledger.state.epoch;
     const key = this.epochKeys.get(number);
     if (!key) return;
@@ -369,15 +372,7 @@ export class DemoSession {
     const ledger = await (await this.openLedger()).read();
     this.verifiedLedger = ledger;
     this.ledgerEpoch = ledger.state.epoch.number;
-    this.canWriteDocument = [...ledger.state.devices.entries()].some(([id, device]) => {
-      if (id !== deviceHex(this.device)) return false;
-      const member = ledger.state.members.get(toHex(device.membershipId));
-      return (
-        (device.kind === 'personal' || device.kind === 'machine') &&
-        member !== undefined &&
-        member.role !== 'guest'
-      );
-    });
+    this.canWriteDocument = maySealNewContent(ledger.state, deviceHex(this.device));
     if (this.genesisHex) {
       this.authenticatedWriterMayWrite = refMayWriteDocument(
         refStateFromOrg(this.genesisHex, ledger.state),

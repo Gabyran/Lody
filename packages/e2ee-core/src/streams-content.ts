@@ -7,7 +7,7 @@ import {
   type ContentPurpose,
 } from './content';
 import { invariant } from './wire';
-export { contentAuthorKey, deviceMayWriteDocument } from './pure/content-policy';
+export { contentAuthorKey, deviceMayWriteDocument, maySealNewContent } from './pure/content-policy';
 
 export interface StreamsContentOptions {
   readonly cipher: ContentCipher;
