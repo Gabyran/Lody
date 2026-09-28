@@ -322,11 +322,6 @@ export interface HistoryWriter {
     updater: (history: SessionHistoryInput[]) => SessionHistoryInput[]
   ): () => void;
   append(entry: SessionHistory): void;
-  /**
-   * Replay operations persisted by older clients' send journals; importing twice
-   * is idempotent. Imported ops are not local edits: the caller must sync them.
-   */
-  applyPrepared(update: Uint8Array): void;
   replace(turnId: string, entry: SessionHistory): boolean;
   /**
    * Stage a single-turn replacement without writing. Validates only changed
@@ -537,12 +532,6 @@ export function createHistoryWriter(doc: LoroDoc, readHistory?: () => readonly S
         planWrite(current as SessionHistory[], restored, (_old, value) => value)();
         consumed = true;
       };
-    },
-    applyPrepared(update) {
-      const imported = doc.import(update);
-      if (imported.pending && imported.pending.size > 0) {
-        throw new Error('Prepared history update is missing its original replica dependencies');
-      }
     },
     append(entry) {
       const value = cleanNew(HistoryEntryWriteSchema, entry);

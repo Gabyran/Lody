@@ -47,10 +47,6 @@ export function createWorkspaceSessionSendJournal(args: {
 }) {
   const { runtime, accountId } = args;
   const storage = createSessionSendJournalStorage({ accountId, workspaceId: runtime.workspaceId });
-  // Such a record has no operations tied to the original replica. If that
-  // replica persisted nothing, it holds nothing to recover: resuming catches up
-  // with the target, then appends only an absent id.
-  const writesFromEntry = (record: SessionSendRecord) => record.version === 3;
   const requireAvailable = async (record: SessionSendRecord) => {
     if (record.accountId !== accountId || record.workspaceId !== runtime.workspaceId)
       throw new Error('Submission belongs to another account or workspace');
@@ -61,8 +57,6 @@ export function createWorkspaceSessionSendJournal(args: {
       try {
         const baseline = await original.loadMeta();
         if (baseline) runtime.repo.getMeta().importJson(baseline.exportJson());
-        else if (!writesFromEntry(record))
-          throw new Error('Original submission metadata is unavailable; recovery retained');
       } finally {
         await original.close();
       }
@@ -205,11 +199,9 @@ export function createWorkspaceSessionSendJournal(args: {
         if (Object.keys(patch).length)
           await runtime.writer.upsertDocMeta(getSessionRoomId(record.sessionId), patch);
       }
-      const legacyUpdate =
-        !writesFromEntry(record) && record.update?.length ? record.update : undefined;
       // An interrupted attempt can publish the turn before its local receipt
       // persists. Catch up first so the absence check below sees that write.
-      if (resumed && !legacyUpdate) await args.waitForTargetSync(record.sessionId, signal);
+      if (resumed) await args.waitForTargetSync(record.sessionId, signal);
       await runtime.sendResources.withSessionStore(
         record.sessionId,
         async (store) => {
@@ -224,17 +216,13 @@ export function createWorkspaceSessionSendJournal(args: {
                 } finally {
                   source.free();
                 }
-              } else if (!writesFromEntry(record)) {
-                throw new Error('Original submission replica is unavailable; recovery retained');
               }
             } finally {
               await original.close();
             }
           }
           throwIfSendAborted(signal);
-          if (legacyUpdate) {
-            await store.sessionData.commands.applyPreparedTurn(legacyUpdate);
-          } else if (!resumed || !(await isWritten(record, store))) {
+          if (!resumed || !(await isWritten(record, store))) {
             // Local commits are what the transports upload; never write via import.
             if (record.queue) {
               const item = record.queue as MessageQueueItem;

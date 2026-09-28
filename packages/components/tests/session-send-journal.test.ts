@@ -266,40 +266,6 @@ describe('IndexedDB recovery receipts', () => {
   });
 });
 
-it('exports legacy prepared operations to the actual Streams adapter without reauthoring', async () => {
-  const { createLoroDocAdapter } = await import('@loro-dev/streams-crdt/loro');
-  const local = new LoroDoc();
-  const remote = new LoroDoc();
-  const legacy = new LoroDoc();
-  createHistoryWriter(legacy).append(record('prepared').entry);
-  const prepared = legacy.export({ mode: 'update' });
-  legacy.free();
-  const writer = createHistoryWriter(local);
-  const adapter = createLoroDocAdapter(local);
-  const target = createLoroDocAdapter(remote);
-  const stop = adapter.subscribeLocalUpdates((batch) => {
-    void target.applyRemoteUpdates(batch.updates, target.emptyVersion());
-  });
-  try {
-    writer.applyPrepared(prepared);
-    expect(createHistoryWriter(remote).readStored()).toEqual([]);
-    const missing = adapter.exportUpdates(target.emptyVersion());
-    expect(missing).toBeTruthy();
-    if (!missing) throw new Error('Prepared operations missing from explicit synchronization');
-    await target.applyRemoteUpdates(missing.updates, target.emptyVersion());
-    await target.applyRemoteUpdates(missing.updates, target.emptyVersion());
-    expect(
-      createHistoryWriter(remote)
-        .readStored()
-        .map((turn) => turn.id)
-    ).toEqual(['prepared']);
-  } finally {
-    stop();
-    local.free();
-    remote.free();
-  }
-});
-
 it('holds the session delivery lock until raw delivery settles', async () => {
   const firstStarted = Promise.withResolvers<void>();
   const releaseFirst = Promise.withResolvers<void>();
@@ -526,6 +492,15 @@ describe('workspace commit writes local operations', () => {
         inputBlocks: [{ type: 'text', text: id }],
       },
     });
+    const insertPrepared = (id: string, extra: Partial<SessionSendRecord> = {}) =>
+      storage.insert({
+        ...record(id),
+        entry: entry(id),
+        version: 3,
+        stage: 'prepared',
+        update: new Uint8Array(),
+        ...extra,
+      });
     return {
       doc,
       session,
@@ -534,6 +509,7 @@ describe('workspace commit writes local operations', () => {
       events,
       syncedMachineIds,
       entry,
+      insertPrepared,
       async dispose() {
         stop();
         await resources.dispose();
@@ -575,13 +551,7 @@ describe('workspace commit writes local operations', () => {
     const f = await workspaceFixture();
     try {
       f.session.historyWriter.append(f.entry('resumed'));
-      const saved = await f.storage.insert({
-        ...record('resumed'),
-        entry: f.entry('resumed'),
-        version: 3,
-        stage: 'prepared',
-        update: new Uint8Array(),
-      });
+      const saved = await f.insertPrepared('resumed');
       f.events.length = 0;
       await f.journal.retry(saved.sessionId);
       expect((await f.journal.read('resumed'))?.stage).toBe('delivered');
@@ -592,45 +562,17 @@ describe('workspace commit writes local operations', () => {
     }
   });
 
-  it('writes creation ownership before a resumed first message waits for its target', async () => {
-    const f = await workspaceFixture({});
-    try {
-      const creation = {
-        id: 'session',
-        machineId: 'machine',
-        userId: 'account',
-      } as import('@lody/shared').SessionMeta;
-      await f.storage.insert({
-        ...record('first'),
-        entry: f.entry('first'),
-        creation,
-        version: 3,
-        stage: 'prepared',
-        update: new Uint8Array(),
-      });
-      await f.journal.retry('session' as SessionId);
-      expect((await f.journal.read('first'))?.stage).toBe('delivered');
-      expect(f.syncedMachineIds[0]).toBe('machine');
-      expect(f.session.historyWriter.readStored().map((turn) => turn.id)).toEqual(['first']);
-    } finally {
-      await f.dispose();
-    }
-  });
-
   it('resumes a first message whose crashed window never persisted the session', async () => {
     const f = await workspaceFixture({});
     try {
-      await f.storage.insert({
-        ...record('first'),
-        entry: f.entry('first'),
+      await f.insertPrepared('first', {
         sourceReplica: 'crashed-window',
         creation: { id: 'session', machineId: 'machine', userId: 'account' } as never,
-        version: 3,
-        stage: 'prepared',
-        update: new Uint8Array(),
       });
       await f.journal.retry('session' as SessionId);
       expect((await f.journal.read('first'))?.stage).toBe('delivered');
+      // Target routing needs creation ownership before catch-up.
+      expect(f.syncedMachineIds[0]).toBe('machine');
       expect(f.session.historyWriter.readStored().map((turn) => turn.id)).toEqual(['first']);
     } finally {
       await f.dispose();
@@ -653,14 +595,7 @@ describe('workspace commit writes local operations', () => {
       });
       await original.close();
       crashed.free();
-      await f.storage.insert({
-        ...record('first'),
-        entry: f.entry('first'),
-        sourceReplica: 'crashed-window',
-        version: 3,
-        stage: 'prepared',
-        update: new Uint8Array(),
-      });
+      await f.insertPrepared('first', { sourceReplica: 'crashed-window' });
       await f.journal.retry('session' as SessionId);
       expect((await f.journal.read('first'))?.stage).toBe('delivered');
       expect(f.session.historyWriter.readStored().map((turn) => turn.id)).toEqual(['first']);
@@ -669,43 +604,18 @@ describe('workspace commit writes local operations', () => {
     }
   });
 
-  it('retains legacy prepared bytes whose original replica is missing', async () => {
+  it('resumes an older client record from its entry instead of its prepared bytes', async () => {
     const f = await workspaceFixture();
     try {
-      await f.storage.insert({
-        ...record('legacy'),
-        entry: f.entry('legacy'),
+      await f.insertPrepared('legacy', {
         sourceReplica: 'crashed-window',
         version: 2,
-        stage: 'prepared',
         update: new Uint8Array([1, 2, 3]),
-      });
-      await expect(f.journal.retry('session' as SessionId)).rejects.toThrow(
-        /Original submission (metadata|replica) is unavailable/
-      );
-      expect((await f.journal.read('legacy'))?.stage).toBe('prepared');
-    } finally {
-      await f.dispose();
-    }
-  });
-
-  it('imports operations prepared by an older client exactly once', async () => {
-    const f = await workspaceFixture();
-    try {
-      const legacy = new LoroDoc();
-      createHistoryWriter(legacy).append(f.entry('legacy'));
-      const update = legacy.export({ mode: 'update' });
-      legacy.free();
-      await f.storage.insert({
-        ...record('legacy'),
-        entry: f.entry('legacy'),
-        version: 2,
-        stage: 'prepared',
-        update,
       });
       await f.journal.retry('session' as SessionId);
       expect((await f.journal.read('legacy'))?.stage).toBe('delivered');
       expect(f.session.historyWriter.readStored().map((turn) => turn.id)).toEqual(['legacy']);
+      expect(f.events).not.toContain('doc:import');
     } finally {
       await f.dispose();
     }

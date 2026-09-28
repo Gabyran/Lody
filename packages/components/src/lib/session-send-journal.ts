@@ -25,8 +25,8 @@ export type SessionSendRecord = {
   delivery: { kind: 'queue' | 'dispatch' } | { kind: 'guide'; expectedTurnId: string };
   stage: 'saved' | 'prepared' | 'committed' | 'delivered';
   /**
-   * Operations prepared by older clients; replay imports them instead of appending.
-   * Current clients store empty bytes: older readers reject non-saved records without them.
+   * Never read: resume appends `entry` when its id is absent. Current clients
+   * store empty bytes because older readers reject non-saved records without them.
    */
   update?: Uint8Array;
   error?: string;

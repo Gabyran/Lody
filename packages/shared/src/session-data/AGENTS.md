@@ -58,5 +58,4 @@
 
 - Submissions append on the live doc as local commits; transports upload only
   local events. Never author on a fork and import the export: it misses upload,
-  copies the whole doc and adds a permanent peer. `applyPrepared` only replays
-  bytes saved by older clients; missing dependencies are not acceptance.
+  copies the whole doc and adds a permanent peer.
