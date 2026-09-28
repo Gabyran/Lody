@@ -38,3 +38,5 @@ The workspace pending-send panel ("Pending messages (1)") floated in the bottom-
 - Mobile session lists do not show send status; their in-conversation rows still do.
 - The panel's discard entry for `committed` records waiting on delivery is gone; those records remain protected by exit guards and retry through the conversation.
 - The byte count is not visible on pointer hover.
+
+Related: [Queue-bound uploads render as local rows in the queue sheet](2026-09-28-local-queue-pending-rows.md), which also records the ring's upload shimmer.

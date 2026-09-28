@@ -79,7 +79,11 @@ import {
 } from './session-chat-input-area';
 import { useSessionMcpSelection } from '@/hooks/use-session-mcp-selection';
 import { useSessionMentionSource } from '@/hooks/use-session-mention-source';
-import { MessageQueueDisplay, shouldRequestNativeQueueSteer } from './message-queue';
+import {
+  MessageQueueDisplay,
+  shouldRequestNativeQueueSteer,
+  useHasPendingQueueRecords,
+} from './message-queue';
 import { useTranslation } from 'react-i18next';
 import { toast } from '@/lib/toast';
 import type {
@@ -2964,6 +2968,7 @@ export const SessionChatInterface = memo(
       () => (sessionDoc?.mq ?? []) as MessageQueueItem[],
       [sessionDoc?.mq]
     );
+    const hasPendingQueueRecords = useHasPendingQueueRecords(session.id, messageQueue);
     const billableSessionTurnCount = useMemo(
       () =>
         (conversationView ? countUserTurns(conversationView) : 0) +
@@ -6431,7 +6436,7 @@ export const SessionChatInterface = memo(
                     // bar is empty). Hidden with the composer: a pending
                     // permission bypasses the queue, as does share selection.
                     queue={
-                      messageQueue.length > 0 &&
+                      (messageQueue.length > 0 || hasPendingQueueRecords) &&
                       !shouldReplaceComposerWithPermission &&
                       !shareSelection.active ? (
                         <MessageQueueDisplay

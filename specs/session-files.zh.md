@@ -135,6 +135,8 @@ flowchart LR
 
 管理器的待发送记录与 Daemon 的消息队列是两层：附件就绪前，不能写入可执行的 history 或 queue 来占位。上传不能占住 direct dispatch 锁。
 
+附件准备期间走 queue 的消息，以本地行显示在队列面板末尾，而不是会话流里，避免它先出现在一处、再跳到另一处。这一行只用于展示：不写入同步文档，不能排序、编辑或 steer，只提供取消、放弃和继续发送。同一 turn ID 的队列项可见时，在同一次渲染中接替这一行。发给空闲会话的 direct 发送和 guide 发送仍使用会话里的待发送行。
+
 冻结的是用户意图和配置，真正提交时仍检查 Agent 当前是否忙。普通发送安全地进入现有 direct/queue 路径，不因上传期间 Agent 开始工作而中断其新任务。明确的 queue 意图仍进入队列。
 
 guide 冻结所指向的 assistant turn。准备完成前该 turn 已结束且从未尝试 steer 时，改为普通后续排队并在 UI 说明，不改为引导另一个 turn。已尝试 steer 后，权威 `no-active-turn` 若按现有协议明确证明未提交，可沿用同 ID 转后续发送；其他失败/未知回执须核对，不能证明未应用。已应用的 steer 按[现有历史契约](session-history-writes.zh.md)处理，不能再次作为普通消息执行。

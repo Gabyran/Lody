@@ -135,6 +135,8 @@ Within one client storage domain, each session enters the send system in takeove
 
 The local pending list is separate from the Daemon message queue. Before attachments are ready, neither executable history nor queue rows may serve as placeholders. Uploads do not hold the direct-dispatch lock.
 
+A message routed to the queue while its attachments prepare is displayed as a local row at the end of the queue sheet, not in the conversation stream, so it does not appear in one place and then jump to another. The row is display-only: it is not written to the synchronized document, cannot be reordered, edited or used to steer, and offers only cancel, discard and continue sending. When the queue item with the same turn ID becomes visible, it takes the row's place in the same render. Direct sends to an idle conversation and guide sends keep the conversation's pending rows.
+
 Freeze user intent and configuration, while checking Agent activity again at actual submission. Ordinary sends safely enter existing direct/queue handling; an Agent becoming busy during upload must not cause interruption of its new task. Explicit queue intent remains queued.
 
 Guide fixes its target assistant turn. If that turn ends before preparation finishes and no steer was attempted, visibly convert to a normal follow-up queue entry, never guide a different turn. After a steer attempt, authoritative no-active-turn may reuse the same ID for follow-up where the existing protocol proves non-submission; other failed/unknown acknowledgments require reconciliation and do not establish non-application. Applied steer follows the [existing history contract](session-history-writes.md) and must not execute again as an ordinary message.

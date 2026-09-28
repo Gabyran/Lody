@@ -135,16 +135,29 @@ function MaskedPrCiIcon({
 
 const SEND_RING_RADIUS = 4.25;
 const SEND_RING_CIRCUMFERENCE = 2 * Math.PI * SEND_RING_RADIUS;
+const SEND_RING_SHIMMER_LENGTH = 5;
 
 /**
- * A local message still uploading: a thin ring that fills with the bytes sent.
- * Without a measurable size the same ring turns with a quarter arc. The turn
- * rides an HTML wrapper, like `@lody/ui`'s Spinner: a rotating svg does not
- * composite at DPR≠1.
+ * A local message still uploading: a thin ring that fills with the bytes sent,
+ * with a faint highlight sweeping along the filled arc so a ring waiting on the
+ * next progress report never reads as a frozen spinner. Without a measurable
+ * size the same ring turns with a quarter arc. The turn rides an HTML wrapper,
+ * like `@lody/ui`'s Spinner: a rotating svg does not composite at DPR≠1.
  */
 export function SessionSendProgressRing({ progress }: { progress?: number }) {
   const known = typeof progress === 'number';
   const filled = known ? Math.min(100, Math.max(4, progress)) : 25;
+  const maskId = `session-send-ring-${useId().replace(/:/g, '')}`;
+  const arc = {
+    cx: '6',
+    cy: '6',
+    r: SEND_RING_RADIUS,
+    strokeWidth: 1.5,
+    strokeLinecap: 'round' as const,
+    strokeDasharray: SEND_RING_CIRCUMFERENCE,
+    strokeDashoffset: SEND_RING_CIRCUMFERENCE * (1 - filled / 100),
+    transform: 'rotate(-90 6 6)',
+  };
   return (
     <span
       className={cn(
@@ -163,17 +176,39 @@ export function SessionSendProgressRing({ progress }: { progress?: number }) {
           strokeWidth={1.5}
         />
         <circle
-          cx="6"
-          cy="6"
-          r={SEND_RING_RADIUS}
+          {...arc}
           stroke="currentColor"
-          strokeWidth={1.5}
-          strokeLinecap="round"
-          strokeDasharray={SEND_RING_CIRCUMFERENCE}
-          strokeDashoffset={SEND_RING_CIRCUMFERENCE * (1 - filled / 100)}
-          transform="rotate(-90 6 6)"
           className="transition-[stroke-dashoffset] duration-300 ease-out motion-reduce:transition-none"
         />
+        {known ? (
+          <>
+            <mask id={maskId} maskUnits="userSpaceOnUse" x="0" y="0" width="12" height="12">
+              <circle {...arc} stroke="white" />
+            </mask>
+            <circle
+              cx="6"
+              cy="6"
+              r={SEND_RING_RADIUS}
+              stroke="white"
+              strokeOpacity={0.65}
+              strokeWidth={2}
+              strokeLinecap="round"
+              strokeDasharray={`${SEND_RING_SHIMMER_LENGTH} ${SEND_RING_CIRCUMFERENCE}`}
+              transform="rotate(-90 6 6)"
+              mask={`url(#${maskId})`}
+              className="motion-reduce:hidden"
+              data-session-send-shimmer=""
+            >
+              <animate
+                attributeName="stroke-dashoffset"
+                from={SEND_RING_SHIMMER_LENGTH}
+                to={-SEND_RING_CIRCUMFERENCE}
+                dur="1.8s"
+                repeatCount="indefinite"
+              />
+            </circle>
+          </>
+        ) : null}
       </svg>
     </span>
   );
