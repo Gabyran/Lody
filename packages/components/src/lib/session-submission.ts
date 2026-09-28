@@ -13,6 +13,7 @@ import {
   getSessionRoomId,
   getServerNow,
   isLoroRepoDocDeleted,
+  isSessionHistoryStatusAwaitingStart,
   normalizeSessionTurnInputConfig,
   SessionStatusFactory,
 } from '@lody/shared';
@@ -495,7 +496,7 @@ export function createSessionSubmission(ports: SessionSubmissionPorts) {
           return (
             read.state === 'ready' &&
             read.turn.role === 'user' &&
-            (read.turn.status === 'pending' || read.turn.status === 'seen')
+            isSessionHistoryStatusAwaitingStart(read.turn.status)
           );
         }
       );

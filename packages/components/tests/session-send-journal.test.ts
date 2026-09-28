@@ -460,6 +460,7 @@ describe('workspace commit writes local operations', () => {
       releaseRef: () => {},
     });
     const events: string[] = [];
+    const dispatched: string[] = [];
     const stop = doc.subscribe((event) => events.push(`doc:${event.by}`));
     const journal = createWorkspaceSessionSendJournal({
       accountId: 'account',
@@ -471,7 +472,10 @@ describe('workspace commit writes local operations', () => {
         sendResources: resources,
         repo: { getDocMeta: async () => ({ meta }), flush: async () => {} },
         writer: { upsertDocMeta: async (_room: string, patch: object) => Object.assign(meta, patch) },
-        requestSessionDispatchTurn: async () => ({ accepted: true }),
+        requestSessionDispatchTurn: async (_machineId: string, request: { userTurnId: string }) => {
+          dispatched.push(request.userTurnId);
+          return { accepted: true };
+        },
       } as never,
       waitForTargetSync: async () => {
         events.push('sync');
@@ -504,9 +508,11 @@ describe('workspace commit writes local operations', () => {
     return {
       doc,
       session,
+      meta,
       journal,
       storage,
       events,
+      dispatched,
       syncedMachineIds,
       entry,
       insertPrepared,
@@ -521,6 +527,36 @@ describe('workspace commit writes local operations', () => {
       },
     };
   }
+
+  it('activates and dispatches a turn the CLI auto-read marks seen before delivery', async () => {
+    const { attachAutoMarkLatestUserHistoryAsRead } =
+      await import('../../../apps/cli/src/lib/loro/history-auto-read');
+    const { createSessionAgentWrites } =
+      await import('../../../apps/cli/src/lib/loro/session-agent-writes');
+    const f = await workspaceFixture({
+      id: 'session',
+      machineId: 'machine',
+      userId: 'account',
+      latestUserMsgId: 'earlier',
+      lastHandledUserMsgId: 'earlier',
+    });
+    // A local commit reaches a CLI that already holds the doc, which acknowledges it at once.
+    const agent = createSessionAgentWrites(f.session.historyWriter);
+    const autoRead = attachAutoMarkLatestUserHistoryAsRead(f.session.sessionData, (id) =>
+      agent.markTurnSeen(id)
+    );
+    try {
+      await f.journal.accept({ ...record('next'), entry: f.entry('next') });
+      await f.journal.retry('session' as SessionId);
+      expect(f.session.historyWriter.read('next')?.status).toBe('seen');
+      expect((await f.journal.read('next'))?.stage).toBe('delivered');
+      expect(f.meta.latestUserMsgId).toBe('next');
+      expect(f.dispatched).toEqual(['next']);
+    } finally {
+      autoRead.dispose();
+      await f.dispose();
+    }
+  });
 
   it('enqueues a queued message with a local commit on the live replica', async () => {
     const f = await workspaceFixture();

@@ -617,6 +617,14 @@ export const isSessionHistoryDelivered = (
   return entry?.read === true;
 };
 
+/**
+ * User input no execution has claimed. `seen` is only the CLI's read receipt:
+ * the turn still needs its dispatch pointer and has not started.
+ */
+export const isSessionHistoryStatusAwaitingStart = (
+  status: SessionHistoryStatus | undefined
+): boolean => status === 'pending' || status === 'seen';
+
 export const isSessionHistoryPendingForDispatch = (
   entry: SessionHistoryStatusReadable | null | undefined
 ): boolean => {

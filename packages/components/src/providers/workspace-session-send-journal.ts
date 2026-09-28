@@ -10,6 +10,7 @@ import { prepareDraftAttachments } from '../lib/session-attachment-preparation';
 import {
   getSessionRoomId,
   isLoroRepoDocDeleted,
+  isSessionHistoryStatusAwaitingStart,
   normalizeSessionTurnInputConfig,
   type MachineId,
   type MessageQueueItem,
@@ -334,8 +335,10 @@ export function createWorkspaceSessionSendJournal(args: {
             const position = rows.findIndex((row) => row.turnId === record.id);
             if (position < 0 || rows[position]?.state !== 'ready')
               throw new Error('Saved turn is not available for dispatch');
+            // Auto-read can mark a locally committed turn `seen` before this
+            // recheck; only an execution state means the CLI claimed it.
             const status = rows[position]?.scalars?.status;
-            if (status && status !== 'pending') return false;
+            if (status && !isSessionHistoryStatusAwaitingStart(status)) return false;
             // Even when the fast path waits behind another turn, the CLI must
             // discover this committed input after restart. Legacy/imported
             // rows can look unfinished here; only the CLI owns dispatch order.
