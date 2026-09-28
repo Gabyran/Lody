@@ -57,5 +57,14 @@ auto-read observer to the live doc, sends an idle-session turn, and asserts it i
 `seen`, the activation pointer names it, and exactly one dispatch RPC was sent.
 With the old check, the same test leaves `latestUserMsgId` at the earlier turn.
 
+Desktop journey `LODY-SESSION-005` (`e2e/src/features/session-follow-up.feature`,
+`@P0`) runs the real Electron renderer and bundled CLI over the local channel with
+a scripted ACP. After a first Turn completes, it sends two follow-ups, one at a
+time, each to the idle Session. It asserts the agent receives every prompt exactly
+once and in order, and that no unretired send remains. On a desktop build with the
+old check it failed 3 of 3 runs: the first follow-up never reached the agent. With
+the fix it passed 3 of 3 runs. The race depends on timing, so the unit test above
+is the deterministic guard; the journey proves the product path end to end.
+
 Limit: already-stuck sessions are not repaired by this change. Resending after
 upgrading dispatches normally.
