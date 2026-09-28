@@ -76,6 +76,7 @@ import {
   type SessionTurnAgentRoleSelection,
 } from './session-chat-input-area';
 import { useSessionMcpSelection } from '@/hooks/use-session-mcp-selection';
+import { useSessionMentionSource } from '@/hooks/use-session-mention-source';
 import { MessageQueueDisplay, shouldRequestNativeQueueSteer } from './message-queue';
 import { useTranslation } from 'react-i18next';
 import { toast } from '@/lib/toast';
@@ -170,6 +171,8 @@ import SessionChatStream, {
   type GoalCommand,
   type MessageFileDiffEntriesByTurn,
   type SessionChatStreamHandle,
+  type UserMessageEditMentionContext,
+  type UserMessageEditSubmission,
 } from '../ai-gui';
 import { MessageSendStatusContext } from '../ai-gui/message-send-status-context';
 import { format, formatDistanceToNow } from 'date-fns';
@@ -2417,6 +2420,37 @@ export const SessionChatInterface = memo(
       >
     >(new Map());
     const isArchivedSession = session.isArchived === true;
+    /* The edit-and-resend editor shares the composer's mention pipeline: same
+       `@`/`$`/`/` sources, same before-send expansion. The provider is always
+       enabled here (unlike the composer, which gates on the draft containing
+       `@`) because the editor opens with the previous text already loaded and
+       must resolve its tokens on first paint. */
+    const editMentionSource = useSessionMentionSource({
+      session,
+      sessionLocalProjectRootPath: resolvedLocalProjectMeta?.rootPath ?? null,
+      isRepoPublic,
+      enableCodeCollabProvider: true,
+      debugLabel: 'session-edit:mention-provider',
+    });
+    const editSkillAgent = useMemo(
+      () =>
+        !isArchivedSession && session.cliType && session.agentType
+          ? {
+              cliType: session.cliType,
+              agentType: session.agentType,
+              machineId: session.machineId,
+            }
+          : undefined,
+      [isArchivedSession, session.agentType, session.cliType, session.machineId]
+    );
+    const editMentionContext = useMemo<UserMessageEditMentionContext>(
+      () => ({
+        mentionSource: isArchivedSession ? undefined : editMentionSource,
+        availableCommands,
+        skillAgent: editSkillAgent,
+      }),
+      [availableCommands, editMentionSource, editSkillAgent, isArchivedSession]
+    );
     const [pendingGoalCommand, setPendingGoalCommand] = useState<{
       threadId: string;
       command: GoalCommand;
@@ -3066,8 +3100,15 @@ export const SessionChatInterface = memo(
       sessionMachine?.acpCapabilities,
     ]);
     const handleEditLastUser = useCallback(
-      async (message: SessionHistoryParsed, text: string): Promise<boolean> => {
-        const nextText = text.trim();
+      async (
+        message: SessionHistoryParsed,
+        submission: UserMessageEditSubmission
+      ): Promise<boolean> => {
+        // `submission.text` is already expanded (session/skill/agent-role tokens
+        // rewritten to their agent-facing forms) and trimmed; `submission.spans`
+        // records where each mention landed so the transcript paints the user's
+        // own wording back over it — identical to a fresh send.
+        const nextText = submission.text;
         const requesterUserId = currentUser?.id ?? session.userId;
         if (
           !runtime ||
@@ -3085,7 +3126,11 @@ export const SessionChatInterface = memo(
         for (const block of originalBlocks) {
           if (block.type === 'text') {
             if (!replacedText) {
-              inputBlocks.push({ type: 'text', text: nextText });
+              inputBlocks.push({
+                type: 'text',
+                text: nextText,
+                ...(submission.spans ? { spans: submission.spans } : {}),
+              });
               replacedText = true;
             }
             continue;
@@ -3093,7 +3138,11 @@ export const SessionChatInterface = memo(
           inputBlocks.push(block);
         }
         if (!replacedText) {
-          inputBlocks.push({ type: 'text', text: nextText });
+          inputBlocks.push({
+            type: 'text',
+            text: nextText,
+            ...(submission.spans ? { spans: submission.spans } : {}),
+          });
         }
 
         const originalConfig = normalizeSessionTurnInputConfig(message.inputConfig) ?? {};
@@ -6173,6 +6222,7 @@ export const SessionChatInterface = memo(
                               onEditLastUser={
                                 editableLastUserMessageId ? handleEditLastUser : undefined
                               }
+                              editMentionContext={editMentionContext}
                               onResendUndelivered={handleResendUndelivered}
                               capacityRetry={capacityRetry ?? undefined}
                               forkingAssistantMessageId={forkingAssistantMessageId}

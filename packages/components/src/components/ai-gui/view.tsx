@@ -55,6 +55,7 @@ import { getRpcDeliveredTurnKey, rpcDeliveredTurnsAtom } from '@/atoms/session-d
 import { selectAtom } from 'jotai/utils';
 import {
   type AgentConfigCliType,
+  type AcpCommandSummary,
   type ChatFailedCode,
   type ClientToServer,
   MODEL_THOUGHT_LEVEL_META_KEY,
@@ -178,6 +179,9 @@ import {
 import { SubagentTaskPanel, collectSubagentTasks, type SubagentTask } from './subagent-task-panel';
 import { SessionReadonlyContext } from './session-readonly-context';
 import { UserMessageEditor } from './user-message-editor';
+import type { MentionProjectSource } from '@/components/mentions/mention-project-file-source';
+import type { SkillMentionAgent } from '@/components/mentions/mention-skill-source';
+import type { Mention as MentionRange } from '@/ui/mention/index';
 import { resolvePermissionRecord } from './permission-record';
 import {
   hasSeparatePlanItem,
@@ -452,6 +456,30 @@ export type SessionChatUser =
     }
   | null
   | undefined;
+
+/**
+ * What the inline edit-and-resend editor reports on save: the raw text plus
+ * the committed mention ranges measured against it, so the caller can run the
+ * same before-send expansion a composer send does.
+ */
+export type UserMessageEditSubmission = {
+  text: string;
+  mentions: readonly MentionRange[];
+  /** Transcript spans after expansion + trim; carried into the replacement
+   *  turn's text block so the bubble can repaint the user's own wording. */
+  spans?: MessageTextSpan[];
+};
+
+/**
+ * The mention sources the session's composer resolves for the row's editor.
+ * Surfaces without a composer (share page, tour) leave this unset and the
+ * editor degrades to a plain textarea.
+ */
+export type UserMessageEditMentionContext = {
+  mentionSource?: MentionProjectSource;
+  availableCommands?: AcpCommandSummary[];
+  skillAgent?: SkillMentionAgent;
+};
 
 export interface AssistantMessageAction {
   id: string;
@@ -1800,7 +1828,13 @@ export const SessionChatStreamView = forwardRef<
       if (shouldShowAgentActivityRow && agentActivityLabel) meta.push(AGENT_ACTIVITY_ENGINE_ROW);
       if (trailingContent != null) meta.push(TRAILING_ENGINE_ROW);
       return meta;
-    }, [agentActivityLabel, leadingContent, shouldShowAgentActivityRow, trailingContent, virtualRows]);
+    }, [
+      agentActivityLabel,
+      leadingContent,
+      shouldShowAgentActivityRow,
+      trailingContent,
+      virtualRows,
+    ]);
 
     /**
      * A sent message waiting for its row. The send path learns the turn id
@@ -2459,16 +2493,18 @@ export const MessageRowView = memo(function MessageRowView({
   onResendUndelivered,
   capacityRetry,
   conversationFontSize = DEFAULT_CONVERSATION_FONT_SIZE,
+  editMentionContext,
 }: {
   message: SessionHistoryParsed;
   sessionId: SessionId;
   onNavigateSession?: (target: SessionNavigationTarget) => void;
-  onEdit?: (message: SessionHistoryParsed, text: string) => Promise<boolean>;
+  onEdit?: (message: SessionHistoryParsed, edit: UserMessageEditSubmission) => Promise<boolean>;
   onResendUndelivered?: (userTurnId: string, inputBlocks: SessionInputBlock[]) => Promise<boolean>;
   capacityRetry?: CapacityRetryControl;
   user?: SessionChatUser;
   showSenderIdentity?: boolean;
   conversationFontSize?: ConversationFontSize;
+  editMentionContext?: UserMessageEditMentionContext;
 }) {
   const { i18n } = useTranslation();
   const timestampLabel = formatConversationTimestamp(message.timestamp, {
@@ -2504,6 +2540,7 @@ export const MessageRowView = memo(function MessageRowView({
         conversationFontSize={conversationFontSize}
         onEdit={onEdit}
         onResendUndelivered={onResendUndelivered}
+        editMentionContext={editMentionContext}
       />
     );
   }
@@ -3444,6 +3481,7 @@ const UserMessageRowView = ({
   conversationFontSize,
   onEdit,
   onResendUndelivered,
+  editMentionContext,
 }: {
   message: SessionHistoryParsed;
   sessionId: SessionId;
@@ -3452,8 +3490,11 @@ const UserMessageRowView = ({
   timestampLabel: string;
   hasWideContent: boolean;
   conversationFontSize: ConversationFontSize;
-  onEdit?: (message: SessionHistoryParsed, text: string) => Promise<boolean>;
+  onEdit?: (message: SessionHistoryParsed, edit: UserMessageEditSubmission) => Promise<boolean>;
   onResendUndelivered?: (userTurnId: string, inputBlocks: SessionInputBlock[]) => Promise<boolean>;
+  /** Composer-equivalent mention wiring for the inline editor; absent on
+   *  surfaces that cannot resolve mentions (share page, tour). */
+  editMentionContext?: UserMessageEditMentionContext;
 }) => {
   const { t } = useTranslation();
   const { copyContext } = useContext(SessionChatActionContext);
@@ -3543,17 +3584,20 @@ const UserMessageRowView = ({
     }
   }, [isResending, message, onResendUndelivered, sessionId, t]);
 
-  const handleSaveEdit = useCallback(async () => {
-    if (!onEdit || isSavingEdit || !editText.trim()) return;
-    setIsSavingEdit(true);
-    try {
-      if (await onEdit(message, editText)) {
-        setIsEditing(false);
+  const handleSaveEdit = useCallback(
+    async (submission: UserMessageEditSubmission) => {
+      if (!onEdit || isSavingEdit || !submission.text.trim()) return;
+      setIsSavingEdit(true);
+      try {
+        if (await onEdit(message, submission)) {
+          setIsEditing(false);
+        }
+      } finally {
+        setIsSavingEdit(false);
       }
-    } finally {
-      setIsSavingEdit(false);
-    }
-  }, [editText, isSavingEdit, message, onEdit]);
+    },
+    [isSavingEdit, message, onEdit]
+  );
 
   return (
     <div className={cn('flex w-full flex-row-reverse', isMobile ? 'gap-2 pl-7' : 'gap-2.5')}>
@@ -3653,9 +3697,13 @@ const UserMessageRowView = ({
                       value={editText}
                       onChange={setEditText}
                       onCancel={() => setIsEditing(false)}
-                      onSave={() => void handleSaveEdit()}
+                      onSave={(submission) => void handleSaveEdit(submission)}
                       isSaving={isSavingEdit}
                       conversationFontSize={conversationFontSize}
+                      mentionSource={editMentionContext?.mentionSource}
+                      availableCommands={editMentionContext?.availableCommands}
+                      skillAgent={editMentionContext?.skillAgent}
+                      currentSessionId={sessionId}
                     />
                   </div>
                 ) : (
@@ -4268,8 +4316,7 @@ const ActivityGroupHeader = ({
     parts.push(t('sessions.toolActivity.tools', { count: summary.otherCount }));
   }
   const label =
-    parts.join(' · ') ||
-    (summary.hasThought ? t('sessions.toolActivity.thought', 'Thought') : '');
+    parts.join(' · ') || (summary.hasThought ? t('sessions.toolActivity.thought', 'Thought') : '');
   if (!label) return null;
   return (
     <ProcessDisclosureButton

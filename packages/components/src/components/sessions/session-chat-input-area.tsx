@@ -1,4 +1,4 @@
-import { localMachineIdAtom } from '@/atoms/local-probe';
+import { useSessionMentionSource } from '@/hooks/use-session-mention-source';
 import {
   snapshotAttachmentDrafts,
   type SessionAttachmentDraft,
@@ -49,7 +49,6 @@ import type { CombinedMentionTextareaHandle } from '@/components/mentions/combin
 import type { AttachmentAddMenuMcp } from '@/components/chat/attachment-add-menu';
 import { useComposerSubmission } from '@/components/chat/submission/use-composer-submission';
 import { MobileSessionRunConfig } from '@/components/mobile/mobile-session-run-config';
-import type { MentionProjectSource } from '@/components/mentions/mention-project-file-source';
 import {
   useMentionPromptExpansion,
   type ExpandedMentionPrompt,
@@ -95,14 +94,8 @@ import type {
   AcpConfigOptionSelector,
   AcpConfigOptionValue,
 } from '@/components/shared/acp-selector-options';
-import { runtimeAtom } from '@/atoms/runtime';
-import { currentWorkspaceIdAtom, mobileKeyboardActionAtom, userAtom } from '@/atoms';
+import { currentWorkspaceIdAtom, mobileKeyboardActionAtom } from '@/atoms';
 import { getAllAgentConfigAtom } from '@/atoms';
-import {
-  resolveSessionLocalFileSource,
-  resolveSessionRepoFullName,
-} from '@/lib/session-local-file-source';
-import { resolveEffectiveCodeCollabWorkspaceId } from '@/lib/code-collab-workspace-id';
 import { getDroppedFileLocalPath, toPathMentionInsertion } from '@/lib/dropped-local-path';
 import { isImeComposingKeyboardEvent } from '@/lib/ime';
 import { toast } from '@/lib/toast';
@@ -135,8 +128,6 @@ import {
   resolveMobileKeyboardEnterKeyHint,
   shouldSubmitOnEnterForMobileKeyboardAction,
 } from '@/lib/mobile-keyboard-action';
-import { useCodeCollabSessionFileProvider } from '@/hooks/use-code-collab-session-file-provider';
-import { useCodeCollabRequestedRole } from '@/hooks/use-code-collab-requested-role';
 import { selectPastedClipboardFiles, splitImageAndFileAttachments } from '@/lib/file-drop';
 import { isPlainLinkPasteShortcut, parseAppSessionUrl } from '@/lib/session-app-url';
 import { SessionUsagePopover } from './session-usage-popover';
@@ -544,14 +535,7 @@ export const SessionChatInputArea = memo(
       usesMobileKeyboardAction
     );
     const numberFormatter = useMemo(() => new Intl.NumberFormat(intlLocale), [intlLocale]);
-    const localMachineId = useAtomValue(localMachineIdAtom);
     const workspaceId = useAtomValue(currentWorkspaceIdAtom) as WorkspaceId | null;
-    const workspaceRuntime = useAtomValue(runtimeAtom);
-    const effectiveWorkspaceId = resolveEffectiveCodeCollabWorkspaceId({
-      currentWorkspaceId: workspaceId,
-      runtimeWorkspaceId: workspaceRuntime?.workspaceId,
-    });
-    const currentUser = useAtomValue(userAtom);
     const postHog = usePostHog();
     const isArchived = session.isArchived === true;
     const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -1738,118 +1722,14 @@ export const SessionChatInputArea = memo(
       durableAgentRoleReady === false ||
       Boolean(freeTurnLimitNotice && freeTurnLimitNotice.current >= freeTurnLimitNotice.limit);
     const attachmentAddEnabled = !isArchived;
-    const sessionLocalFileSource = useMemo(
-      () =>
-        resolveSessionLocalFileSource(session, {
-          isElectronRenderer: typeof window !== 'undefined' && window.__LODY_ELECTRON__ === true,
-          localMachineId,
-          workspaceId: effectiveWorkspaceId,
-          localProjectRootPath: sessionLocalProjectRootPath,
-        }),
-      [effectiveWorkspaceId, localMachineId, session, sessionLocalProjectRootPath]
-    );
-    const repoFullName = useMemo(() => resolveSessionRepoFullName(session), [session]);
-    const codeCollabRequestedRole = useCodeCollabRequestedRole();
-    // Code Collab files live in the worktree owned by the top-level (parent)
-    // session; child-session tabs share that same workspace. Look the space up
-    // under the parent id so @ mentions read the owner-session v2 file tree.
-    // Mirrors resolveSessionLocalFileSource and the session-detail file-tree
-    // provider, which both key on the parent.
-    const codeCollabSessionId = session.parentSessionId ?? session.id;
-    const shouldEnableCodeCollabMentionProvider =
-      Boolean(effectiveWorkspaceId) && userInput.includes('@');
-    const codeCollabMentionFiles = useCodeCollabSessionFileProvider({
-      workspaceId: effectiveWorkspaceId,
-      sessionId: codeCollabSessionId,
-      enabled: shouldEnableCodeCollabMentionProvider,
-      requestedRole: codeCollabRequestedRole,
-      machineId: session.machineId,
-      requestedByUserId: currentUser?.id ?? session.userId,
-      githubRepoFullName: repoFullName || null,
+    const mentionSource = useSessionMentionSource({
+      session,
+      sessionLocalProjectRootPath,
+      isRepoPublic,
+      // No index is borrowed until someone could actually type `@`.
+      enableCodeCollabProvider: userInput.includes('@'),
       debugLabel: 'session-chat-input:mention-provider',
     });
-    const codeCollabMentionFilesPending =
-      codeCollabMentionFiles.status === 'checking' || codeCollabMentionFiles.status === 'loading';
-    const mentionSource = useMemo<MentionProjectSource | undefined>(() => {
-      if (codeCollabMentionFiles.provider || codeCollabMentionFilesPending) {
-        return {
-          kind: 'provider',
-          provider: codeCollabMentionFiles.provider,
-          providerPending: codeCollabMentionFilesPending,
-          providerMessage: codeCollabMentionFiles.message,
-          localProject:
-            session.project?.kind === 'local'
-              ? {
-                  machineId: session.machineId,
-                  localProjectId: session.project.localProjectId,
-                }
-              : undefined,
-          githubRepoFullName: repoFullName || undefined,
-          isPublic: isRepoPublic,
-        };
-      }
-
-      const localProject =
-        session.project?.kind === 'local' && effectiveWorkspaceId
-          ? {
-              workspaceId: effectiveWorkspaceId,
-              localProjectId: session.project.localProjectId,
-            }
-          : null;
-
-      if (localProject && sessionLocalFileSource?.kind === 'session-worktree') {
-        return {
-          kind: 'local',
-          machineId: session.machineId,
-          workspaceId: localProject.workspaceId,
-          localProjectId: localProject.localProjectId,
-          githubRepoFullName: repoFullName || undefined,
-          localWorktree: {
-            machineId: session.machineId,
-            repoKey: sessionLocalFileSource.repoKey,
-            sessionId: sessionLocalFileSource.sessionId,
-          },
-        };
-      }
-
-      if (sessionLocalFileSource?.kind === 'local-project') {
-        return {
-          kind: 'local',
-          machineId: session.machineId,
-          workspaceId: sessionLocalFileSource.workspaceId,
-          localProjectId: sessionLocalFileSource.localProjectId,
-          githubRepoFullName: repoFullName || undefined,
-        };
-      }
-
-      if (repoFullName) {
-        return {
-          kind: 'github',
-          repoFullName,
-          isPublic: isRepoPublic,
-          localWorktree:
-            sessionLocalFileSource?.kind === 'session-worktree'
-              ? {
-                  machineId: session.machineId,
-                  repoKey: sessionLocalFileSource.repoKey,
-                  sessionId: sessionLocalFileSource.sessionId,
-                }
-              : undefined,
-        };
-      }
-
-      return undefined;
-    }, [
-      codeCollabMentionFiles.message,
-      codeCollabMentionFiles.provider,
-      codeCollabMentionFilesPending,
-      isRepoPublic,
-      repoFullName,
-      effectiveWorkspaceId,
-      session.machineId,
-      session.project,
-      sessionLocalFileSource,
-    ]);
     const skillAgent = useMemo(
       () =>
         !isArchived && session.cliType && session.agentType
