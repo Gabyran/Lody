@@ -237,6 +237,8 @@ export function createSessionSendJournal(ports: SessionSendJournalPorts) {
                 record = {
                   ...record,
                   version: record.version === 3 ? 2 : record.version,
+                  // The committing replica now persists the turn.
+                  sourceReplica: ports.preparationReplica ?? record.sourceReplica,
                   stage: 'committed',
                   error: undefined,
                 };

@@ -47,6 +47,10 @@ export function createWorkspaceSessionSendJournal(args: {
 }) {
   const { runtime, accountId } = args;
   const storage = createSessionSendJournalStorage({ accountId, workspaceId: runtime.workspaceId });
+  // Such a record has no operations tied to the original replica. If that
+  // replica persisted nothing, it holds nothing to recover: resuming catches up
+  // with the target, then appends only an absent id.
+  const writesFromEntry = (record: SessionSendRecord) => record.version === 3;
   const requireAvailable = async (record: SessionSendRecord) => {
     if (record.accountId !== accountId || record.workspaceId !== runtime.workspaceId)
       throw new Error('Submission belongs to another account or workspace');
@@ -56,9 +60,9 @@ export function createWorkspaceSessionSendJournal(args: {
       const original = new IndexedDBStorageAdaptor({ dbName: record.sourceReplica });
       try {
         const baseline = await original.loadMeta();
-        if (!baseline)
+        if (baseline) runtime.repo.getMeta().importJson(baseline.exportJson());
+        else if (!writesFromEntry(record))
           throw new Error('Original submission metadata is unavailable; recovery retained');
-        runtime.repo.getMeta().importJson(baseline.exportJson());
       } finally {
         await original.close();
       }
@@ -202,7 +206,7 @@ export function createWorkspaceSessionSendJournal(args: {
           await runtime.writer.upsertDocMeta(getSessionRoomId(record.sessionId), patch);
       }
       const legacyUpdate =
-        record.version !== 3 && record.update?.length ? record.update : undefined;
+        !writesFromEntry(record) && record.update?.length ? record.update : undefined;
       // An interrupted attempt can publish the turn before its local receipt
       // persists. Catch up first so the absence check below sees that write.
       if (resumed && !legacyUpdate) await args.waitForTargetSync(record.sessionId, signal);
@@ -214,12 +218,14 @@ export function createWorkspaceSessionSendJournal(args: {
             const original = new IndexedDBStorageAdaptor({ dbName: record.sourceReplica });
             try {
               const source = await original.loadDoc(getSessionRoomId(record.sessionId));
-              if (!source)
+              if (source) {
+                try {
+                  store.doc.import(source.export({ mode: 'snapshot' }));
+                } finally {
+                  source.free();
+                }
+              } else if (!writesFromEntry(record)) {
                 throw new Error('Original submission replica is unavailable; recovery retained');
-              try {
-                store.doc.import(source.export({ mode: 'snapshot' }));
-              } finally {
-                source.free();
               }
             } finally {
               await original.close();

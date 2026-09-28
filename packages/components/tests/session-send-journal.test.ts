@@ -617,6 +617,78 @@ describe('workspace commit writes local operations', () => {
     }
   });
 
+  it('resumes a first message whose crashed window never persisted the session', async () => {
+    const f = await workspaceFixture({});
+    try {
+      await f.storage.insert({
+        ...record('first'),
+        entry: f.entry('first'),
+        sourceReplica: 'crashed-window',
+        creation: { id: 'session', machineId: 'machine', userId: 'account' } as never,
+        version: 3,
+        stage: 'prepared',
+        update: new Uint8Array(),
+      });
+      await f.journal.retry('session' as SessionId);
+      expect((await f.journal.read('first'))?.stage).toBe('delivered');
+      expect(f.session.historyWriter.readStored().map((turn) => turn.id)).toEqual(['first']);
+    } finally {
+      await f.dispose();
+    }
+  });
+
+  it('recovers a turn persisted only by the crashed window without appending it again', async () => {
+    const f = await workspaceFixture();
+    try {
+      const { IndexedDBStorageAdaptor } = await import('loro-repo/storage/indexeddb');
+      const { getSessionRoomId } = await import('@lody/shared');
+      const crashed = new LoroDoc();
+      crashed.import(f.doc.export({ mode: 'snapshot' }));
+      createHistoryWriter(crashed).append(f.entry('first'));
+      const original = new IndexedDBStorageAdaptor({ dbName: 'crashed-window' });
+      await original.save({
+        type: 'doc-snapshot',
+        docId: getSessionRoomId('session' as SessionId),
+        snapshot: crashed.export({ mode: 'snapshot' }),
+      });
+      await original.close();
+      crashed.free();
+      await f.storage.insert({
+        ...record('first'),
+        entry: f.entry('first'),
+        sourceReplica: 'crashed-window',
+        version: 3,
+        stage: 'prepared',
+        update: new Uint8Array(),
+      });
+      await f.journal.retry('session' as SessionId);
+      expect((await f.journal.read('first'))?.stage).toBe('delivered');
+      expect(f.session.historyWriter.readStored().map((turn) => turn.id)).toEqual(['first']);
+    } finally {
+      await f.dispose();
+    }
+  });
+
+  it('retains legacy prepared bytes whose original replica is missing', async () => {
+    const f = await workspaceFixture();
+    try {
+      await f.storage.insert({
+        ...record('legacy'),
+        entry: f.entry('legacy'),
+        sourceReplica: 'crashed-window',
+        version: 2,
+        stage: 'prepared',
+        update: new Uint8Array([1, 2, 3]),
+      });
+      await expect(f.journal.retry('session' as SessionId)).rejects.toThrow(
+        /Original submission (metadata|replica) is unavailable/
+      );
+      expect((await f.journal.read('legacy'))?.stage).toBe('prepared');
+    } finally {
+      await f.dispose();
+    }
+  });
+
   it('imports operations prepared by an older client exactly once', async () => {
     const f = await workspaceFixture();
     try {
