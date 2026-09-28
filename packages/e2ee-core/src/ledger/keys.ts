@@ -2,6 +2,9 @@ import { createHpkeDriver } from '../platform/hpke';
 import * as history from '../pure/epoch-history';
 import { Either } from 'effect';
 import * as envelope from '../pure/epoch-envelope';
+import { parseEpochEnvelopeChunk } from '../pure/epoch-envelope-stream';
+import { decodeCbor } from '../pure/cbor';
+import { ValidationError as ValidationErrorClass } from '../pure/errors';
 import type { ValidationError } from '../pure/errors';
 import { liveEntropy, type Entropy } from '../capabilities';
 import {
@@ -18,6 +21,7 @@ import {
 } from './crypto';
 import { fail } from './error';
 import type { OrgState } from './policy';
+import type { Ledger } from './ledger';
 
 function unwrap<A>(result: Either.Either<A, ValidationError>): A {
   if (Either.isLeft(result)) fail(result.left.code, result.left.position);
@@ -46,6 +50,22 @@ export function openHistoryPacket(
   return unwrap(history.openHistoryPacket({ currentKey, packet, genesis, epoch }));
 }
 
+/** Historical keys from a verified ledger: packets, genesis and epoch come from `ledger`. */
+export async function recoverLedgerHistory(
+  ledger: Ledger,
+  latestKey: Uint8Array
+): Promise<Map<number, Uint8Array>> {
+  return unwrap(
+    history.recoverHistory({
+      genesis: ledger.state.genesis,
+      latestEpoch: ledger.state.epoch.number,
+      latestKey,
+      packets: ledger.historyPackets(),
+    })
+  );
+}
+
+/** Low-level: `packets` must come from a verified ledger; prefer `recoverLedgerHistory`. */
 export async function recoverHistory(input: {
   genesis: Hash;
   latestEpoch: number;
@@ -55,6 +75,7 @@ export async function recoverHistory(input: {
   return unwrap(history.recoverHistory(input));
 }
 
+/** Structural only, no signature or policy check; never pass unverified stream bytes. */
 export function collectEpochPackets(
   records: readonly Uint8Array[],
   genesisCommitment: Hash
@@ -70,6 +91,40 @@ export function collectEpochPackets(
  * receive keys.
  */
 export const canSendEpoch = envelope.canSendEpoch;
+
+/**
+ * Gateway admission for one raw key-stream append. The body must be exactly one
+ * envelope for this Org's current epoch, naming the authenticated `sender` and an
+ * admitted recipient, and signed by that sender. Readers fail closed on stray bytes
+ * and first-writer-wins per delivery slot, so a host must never append anything else.
+ * This does not decrypt or prove that the key matches the epoch commitment.
+ */
+export function assertEpochStreamAppend(
+  state: OrgState,
+  sender: SigningPublicKey,
+  body: Uint8Array
+): void {
+  const parsed = unwrap(parseEpochEnvelopeChunk(new Uint8Array(), body));
+  const frame = parsed.frames[0];
+  if (parsed.frames.length !== 1 || parsed.tail.length !== 0 || !frame) fail('canonical');
+  const recipient = unwrap(envelopeRecipient(frame.bytes));
+  unwrap(envelope.recipientEncryptionKey(state, sender, recipient));
+  const parts = unwrap(
+    envelope.decodeEnvelopeFrame(
+      { genesis: state.genesis, epoch: state.epoch.number, sender, recipient },
+      frame.bytes
+    )
+  );
+  assertSignature(sender, parts.signingBytes, parts.signature);
+}
+
+function envelopeRecipient(frame: Uint8Array) {
+  return Either.flatMap(decodeCbor(frame.subarray(0, frame.byteLength - 144)), (aad) =>
+    Array.isArray(aad) && aad.length === 4 && aad[3] instanceof Uint8Array
+      ? Either.right(aad[3])
+      : Either.left(new ValidationErrorClass({ code: 'canonical' }))
+  );
+}
 
 export function envelopeAad(input: {
   genesis: Hash;

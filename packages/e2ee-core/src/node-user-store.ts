@@ -1,4 +1,4 @@
-import { SqliteTextStore, type TextTransaction } from './node-text-store';
+import { isMissingStoreFile, SqliteTextStore, type TextTransaction } from './node-text-store';
 import { createUserIdentity, restoreUserIdentity, type UserIdentity } from './user-identity';
 import {
   openRecoveryBackup,
@@ -19,6 +19,8 @@ const FORMAT = 'lody-user-identity-store/v1';
  */
 export class SqliteUserIdentityStore {
   private readonly database: SqliteTextStore;
+  /** Opening never creates or initializes a missing/foreign file; create/recover may. */
+  private readonly existing: SqliteTextStore;
   constructor(
     path: string,
     private readonly binding: string,
@@ -26,6 +28,10 @@ export class SqliteUserIdentityStore {
   ) {
     checkHex(binding, 32);
     this.database = new SqliteTextStore(path, 0x4c554931, 1);
+    this.existing = new SqliteTextStore(path, 0x4c554931, 1, {
+      createFile: false,
+      initializeSchema: false,
+    });
   }
 
   private async saveNew(
@@ -92,14 +98,19 @@ export class SqliteUserIdentityStore {
   }
 
   async load(): Promise<UserIdentity> {
-    return this.database.exclusive(async (tx) => {
-      const { fingerprint, material } = await this.read(tx);
-      try {
-        return await restoreUserIdentity(material, fingerprint);
-      } finally {
-        material.fill(0);
-      }
-    });
+    return this.existing
+      .exclusive(async (tx) => {
+        const { fingerprint, material } = await this.read(tx);
+        try {
+          return await restoreUserIdentity(material, fingerprint);
+        } finally {
+          material.fill(0);
+        }
+      })
+      .catch((error) => {
+        if (isMissingStoreFile(error)) throw new ControlLogError('user-identity-missing');
+        throw error;
+      });
   }
 
   /** Encrypts locally; caller must upload/re-fetch/reselect before reporting backup ready. */
@@ -111,7 +122,7 @@ export class SqliteUserIdentityStore {
     const copiedFile = new Uint8Array(file);
     const expected = { ...context };
     try {
-      return await this.database.exclusive(async (tx) => {
+      return await this.existing.exclusive(async (tx) => {
         const { fingerprint, material } = await this.read(tx);
         try {
           invariant(fingerprint === expected.identity, 'user-identity-mismatch');

@@ -24,7 +24,8 @@ export function prepareDeviceAdmission(input: {
   readonly grant: DeviceGrant;
 }) {
   const { genesis, membershipId, encryptionPublicKey } = input;
-  const grant = { ...input.grant };
+  // Copy only the declared field: extra runtime keys must never retarget the proof.
+  const kind = input.grant.kind;
   return Effect.gen(function* () {
     const signer = yield* DeviceSigner;
     const verifier = yield* SignatureVerifier;
@@ -33,7 +34,7 @@ export function prepareDeviceAdmission(input: {
       targetMembershipId: membershipId.toBytes(),
       signingPublicKey: signer.publicKey.toBytes(),
       encryptionPublicKey: encryptionPublicKey.toBytes(),
-      ...grant,
+      kind,
     });
     const proof = yield* signer.sign(message);
     yield* verifier
@@ -41,7 +42,7 @@ export function prepareDeviceAdmission(input: {
       .pipe(Effect.mapError(proofError));
     return {
       _tag: 'AdmitDevice',
-      ...grant,
+      kind,
       signingPublicKey: signer.publicKey,
       encryptionPublicKey,
       possessionSignature: proof,

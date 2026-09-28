@@ -33,6 +33,15 @@ export function roleOf(s: LeanState, memberId: number): LeanRole | undefined {
 export function deviceOf(s: LeanState, id: number): LeanDevice | undefined {
   return s.devices.find((row) => row[0] === id)?.[1];
 }
+/** The member keeps a personal device or recovery device R (optionally excluding one). */
+export function canGovern(s: LeanState, memberId: number, excluding?: number): boolean {
+  return s.devices.some(
+    ([id, d]) =>
+      id !== excluding &&
+      d.memberId === memberId &&
+      (d.kind === 'personal' || d.kind === 'recovery')
+  );
+}
 export function isPersonalManage(s: LeanState, actor: number): boolean {
   const d = deviceOf(s, actor);
   if (!d || d.kind !== 'personal') return false;
@@ -104,6 +113,7 @@ export function leanStep(s: LeanState, op: LeanOp): LeanState | null {
       const a = deviceOf(s, op.actor);
       const t = deviceOf(s, op.target);
       if (!a || !t || a.kind !== 'personal' || a.memberId !== t.memberId) return null;
+      if (t.memberId === s.owner && !canGovern(s, s.owner, op.target)) return null;
       return {
         ...s,
         devices: s.devices.filter((row) => row[0] !== op.target),
@@ -118,6 +128,7 @@ export function leanStep(s: LeanState, op: LeanOp): LeanState | null {
       if (!isOwnerManage(s, op.actor)) return null;
       if (op.successor === s.owner) return null;
       if (roleOf(s, op.successor) === undefined) return null;
+      if (!canGovern(s, op.successor)) return null;
       return {
         ...s,
         owner: op.successor,

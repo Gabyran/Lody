@@ -142,14 +142,9 @@ export function commitSnapshotAdmission(
   }
 ): Either.Either<SnapshotAdmitResult, SnapshotAdmissionError> {
   return Either.gen(function* () {
-    const retry = yield* existingSnapshot(tx, input.offset, input.body);
-    if (retry) return retry;
-    const current = tx.current();
-    if (current) {
-      const order = compareSnapshotOffsets(input.offset, current.offset);
-      if (order === 'incomparable') return yield* fail('snapshot-offset-incomparable');
-      if (order < 0) return yield* fail('snapshot-offset-regression');
-    }
+    // Identical bytes are not a credential: only the signing device may retry, in the
+    // same context. A lost-ACK retry needs no fresh lease or write right because it
+    // changes nothing; hosts must not republish a non-current idempotent result.
     if (input.header.device !== input.submittingDevice)
       return yield* fail('snapshot-device-mismatch');
     if (
@@ -158,8 +153,16 @@ export function commitSnapshotAdmission(
     )
       return yield* fail('content-context-mismatch');
     if (!SNAPSHOT_PURPOSES.has(input.header.purpose)) return yield* fail('invalid-content-purpose');
+    const retry = yield* existingSnapshot(tx, input.offset, input.body);
+    if (retry) return retry;
     if (input.mayWrite !== true) return yield* fail('unauthorized');
     yield* checkSnapshotLease(input.time, input.leaseIssuedAt, input.leaseExpiresAt);
+    const current = tx.current();
+    if (current) {
+      const order = compareSnapshotOffsets(input.offset, current.offset);
+      if (order === 'incomparable') return yield* fail('snapshot-offset-incomparable');
+      if (order < 0) return yield* fail('snapshot-offset-regression');
+    }
     tx.save({ offset: input.offset, body: input.body });
     return {
       status: 'accepted' as const,

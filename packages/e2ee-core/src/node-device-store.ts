@@ -1,6 +1,6 @@
 import { createPrivateKey, createPublicKey } from 'node:crypto';
-import { SqliteTextStore } from './node-text-store';
-import { checkHex, checkSigningKey, fromHex, invariant, toHex } from './wire';
+import { isMissingStoreFile, SqliteTextStore } from './node-text-store';
+import { checkHex, checkSigningKey, ControlLogError, fromHex, invariant, toHex } from './wire';
 
 export interface LocalDeviceProtection {
   seal(accountBinding: string, plaintext: Uint8Array): Uint8Array;
@@ -87,6 +87,8 @@ async function restore(bytes: Uint8Array, binding: string): Promise<DeviceIdenti
  * Binding is a caller-selected stable account/domain digest, not proof of login or membership. */
 export class SqliteDeviceIdentityStore {
   private readonly database: SqliteTextStore;
+  /** Opening never creates or initializes a missing/foreign file; only create() does. */
+  private readonly existing: SqliteTextStore;
   constructor(
     path: string,
     private readonly binding: string,
@@ -94,6 +96,10 @@ export class SqliteDeviceIdentityStore {
   ) {
     checkHex(binding, 32);
     this.database = new SqliteTextStore(path, 0x4c444931, 1);
+    this.existing = new SqliteTextStore(path, 0x4c444931, 1, {
+      createFile: false,
+      initializeSchema: false,
+    });
   }
 
   async create(): Promise<DeviceIdentity> {
@@ -148,8 +154,16 @@ export class SqliteDeviceIdentityStore {
   }
 
   async load(): Promise<DeviceIdentity> {
-    return this.database.exclusive(async (tx) => {
-      const text = await tx.load();
+    return this.existing
+      .exclusive(async (tx) => this.decode(await tx.load()))
+      .catch((error) => {
+        if (isMissingStoreFile(error)) throw new ControlLogError('device-identity-missing');
+        throw error;
+      });
+  }
+
+  private async decode(text: string | null): Promise<DeviceIdentity> {
+    {
       invariant(text !== null, 'device-identity-missing');
       invariant(text.length <= 16600, 'invalid-device-store');
       const value: unknown = JSON.parse(text);
@@ -171,6 +185,6 @@ export class SqliteDeviceIdentityStore {
       } finally {
         plaintext.fill(0);
       }
-    });
+    }
   }
 }

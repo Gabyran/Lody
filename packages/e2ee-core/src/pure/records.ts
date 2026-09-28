@@ -6,7 +6,6 @@ import { classifyEpochCandidate, type EpochCandidate } from './epoch-candidate';
 import { publicState, type InternalState } from './ledger-state';
 
 const recordMaterial = Symbol('recordMaterial');
-const viewMaterial = Symbol('viewMaterial');
 const applicationMaterial = Symbol('applicationMaterial');
 
 class RecordValue<Stage extends 'Decoded' | 'SignatureChecked'> {
@@ -27,6 +26,9 @@ class RecordValue<Stage extends 'Decoded' | 'SignatureChecked'> {
   }
 }
 
+// Module-private: callers cannot reach a view's live state through a symbol.
+const viewStates = new WeakMap<object, InternalState>();
+
 class ViewValue {
   readonly #state: InternalState;
   readonly origin: 'FullReplay' | 'EndorsedSnapshot';
@@ -37,6 +39,7 @@ class ViewValue {
   ) {
     this.#state = state;
     this.origin = state.origin === 'genesis' ? 'FullReplay' : 'EndorsedSnapshot';
+    viewStates.set(this, state);
     Object.freeze(this);
   }
   get length(): number {
@@ -54,9 +57,6 @@ class ViewValue {
   }
   inspectEpochCandidate(candidate: EpochCandidate) {
     return classifyEpochCandidate(this.#state, candidate);
-  }
-  [viewMaterial](): InternalState {
-    return this.#state;
   }
 }
 
@@ -93,7 +93,7 @@ export const ledgerView = (
 ): LedgerView => new ViewValue(state, genesis, head);
 export const applicableRecord = (base: LedgerView, next: LedgerView): ApplicableRecord =>
   new ApplicableValue(base, next);
-export const viewState = (view: LedgerView): InternalState => view[viewMaterial]();
+export const viewState = (view: LedgerView): InternalState => viewStates.get(view)!;
 export const applyAuthorizedRecord = (
   base: LedgerView,
   record: ApplicableRecord

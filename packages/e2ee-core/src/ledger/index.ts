@@ -71,12 +71,14 @@ export type {
 } from './schema';
 export type { Device, EpochState, Member, OrgState } from './policy';
 export {
+  assertEpochStreamAppend,
   canSendEpoch,
   collectEpochPackets,
   envelopeAad,
   openEpochEnvelope,
   openHistoryPacket,
   recoverHistory,
+  recoverLedgerHistory,
   sealEpochEnvelope,
   sealHistoryPacket,
 } from './keys';

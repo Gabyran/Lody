@@ -99,6 +99,14 @@ function requirePersonalManage(state: InternalState, signer: Uint8Array) {
     return { device, member };
   });
 }
+/** A member can still act (or recover) through a personal device or recovery device R. */
+function canStillGovern(state: InternalState, membershipHex: string, excluding?: string): boolean {
+  for (const [id, device] of state.devices) {
+    if (id === excluding || keyId(device.membershipId) !== membershipHex) continue;
+    if (device.kind === 'personal' || device.kind === 'recovery') return true;
+  }
+  return false;
+}
 function requireOwnerManage(state: InternalState, signer: Uint8Array) {
   return Either.gen(function* () {
     const found = yield* requirePersonalManage(state, signer);
@@ -244,6 +252,12 @@ export function operationChanges(
         if (!target) return yield* fail('unauthorized');
         if (keyId(target.membershipId) !== keyId(actor.membershipId))
           return yield* fail('unauthorized');
+        // The Owner keeps a way back: a personal device or recovery device R.
+        if (
+          keyId(target.membershipId) === keyId(state.owner) &&
+          !canStillGovern(state, keyId(state.owner), targetHex)
+        )
+          return yield* fail('unauthorized');
         (changes.devices ??= []).push([targetHex, null]);
         changes.epoch = {
           ...state.epoch,
@@ -258,6 +272,7 @@ export function operationChanges(
         if (successorHex === keyId(state.owner)) return yield* fail('unauthorized');
         const successor = state.members.get(successorHex);
         if (!successor) return yield* fail('unauthorized');
+        if (!canStillGovern(state, successorHex)) return yield* fail('unauthorized');
         const previousHex = keyId(state.owner);
         const previous = state.members.get(previousHex);
         if (!previous) return yield* fail('unauthorized');

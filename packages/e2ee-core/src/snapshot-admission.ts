@@ -14,6 +14,7 @@ import {
   type SnapshotPublicationStore,
   type PublishedSnapshot,
 } from './snapshot-publication-store';
+export { compareSnapshotOffsets } from './pure/snapshot-admission';
 export {
   MemorySnapshotPublicationStore,
   type SnapshotPublicationStore,

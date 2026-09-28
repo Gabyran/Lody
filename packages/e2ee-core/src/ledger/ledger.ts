@@ -170,37 +170,42 @@ async function verifyJobs(
   }
 }
 
+let construct: (state: InternalState) => Ledger;
+
 export class Ledger {
-  private constructor(private readonly internal: InternalState) {
+  // A true private field: verified state is unreachable from outside, even via `as any`.
+  readonly #internal: InternalState;
+
+  static {
+    construct = (state) => new Ledger(state);
+  }
+
+  private constructor(internal: InternalState) {
+    this.#internal = internal;
     Object.freeze(this);
   }
 
-  /** Promise-adapter reconstruction from a verified view. Not an authority claim. */
-  static fromInternal(state: InternalState): Ledger {
-    return new Ledger(state);
-  }
-
   get head(): Hash {
-    const head = this.internal.hashes[this.internal.hashes.length - 1];
+    const head = this.#internal.hashes[this.#internal.hashes.length - 1];
     if (!head) fail('invalid-operation');
     return copyBytes(head);
   }
 
   get length(): number {
-    return this.internal.hashes.length;
+    return this.#internal.hashes.length;
   }
 
   get origin(): 'genesis' | 'snapshot' {
-    return this.internal.origin;
+    return this.#internal.origin;
   }
 
   get snapshotLength(): number | null {
-    return this.internal.snapshotLength;
+    return this.#internal.snapshotLength;
   }
 
   historyPackets(): ReadonlyMap<number, { commitment: Hash; packet: Uint8Array }> {
     const packets = new Map<number, { commitment: Hash; packet: Uint8Array }>();
-    for (const [epoch, row] of this.internal.historyPackets) {
+    for (const [epoch, row] of this.#internal.historyPackets) {
       packets.set(epoch, {
         commitment: copyBytes(row.commitment),
         packet: copyBytes(row.packet),
@@ -210,12 +215,12 @@ export class Ledger {
   }
 
   get state(): OrgState {
-    return publicState(this.internal);
+    return publicState(this.#internal);
   }
 
   summary(): LedgerSummary {
     return Object.freeze({
-      genesis: copyBytes(this.internal.genesis),
+      genesis: copyBytes(this.#internal.genesis),
       length: this.length,
       head: this.head,
     });
@@ -225,14 +230,19 @@ export class Ledger {
     if (!Number.isSafeInteger(position) || position < 0 || position >= this.length) {
       fail('invalid-operation');
     }
-    const hash = this.internal.hashes[position];
+    const hash = this.#internal.hashes[position];
     if (!hash) fail('invalid-operation');
     return copyBytes(hash);
   }
 
+  /** Whether this signing key was ever admitted as a device here, including revoked ones. */
+  wasDeviceAdmitted(deviceIdHex: string): boolean {
+    return this.#internal.usedSigningKeys.has(deviceIdHex);
+  }
+
   hasRecordHash(digest: Hash): boolean {
     const want = checkHash(digest);
-    for (const hash of this.internal.hashes) {
+    for (const hash of this.#internal.hashes) {
       if (hash && bytesEqual(hash, want)) return true;
     }
     return false;
@@ -240,7 +250,7 @@ export class Ledger {
 
   /** Inspection only; installing a candidate still requires durable lifecycle handling. */
   inspectEpochCandidate(candidate: EpochCandidate) {
-    return classifyEpochCandidate(this.internal, candidate);
+    return classifyEpochCandidate(this.#internal, candidate);
   }
 
   static async verify(input: {
@@ -322,7 +332,7 @@ export class Ledger {
 
   async extend(suffix: readonly Uint8Array[], cache?: SigningPointCache): Promise<Ledger> {
     if (suffix.length === 0) return this;
-    const next = cloneState(this.internal);
+    const next = cloneState(this.#internal);
     const records = suffix.map((record, offset) => {
       if (!(record instanceof Uint8Array)) fail('canonical', this.length + offset);
       return copyBytes(record);
@@ -376,12 +386,12 @@ export class Ledger {
   ): Proposal {
     const proposal = this.prepare(operation, signerPublicKey, cache);
     verifyOperationProofs(
-      this.internal.genesis,
+      this.#internal.genesis,
       operation,
       cache,
-      this.internal.devices.get(keyId(proposal.signer))?.membershipId
+      this.#internal.devices.get(keyId(proposal.signer))?.membershipId
     );
-    applyOperation(cloneState(this.internal), proposal.signer, operation, cache);
+    applyOperation(cloneState(this.#internal), proposal.signer, operation, cache);
     return proposal;
   }
 
@@ -390,16 +400,16 @@ export class Ledger {
     cache?: SigningPointCache
   ): SnapshotProposal {
     const signer = checkSigningPublicKey(endorserPublicKey, cache);
-    assertEndorserEligible(this.internal, signer);
-    const bodyBytes = encodeSnapshotBody(this.internal, signer);
+    assertEndorserEligible(this.#internal, signer);
+    const bodyBytes = encodeSnapshotBody(this.#internal, signer);
     return Object.freeze({
       signer,
-      genesis: copyBytes(this.internal.genesis),
+      genesis: copyBytes(this.#internal.genesis),
       head: this.head,
       length: this.length,
       bodyBytes,
       signingBytes: snapshotSigningBytes(bodyBytes),
-      headAttestationSigningBytes: headAttestationSigningBytes(this.internal.genesis, this.head),
+      headAttestationSigningBytes: headAttestationSigningBytes(this.#internal.genesis, this.head),
     });
   }
 
@@ -460,10 +470,10 @@ export class Ledger {
   ): ComparisonNote {
     const noteSigner = checkSigningPublicKey(localDevicePublicKey, cache);
     return Object.freeze({
-      genesis: copyBytes(this.internal.genesis),
+      genesis: copyBytes(this.#internal.genesis),
       length: this.length,
       head: this.head,
-      stateDigest: stateDigestOf(this.internal),
+      stateDigest: stateDigestOf(this.#internal),
       noteSigner,
     });
   }
@@ -487,4 +497,9 @@ export class Ledger {
       confirmed
     );
   }
+}
+
+/** Package-internal Promise-adapter reconstruction from a verified view; not re-exported. */
+export function ledgerFromVerifiedState(state: InternalState): Ledger {
+  return construct(state);
 }

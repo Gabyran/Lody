@@ -3,6 +3,8 @@ import { randomBytes, toHex } from './bytes';
 import type { Failpoint, IssuedCredential, JoinRequestWire, SpaceInfo } from './protocol';
 import { MAX_LEASE_MS } from './protocol';
 
+const CHALLENGE_TTL_MS = 60_000;
+
 interface ClockRow {
   now: number | null;
 }
@@ -41,6 +43,18 @@ export class HostMeta {
         request_id TEXT NOT NULL,
         body TEXT NOT NULL,
         PRIMARY KEY (genesis_hex, request_id)
+      ) STRICT;
+      CREATE TABLE IF NOT EXISTS credential_challenges (
+        nonce TEXT PRIMARY KEY,
+        account TEXT NOT NULL,
+        device_hex TEXT NOT NULL,
+        expires_at INTEGER NOT NULL
+      ) STRICT;
+      CREATE TABLE IF NOT EXISTS join_accounts (
+        genesis_hex TEXT NOT NULL,
+        user_id TEXT NOT NULL,
+        account TEXT NOT NULL,
+        PRIMARY KEY (genesis_hex, user_id)
       ) STRICT;
       CREATE TABLE IF NOT EXISTS notes (
         genesis_hex TEXT NOT NULL,
@@ -173,12 +187,69 @@ export class HostMeta {
     };
   }
 
-  putJoin(genesisHex: string, request: JoinRequestWire): void {
+  issueChallenge(account: string, deviceHex: string, now: number): string {
+    const nonce = toHex(randomBytes(32));
     this.db
       .prepare(
-        'INSERT OR REPLACE INTO join_requests (genesis_hex, request_id, body) VALUES (?, ?, ?)'
+        'INSERT INTO credential_challenges (nonce, account, device_hex, expires_at) VALUES (?, ?, ?, ?)'
       )
-      .run(genesisHex, request.requestId, JSON.stringify(request));
+      .run(nonce, account, deviceHex, now + CHALLENGE_TTL_MS);
+    return nonce;
+  }
+
+  /** Single use: the row is deleted whether or not it still matches. */
+  consumeChallenge(nonce: string, account: string, deviceHex: string, now: number): boolean {
+    const row = this.db
+      .prepare(
+        'DELETE FROM credential_challenges WHERE nonce = ? RETURNING account, device_hex, expires_at'
+      )
+      .get(nonce) as { account: string; device_hex: string; expires_at: number } | undefined;
+    return (
+      row !== undefined &&
+      row.account === account &&
+      row.device_hex === deviceHex &&
+      now < row.expires_at
+    );
+  }
+
+  /** A pending request is never replaced by another signer, and a userId stays bound to
+   *  the account that first claimed it in this space. Returns false on either conflict. */
+  putJoin(genesisHex: string, account: string, request: JoinRequestWire): boolean {
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      const existing = this.db
+        .prepare('SELECT body FROM join_requests WHERE genesis_hex = ? AND request_id = ?')
+        .get(genesisHex, request.requestId) as { body: string } | undefined;
+      if (
+        existing &&
+        (JSON.parse(existing.body) as JoinRequestWire).signingPublicKey !== request.signingPublicKey
+      ) {
+        this.db.exec('ROLLBACK');
+        return false;
+      }
+      const owner = this.db
+        .prepare('SELECT account FROM join_accounts WHERE genesis_hex = ? AND user_id = ?')
+        .get(genesisHex, request.userId) as { account: string } | undefined;
+      if (owner && owner.account !== account) {
+        this.db.exec('ROLLBACK');
+        return false;
+      }
+      this.db
+        .prepare(
+          'INSERT OR IGNORE INTO join_accounts (genesis_hex, user_id, account) VALUES (?, ?, ?)'
+        )
+        .run(genesisHex, request.userId, account);
+      this.db
+        .prepare(
+          'INSERT OR REPLACE INTO join_requests (genesis_hex, request_id, body) VALUES (?, ?, ?)'
+        )
+        .run(genesisHex, request.requestId, JSON.stringify(request));
+      this.db.exec('COMMIT');
+      return true;
+    } catch (error) {
+      this.db.exec('ROLLBACK');
+      throw error;
+    }
   }
 
   joins(genesisHex: string): JoinRequestWire[] {

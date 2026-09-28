@@ -565,3 +565,39 @@ Current spec §8.3 and `policy.ts` allow an Owner/Admin personal device with `ca
 - **Changed:** `packages/e2ee-core/src/ledger/keys.ts` `canSendEpoch`; lab `reference-model.ts` `refMaySendEpoch`; ledger spec §8.3/§8.5; whitepaper §4 line “after admission … any active device that holds the current key may send envelopes”; e2ee-core README/AGENTS/HANDOFF; host-gateway note item 3. No wire or opcode change.
 - **Unchanged limits:** a revoked holder of `K_n` keeps `K_n`; the 15-minute window and the rotate-after-revoke policy are as before. The gateway still cannot see the recipient and only gates the sender; the client `open` check remains the real boundary.
 - Evidence: core `test/ledger-keys.test.ts` new case (member→laptop and machine→R forward accepted; wrong key `invalid-operation`; R sender and forged-personal R `unauthorized`; revoked machine sender `unauthorized`); lab `test/gateway.test.ts` (owner/member/guest keys-cas admitted, recovery 403), `test/reference-model.test.ts`, `test/design-probes.test.ts` (guest forwards through gateway; member forward accepted, wrong key rejected). Core Vitest 405/405, lab Vitest 133/133 excluding external-model `restricted-agent.test.ts`, both typechecks pass, docs check errors `[]`. Not product E2EE. No push/merge.
+
+### 2026-09-26 — Five-area security review with Lab reproductions, and fixes
+
+- **Method:** five parallel reviewers (ledger policy/codec; sync under a malicious server; epoch keys; content/admission; identity/join/recovery/host) wrote executable reproductions against real crypto and sqlite Riverrun. Each finding was re-run before fixing. Tests now assert the secure behaviour; reverting the C1 fix makes both the core and the Lab case fail.
+- **P0 C1 fixed:** `installEpochEnvelope` refreshed a third time and installed into that view's epoch, so a rotation landing after verification put `K_n` in slot n+1. A revoked `K_n` holder could read later writes and the committed `K_{n+1}` could never install. The key now goes into the epoch it was verified against, and Lab sealing checks the key against the commitment.
+- **P1 fixed (Lab host is the reference for the unimplemented production gateway):**
+  - **B1/E1:** the gateway forwarded every client header, so `Stream-Closed` froze the control ledger and a client-chosen expected offset let two same-head records fork it. It now forwards allowlisted headers only. Control CAS uses the host's verified tail, and a partial control read fails.
+  - **C2:** any forwarding device could poison the unframed key stream or squat a delivery slot. Gateways now call core `assertEpochStreamAppend`: exactly one envelope for the current epoch, from the authenticated sender to an admitted recipient, with a valid signature.
+  - **D1:** reader and host returned `header.device` as the signing key. Core `contentAuthorKey` now resolves keys from verified authority: a current device must match its member instance and userId; a revoked device verifies only as a historical author; unknown keys are refused. Lab authors use ledger userId/membership instead of account names.
+  - **E2:** the join mailbox allowed `INSERT OR REPLACE` across signers. The host now verifies the request, refuses replacement by another signer, and binds a pending userId to its first account.
+  - **C3:** Lab history recovery read unsigned stream bytes and overwrote the keyring. It now uses `recoverLedgerHistory` (verified ledger packets), and installed keys are never overwritten.
+- **P2 fixed:**
+  - Core API:
+    - `Ledger.fromInternal` is removed; `Ledger` and `LedgerView` state is unreachable at runtime.
+    - `prepareDeviceAdmission` copies only `grant.kind`.
+    - An exact snapshot retry requires the signing device.
+    - `importRecoveryDevice` checks both key pairs.
+    - Device and user store `load` never creates files.
+    - The Owner (and any successor) must keep a personal device or R.
+  - Lab host:
+    - Snapshot offsets must be comparable and within the tail.
+    - A non-current idempotent retry is not republished.
+    - Harness clock/failpoints apply only in test mode.
+    - Bearer tokens are not forwarded.
+    - Credentials require a single-use challenge (`e2ee-demo-device/v2`).
+- **Not changed:**
+  - A malicious store can still deny key delivery or control progress; this is the stated server-trust availability limit.
+  - Snapshot endorser eligibility is still checked only against the endorser's own claimed state (documented §6.1).
+  - Revoked historical authors' identity claims cannot be checked against current state.
+  - The Lean model still needs the role-derived management and Owner-retention rules; the TS oracle is updated.
+  - Stream read limits (64 pages / 16 MiB) are unchanged.
+- **Evidence:** new suites
+  - core: `ledger-{authority,canonical,snapshot-trust,immutability}`, `epoch-key-install`, `snapshot-admission-retry`, `identity-recovery`;
+  - Lab: `gateway-headers`, `epoch-key-history`, `content-authority`, `host-hardening`.
+
+  The Lab boundary agent now drops whichever bob request is pending first, because reads refresh the ledger. Spec §8.2.2/§8.5/§10 are updated as draft.

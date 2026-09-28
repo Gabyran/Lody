@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fork, type ChildProcess } from 'node:child_process';
 import { once } from 'node:events';
+import { SqliteTextStore } from '../src/node-text-store';
 import { DatabaseSync } from 'node:sqlite';
 import { randomBytes } from 'node:crypto';
 import { afterEach, expect, it, vi } from 'vitest';
@@ -337,6 +338,8 @@ it('returns no device identity when ciphertext persistence fails', async () => {
     binding = 'a4'.repeat(32);
   const store = new SqliteDeviceIdentityStore(path, binding, p.device);
   await expect(store.load()).rejects.toThrow('device-identity-missing');
+  // load() never initializes storage; create the empty schema to inject the fault.
+  await new SqliteTextStore(path, 0x4c444931, 1).exclusive(async () => undefined);
   const db = new DatabaseSync(path);
   db.exec(
     "CREATE TRIGGER deny_device BEFORE INSERT ON journal BEGIN SELECT RAISE(ABORT, 'disk-denied'); END;"

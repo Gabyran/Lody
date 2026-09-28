@@ -22,23 +22,24 @@ function boundaryAgent(): { agent: CollabAgent; hits: { eventId?: string; needle
   const hits: { eventId?: string; needleHex?: string } = {};
   const agent: CollabAgent = {
     act: async (turn) => {
-      if (turn.stepName === 'bob-sync-loro' && turn.turn === 0) {
-        // Advance past the import phase until a real request boundary is pending.
-        return {
-          op: 'advanceUntil',
-          input: { actor: 'bob', phase: 'request-queued', maxSteps: 8 },
-        };
-      }
-      if (turn.stepName === 'bob-sync-loro' && turn.turn === 1) {
+      if (turn.stepName === 'bob-sync-loro' && turn.turn <= 1) {
         const target = turn.view.events.find(
           (event) =>
             event.status === 'requested' &&
             event.actor === 'bob' &&
             event.phase === 'request-queued'
         );
-        if (!target) return 'pass';
-        hits.eventId = target.eventId;
-        return { op: 'intercept', input: { eventId: target.eventId, kind: 'drop' } };
+        if (target) {
+          hits.eventId = target.eventId;
+          return { op: 'intercept', input: { eventId: target.eventId, kind: 'drop' } };
+        }
+        // Otherwise advance until a real request boundary is pending.
+        if (turn.turn === 0)
+          return {
+            op: 'advanceUntil',
+            input: { actor: 'bob', phase: 'request-queued', maxSteps: 8 },
+          };
+        return 'pass';
       }
       if (turn.stepName === 'finish-boundary' && turn.turn === 0) {
         const disk = await turn.readBackend({ target: 'riverrun', eventId: 'barrier' });

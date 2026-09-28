@@ -20,12 +20,14 @@ export function admitSnapshot(input: SnapshotPut) {
   return Effect.gen(function* () {
     const checked = yield* checkSnapshotPut(captured);
     const store = yield* SnapshotStore;
+    // Early rejection of different bytes at an admitted offset. Exact retries still
+    // authenticate below: only the signing device may retry.
     const retry = yield* store
       .exclusive(checked.streamKey, (tx) => existingSnapshot(tx, checked.offset, checked.body))
       .pipe(Effect.flatten);
-    if (retry) return retry;
     const clock = yield* AdmissionClock;
-    yield* checkSnapshotLease(clock.now(), checked.leaseIssuedAt, checked.leaseExpiresAt);
+    if (!retry)
+      yield* checkSnapshotLease(clock.now(), checked.leaseIssuedAt, checked.leaseExpiresAt);
     const inner = yield* parseLsceSnapshot(checked.body);
     const authenticator = yield* SnapshotAuthenticator;
     const header = yield* authenticator.authenticate(inner);

@@ -114,17 +114,30 @@ export async function importDevice(raw: string): Promise<DemoDevice> {
   });
 }
 
-export async function possessionProof(account: string, device: DemoDevice): Promise<Uint8Array> {
-  const message = new TextEncoder().encode(`e2ee-demo-device/v1\0${account}\0${deviceHex(device)}`);
-  return device.sign(message);
+function possessionMessage(
+  account: string,
+  deviceIdHex: string,
+  nonce: string
+): Uint8Array<ArrayBuffer> {
+  return new TextEncoder().encode(`e2ee-demo-device/v2\0${account}\0${deviceIdHex}\0${nonce}`);
+}
+
+/** Signs a host-issued single-use challenge, so a captured proof cannot mint new tokens. */
+export async function possessionProof(
+  account: string,
+  device: DemoDevice,
+  nonce: string
+): Promise<Uint8Array> {
+  return device.sign(possessionMessage(account, deviceHex(device), nonce));
 }
 
 export async function verifyPossession(
   account: string,
   publicKey: Uint8Array,
+  nonce: string,
   signature: Uint8Array
 ): Promise<boolean> {
-  const message = new TextEncoder().encode(`e2ee-demo-device/v1\0${account}\0${toHex(publicKey)}`);
+  const message = possessionMessage(account, toHex(publicKey), nonce);
   const key = await crypto.subtle.importKey('raw', new Uint8Array(publicKey), 'Ed25519', false, [
     'verify',
   ]);

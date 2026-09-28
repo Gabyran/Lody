@@ -11,7 +11,10 @@ import {
 } from '@loro-dev/streams-crdt/loro';
 import { StreamsCrdt as FlockStreamsCrdt, createFlockAdapter } from '@loro-dev/streams-crdt/flock';
 import { ContentCipher } from '@lody/e2ee-core';
-import { createStreamsContentProvider } from '@lody/e2ee-core/streams-content';
+import { Either } from 'effect';
+import { ContentError } from '@lody/e2ee-core/effect';
+import type { OrgState } from '@lody/e2ee-core/ledger';
+import { contentAuthorKey, createStreamsContentProvider } from '@lody/e2ee-core/streams-content';
 import { asArrayBuffer, toHex } from './bytes';
 import { FLOCK_STREAM, LORO_STREAM } from './protocol';
 import type { DemoDevice } from './device';
@@ -49,6 +52,11 @@ export interface ContentClient {
   /** Refresh ledger epoch/write rights before sealing. Honest clients must not
    *  seal under a stale local key index after `publishEpoch`. */
   prepareWrite?(): Promise<void>;
+  /** Refresh the verified ledger before importing remote content. */
+  prepareRead?(): Promise<void>;
+  /** Last verified ledger authority used to resolve content signing keys. Absent means
+   *  every remote frame is refused: header identity claims are never trusted. */
+  contentAuthority?(): ContentAuthority | null;
   random?(label: string, length: number): Uint8Array;
   /** Deterministic wall-clock hook for Flock physicalTime when provided. */
   now?: () => number;
@@ -108,6 +116,21 @@ function contentPlatform(session: ContentClient): Pick<Crypto, 'subtle' | 'getRa
   };
 }
 
+export interface ContentAuthority {
+  readonly state: OrgState;
+  wasDeviceAdmitted(deviceIdHex: string): boolean;
+}
+
+/** Author fields as recorded in the verified ledger, never self-declared names. */
+function ledgerAuthor(session: ContentClient) {
+  const device = deviceHex(session.device);
+  const authority = session.contentAuthority?.();
+  const row = authority?.state.devices.get(device);
+  const member = row && authority?.state.members.get(toHex(row.membershipId));
+  if (!row || !member) return { actor: '', memberInstance: '', device };
+  return { actor: toHex(member.userId), memberInstance: toHex(row.membershipId), device };
+}
+
 /** Promise streams-crdt SDK boundary. ContentCipher unwraps the Effect workflow. */
 function provider(session: ContentClient, resource: string, model: 'loro' | 'flock') {
   if (!session.genesisHex || !session.device) throw new Error('no-space');
@@ -115,7 +138,12 @@ function provider(session: ContentClient, resource: string, model: 'loro' | 'flo
     cipher: new ContentCipher(
       {
         authorize(header) {
-          return header.device;
+          const authority = session.contentAuthority?.();
+          if (!authority) throw new ContentError({ code: 'unauthorized' });
+          return Either.getOrThrowWith(
+            contentAuthorKey(authority.state, header, (id) => authority.wasDeviceAdmitted(id)),
+            (error) => error
+          );
         },
       },
       contentPlatform(session)
@@ -124,11 +152,7 @@ function provider(session: ContentClient, resource: string, model: 'loro' | 'flo
     resource,
     model,
     writeEpoch: session.currentEpoch(),
-    author: {
-      actor: session.account,
-      memberInstance: session.membershipId ? toHex(session.membershipId) : session.account,
-      device: deviceHex(session.device),
-    },
+    author: ledgerAuthor(session),
     signingKey: session.device.signing.privateKey,
     readKey: (epoch) => session.epochKeys.get(epoch),
     mayWriteDocument: () => session.canWriteDocument,
@@ -268,6 +292,7 @@ export async function writeLoro(session: ContentClient, text: string): Promise<v
 }
 
 export async function readLoro(session: ContentClient): Promise<string> {
+  await session.prepareRead?.();
   const doc = sessionLoro(session);
   const cursorStore = loroCursorStore(session);
   const crdt = new StreamsCrdt({
@@ -365,6 +390,7 @@ export async function readFlock(
   session: ContentClient,
   path: readonly string[] = ['private', 'note']
 ): Promise<string> {
+  await session.prepareRead?.();
   const flock = sessionFlock(session);
   const crdt = new FlockStreamsCrdt({
     streamUrl: `${session.baseUrl}/ds/${session.genesisHex}/${FLOCK_STREAM}`,
@@ -395,6 +421,7 @@ export async function syncLoroWithCursor(
   beforeRemoteCursorSave?: (doc: LoroDoc) => Promise<void>,
   restoreSnapshot?: Uint8Array
 ): Promise<string> {
+  await session.prepareRead?.();
   const doc = bindLoroPeer(new LoroDoc(), session);
   if (restoreSnapshot) doc.import(restoreSnapshot);
   const crdt = new StreamsCrdt({
@@ -429,6 +456,7 @@ export async function syncLoroWithCursor(
 }
 
 export async function syncLoro(session: ContentClient): Promise<LoroDoc> {
+  await session.prepareRead?.();
   const doc = bindLoroPeer(new LoroDoc(), session);
   const crdt = new StreamsCrdt({
     streamUrl: `${session.baseUrl}/ds/${session.genesisHex}/${LORO_STREAM}`,
@@ -467,6 +495,7 @@ export function loroWriter(session: ContentClient, doc: LoroDoc) {
 }
 
 export async function appendLoro(session: ContentClient, doc: LoroDoc): Promise<void> {
+  await session.prepareWrite?.();
   const crdt = loroWriter(session, doc);
   try {
     const created = await crdt.createStream();
@@ -481,6 +510,7 @@ export async function appendLoro(session: ContentClient, doc: LoroDoc): Promise<
 }
 
 export async function editLoro(session: ContentClient, text: string): Promise<void> {
+  await session.prepareWrite?.();
   const doc = await syncLoro(session);
   const writer = loroWriter(session, doc);
   try {
@@ -651,6 +681,7 @@ export async function bootstrapLoroFromSnapshot(
   session: ContentClient,
   expected: string
 ): Promise<{ text: string; fetches: string[] }> {
+  await session.prepareRead?.();
   const fetches: string[] = [];
   await assertSnapshotCiphertext(session, expected);
   const doc = bindLoroPeer(new LoroDoc(), session);

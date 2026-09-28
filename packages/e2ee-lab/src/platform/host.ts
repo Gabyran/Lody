@@ -4,23 +4,32 @@ import type { AddressInfo } from 'node:net';
 import { isAbsolute, join, resolve } from 'node:path';
 import { startDevServer, type RunningDevServer } from '@loro-dev/sqlite-riverrun';
 import { ContentCipher } from '@lody/e2ee-core';
-import { decodeRecord, hashRecord, SigningPointCache } from '@lody/e2ee-core/ledger';
+import {
+  assertEpochStreamAppend,
+  decodeRecord,
+  hashRecord,
+  joinRequestSigningBytes,
+  sequentialSignatureVerify,
+  SigningPointCache,
+} from '@lody/e2ee-core/ledger';
 import {
   Bytes,
+  ContentError,
   ValidationError,
   extendLedger,
   verifyLedger,
   type LedgerView,
 } from '@lody/e2ee-core/effect';
 import { signatureVerifierLayer } from '@lody/e2ee-core/effect/platform';
-import { Effect } from 'effect';
+import { Effect, Either } from 'effect';
 import { SqliteSnapshotPublicationStore } from '@lody/e2ee-core/node-snapshot-publication-store';
 import {
+  compareSnapshotOffsets,
   CONTENT_SNAPSHOT_ADMISSION_WINDOW_MS,
   createContentSnapshotPublication,
   SNAPSHOT_ADMISSION_DEVICE_HEADER,
 } from '@lody/e2ee-core/snapshot-admission';
-import { deviceMayWriteDocument } from '@lody/e2ee-core/streams-content';
+import { contentAuthorKey, deviceMayWriteDocument } from '@lody/e2ee-core/streams-content';
 import { StreamsClient } from '@loro-dev/streams-client';
 import { chmodSync, writeFileSync } from 'node:fs';
 import { fromHex, randomBytes, toHex } from './bytes';
@@ -98,6 +107,41 @@ function bearer(req: IncomingMessage): string | null {
   return value.slice('Bearer '.length);
 }
 
+/** Only these client headers reach Riverrun. Stream lifecycle headers (Stream-Closed,
+ * Stream-Seq, TTL/expiry) and the device bearer token are never forwarded. */
+function forwardedHeaders(req: IncomingMessage, allowed: readonly string[]): Headers {
+  const headers = new Headers();
+  for (const name of allowed) {
+    const value = req.headers[name];
+    if (value === undefined) continue;
+    headers.set(name, Array.isArray(value) ? value.join(', ') : value);
+  }
+  return headers;
+}
+
+/** Mailbox screening only; the ledger re-verifies the request on admission. */
+async function joinRequestSigned(genesisHex: string, wire: JoinRequestWire): Promise<boolean> {
+  try {
+    const request = {
+      requestId: fromHex(wire.requestId),
+      userId: fromHex(wire.userId),
+      signingPublicKey: fromHex(wire.signingPublicKey),
+      encryptionPublicKey: fromHex(wire.encryptionPublicKey),
+      expiresAt: wire.expiresAt,
+    };
+    const [ok] = await sequentialSignatureVerify.verify([
+      {
+        pk: request.signingPublicKey,
+        msg: joinRequestSigningBytes(fromHex(genesisHex), request),
+        sig: fromHex(wire.signature),
+      },
+    ]);
+    return ok === true;
+  } catch {
+    return false;
+  }
+}
+
 function pathParts(url: URL): string[] {
   return url.pathname.split('/').filter(Boolean);
 }
@@ -140,6 +184,9 @@ export async function startDemoHost(options: DemoHostOptions): Promise<RunningDe
   const testMode = options.testMode === true;
   const hostName = options.host ?? '127.0.0.1';
   const harnessToken = testMode ? toHex(randomBytes(32)) : null;
+  // Harness state lives in host.sqlite; a non-test host must never honour it.
+  const hostNow = () => (testMode ? meta.now(wallClock) : wallClock());
+  const hostFailpoint = () => (testMode ? meta.failpoint() : 'none');
   if (harnessToken) {
     const tokenPath = join(options.dataDir, 'harness.token');
     writeFileSync(tokenPath, `${harnessToken}\n`, { encoding: 'utf8' });
@@ -172,6 +219,11 @@ export async function startDemoHost(options: DemoHostOptions): Promise<RunningDe
 
   /** Re-read control from Riverrun and verify with the native workflow. */
   async function loadLedger(genesisHex: string): Promise<LedgerView> {
+    return (await loadControl(genesisHex)).ledger;
+  }
+
+  /** The verified ledger plus the stream offset right after its last record. */
+  async function loadControl(genesisHex: string): Promise<{ ledger: LedgerView; tail: string }> {
     // Always re-read from Riverrun. A sticky cache would authorize content
     // writes against stale membership after a malicious-server control append.
     const space = meta.space(genesisHex);
@@ -182,7 +234,8 @@ export async function startDemoHost(options: DemoHostOptions): Promise<RunningDe
       retry: { maxAttempts: 0 },
     });
     let offset = '-1';
-    for (let page = 0; page < 256; page++) {
+    let upToDate = false;
+    for (let page = 0; page < 256 && !upToDate; page++) {
       const response = await client.read({ offset });
       if (!response.ok) throw new Error('control-read-failed');
       const body = response.result.payload.body;
@@ -190,9 +243,11 @@ export async function startDemoHost(options: DemoHostOptions): Promise<RunningDe
         for (const record of unframe(new Uint8Array(body))) records.push(record);
       }
       offset = response.result.nextOffset;
-      if (response.result.upToDate) break;
+      upToDate = response.result.upToDate;
     }
-    return runHostLedger(
+    // Authorizing against a prefix would let a stale view approve a forked append.
+    if (!upToDate) throw new Error('control-read-incomplete');
+    const ledger = await runHostLedger(
       Effect.gen(function* () {
         const anchor = yield* Bytes.genesisHash(fromHex(genesisHex));
         return yield* verifyLedger({ anchor, records }).pipe(
@@ -200,6 +255,7 @@ export async function startDemoHost(options: DemoHostOptions): Promise<RunningDe
         );
       })
     );
+    return { ledger, tail: offset };
   }
 
   function requireCredential(req: IncomingMessage, now: number): IssuedCredential {
@@ -217,11 +273,14 @@ export async function startDemoHost(options: DemoHostOptions): Promise<RunningDe
   const publication = createContentSnapshotPublication({
     store: snapshotStore,
     cipher: new ContentCipher({
+      // Admission needs a current device whose identity matches the header.
       authorize(header) {
-        return header.device;
+        const ledger = snapshotWriteLedger.getStore();
+        if (!ledger) throw new ContentError({ code: 'unauthorized' });
+        return Either.getOrThrowWith(contentAuthorKey(ledger.inspectState(), header), (e) => e);
       },
     }),
-    now: () => meta.now(wallClock),
+    now: hostNow,
     mayWriteDocument(author) {
       const ledger = snapshotWriteLedger.getStore();
       if (!ledger) return false;
@@ -229,15 +288,18 @@ export async function startDemoHost(options: DemoHostOptions): Promise<RunningDe
     },
   });
 
-  async function proxy(req: IncomingMessage, res: ServerResponse, url: URL): Promise<void> {
+  async function proxy(
+    req: IncomingMessage,
+    res: ServerResponse,
+    url: URL,
+    preread?: Uint8Array
+  ): Promise<void> {
     const dest = `${riverrun.baseUrl}${url.pathname}${url.search}`;
-    const body = req.method === 'GET' || req.method === 'HEAD' ? undefined : await readBody(req);
-    const headers = new Headers();
-    for (const [name, value] of Object.entries(req.headers)) {
-      if (value === undefined || name === 'host' || name === 'connection') continue;
-      if (Array.isArray(value)) headers.set(name, value.join(', '));
-      else headers.set(name, value);
-    }
+    const body =
+      req.method === 'GET' || req.method === 'HEAD'
+        ? undefined
+        : (preread ?? (await readBody(req)));
+    const headers = forwardedHeaders(req, ['content-type', 'stream-expected-offset']);
     const response = await httpFetch(dest, {
       method: req.method,
       headers,
@@ -265,7 +327,7 @@ export async function startDemoHost(options: DemoHostOptions): Promise<RunningDe
         res.end();
         return;
       }
-      const now = meta.now(wallClock);
+      const now = hostNow();
       const parts = pathParts(url);
 
       try {
@@ -302,23 +364,40 @@ export async function startDemoHost(options: DemoHostOptions): Promise<RunningDe
           return;
         }
 
+        if (req.method === 'POST' && url.pathname === '/v1/credentials/challenge') {
+          const payload = JSON.parse(new TextDecoder().decode(await readBody(req))) as {
+            account?: string;
+            deviceHex?: string;
+          };
+          if (!payload.account || !payload.deviceHex) {
+            json(res, 400, { error: 'invalid-credential-request' });
+            return;
+          }
+          json(res, 200, { nonce: meta.issueChallenge(payload.account, payload.deviceHex, now) });
+          return;
+        }
+
         if (req.method === 'POST' && url.pathname === '/v1/credentials') {
           const payload = JSON.parse(new TextDecoder().decode(await readBody(req))) as {
             account?: string;
             deviceHex?: string;
+            nonce?: string;
             signature?: string;
             genesisHex?: string | null;
             ttlMs?: number;
           };
-          if (!payload.account || !payload.deviceHex || !payload.signature) {
+          if (!payload.account || !payload.deviceHex || !payload.nonce || !payload.signature) {
             json(res, 400, { error: 'invalid-credential-request' });
             return;
           }
-          const ok = await verifyPossession(
-            payload.account,
-            fromHex(payload.deviceHex),
-            fromHex(payload.signature)
-          );
+          const ok =
+            meta.consumeChallenge(payload.nonce, payload.account, payload.deviceHex, now) &&
+            (await verifyPossession(
+              payload.account,
+              fromHex(payload.deviceHex),
+              payload.nonce,
+              fromHex(payload.signature)
+            ));
           if (!ok) {
             json(res, 403, { error: 'unauthorized' });
             return;
@@ -461,7 +540,14 @@ export async function startDemoHost(options: DemoHostOptions): Promise<RunningDe
             json(res, 403, { error: 'unauthorized' });
             return;
           }
-          meta.putJoin(genesisHex, request);
+          if (!(await joinRequestSigned(genesisHex, request))) {
+            json(res, 400, { error: 'invalid-join-request' });
+            return;
+          }
+          if (!meta.putJoin(genesisHex, credential.account, request)) {
+            json(res, 409, { error: 'join-request-conflict' });
+            return;
+          }
           json(res, 200, { ok: true });
           return;
         }
@@ -520,11 +606,18 @@ export async function startDemoHost(options: DemoHostOptions): Promise<RunningDe
             json(res, decision.status, { error: decision.error });
             return;
           }
-          if (
-            decision.action === 'read' ||
-            decision.action === 'keys-cas' ||
-            decision.action === 'content-cas'
-          ) {
+          if (decision.action === 'keys-cas') {
+            const body = await readBody(req);
+            try {
+              assertEpochStreamAppend(ledger.inspectState(), fromHex(credential.deviceHex), body);
+            } catch {
+              json(res, 400, { error: 'invalid-epoch-envelope' });
+              return;
+            }
+            await proxy(req, res, url, body);
+            return;
+          }
+          if (decision.action === 'read' || decision.action === 'content-cas') {
             await proxy(req, res, url);
             return;
           }
@@ -546,7 +639,7 @@ export async function startDemoHost(options: DemoHostOptions): Promise<RunningDe
               json(res, 403, { error: 'unauthorized' });
               return;
             }
-            const current = await loadLedger(genesisHex);
+            const { ledger: current, tail } = await loadControl(genesisHex);
             const operation = decoded.body.fields.operation;
             if (operation.type === 'admitMember' && operation.request.expiresAt !== null) {
               const digest = await hashRecord(record);
@@ -562,19 +655,16 @@ export async function startDemoHost(options: DemoHostOptions): Promise<RunningDe
               extendLedger(current, [record]).pipe(Effect.provide(signatureVerifierLayer))
             );
             const dest = `${riverrun.baseUrl}${url.pathname}${url.search}`;
-            const headers = new Headers();
-            for (const [name, value] of Object.entries(req.headers)) {
-              if (value === undefined || name === 'host' || name === 'connection') continue;
-              if (Array.isArray(value)) headers.set(name, value.join(', '));
-              else headers.set(name, value);
-            }
+            // Only the verified head may be extended: never a client-chosen offset.
+            const headers = forwardedHeaders(req, ['content-type']);
+            headers.set('Stream-Expected-Offset', tail);
             const response = await httpFetch(dest, {
               method: 'POST',
               headers,
               body: Buffer.from(body),
             });
             if (response.status === 200 || response.status === 204) {
-              const fail = meta.failpoint();
+              const fail = hostFailpoint();
               if (fail === 'drop-control-ack') {
                 res.destroy();
                 return;
@@ -621,8 +711,22 @@ export async function startDemoHost(options: DemoHostOptions): Promise<RunningDe
               json(res, 403, { error: 'freshness-expired' });
               return;
             }
+            // Admission is durable; only admit an offset Riverrun can accept, i.e. a
+            // comparable position within the stream's current tail.
+            const head = await httpFetch(
+              `${riverrun.baseUrl}${url.pathname.replace(/\/snapshot\/[^/]*$/, '')}`,
+              {
+                method: 'HEAD',
+              }
+            );
+            const tail = head.headers.get('Stream-Next-Offset');
+            const order = tail === null ? 'incomparable' : compareSnapshotOffsets(offset, tail);
+            if (!head.ok || order === 'incomparable' || order > 0) {
+              json(res, 400, { error: 'snapshot-offset-out-of-range' });
+              return;
+            }
             const resource = stream === FLOCK_STREAM ? 'flock' : 'loro';
-            await snapshotWriteLedger.run(fresh, () =>
+            const admitted = await snapshotWriteLedger.run(fresh, () =>
               publication.admit({
                 streamKey: `${genesisHex}/${stream}`,
                 offset,
@@ -634,6 +738,14 @@ export async function startDemoHost(options: DemoHostOptions): Promise<RunningDe
                 expectedResource: resource,
               })
             );
+            // An idempotent retry of an older snapshot must not move Riverrun's current back.
+            if (admitted.currentOffset !== offset) {
+              json(res, 409, {
+                error: 'snapshot-superseded',
+                currentOffset: admitted.currentOffset,
+              });
+              return;
+            }
             const dest = `${riverrun.baseUrl}${url.pathname}${url.search}`;
             const response = await httpFetch(dest, {
               method: 'PUT',

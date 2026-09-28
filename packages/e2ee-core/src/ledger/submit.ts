@@ -19,7 +19,7 @@ import { rotateEpoch } from '../workflows/epoch-rotation';
 import { LedgerClient as EffectLedgerClient } from '../workflows/ledger-client';
 import { journalStoreLayer, ledgerTransportLayer } from '../platform/ledger-ports';
 import { LedgerEngine, type ResumeOutcome } from '../workflows/ledger-engine';
-import { Ledger } from './ledger';
+import { Ledger, ledgerFromVerifiedState } from './ledger';
 import type { SnapshotTrust } from './snapshot';
 export {
   MAX_LEDGER_RECORDS,
@@ -305,7 +305,7 @@ function legacyResult(result: ResumeOutcome): Effect.Effect<LedgerSubmitResult, 
 }
 
 function asLedger(view: LedgerView): Ledger {
-  return Ledger.fromInternal(viewState(view));
+  return ledgerFromVerifiedState(viewState(view));
 }
 
 export class MemoryLedgerStore implements LedgerStore {

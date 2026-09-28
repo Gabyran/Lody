@@ -20,6 +20,9 @@ E2EE 实验室的云端 ACL 放在官方 sqlite Riverrun 前面的薄 HTTP 网�
 3. 读取要求当前设备在账本上。内容写用 `deviceMayWriteDocument`。密钥流写用导出的 `canSendEpoch`（2026-09-22 起：任何当前有效的非恢复设备；钥匙真伪由客户端承诺核对保证，不靠发送者角色）。控制流 CAS 仍检查记录签名者等于凭证设备，且 `extend` 成功。
 4. 快照 PUT 仍走 `createContentSnapshotPublication`。`mayWriteDocument` 从 `AsyncLocalStorage` 读本请求账本，不用进程全局 genesis。
 5. 攻击辅助继续无 ACL 写 `riverrunUrl`。宿主 403 不能当成客户端完整性通过。
+6. （2026-09-26）只转发白名单请求头到 Riverrun：`content-type`，内容流/密钥流另加 `stream-expected-offset`。控制流 CAS 一律用宿主已验证的流尾。`Stream-Closed` 等生命周期头与 Bearer 令牌不转发：转发的头曾冻结或分叉控制账本。
+7. （2026-09-26）密钥流写入须通过核心 `assertEpochStreamAppend`；快照偏移须在 Riverrun 流尾之内，非当前的幂等准入结果不再发布。
+8. （2026-09-26）加入申请先验签，不被其他签名者替换；待处理 userId 绑定首次提交它的账户。登录须用宿主一次性挑战。非测试模式忽略测试时钟与故障点。
 
 Host-meta SQLite（凭证、空间、申请/对账信箱）是网关自己的状态，不是第二份权限账本。
 

@@ -14,6 +14,11 @@ export interface TextTransaction {
   save(text: string): Promise<void>;
 }
 
+/** An open-only store whose file does not exist yet. */
+export function isMissingStoreFile(error: unknown): boolean {
+  return error instanceof Error && 'code' in error && error.code === 'ENOENT';
+}
+
 function databasePath(path: string, createFile: boolean): string {
   invariant(isAbsolute(path), 'journal-path-must-be-absolute');
   const canonical = join(realpathSync(dirname(path)), basename(path));

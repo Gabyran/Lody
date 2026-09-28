@@ -89,6 +89,39 @@ export async function createRecoveryDeviceSecret(
   return { publicKey, enc, secret };
 }
 
+/** A handle must never sign or decrypt as a key other than the one it reports. */
+async function assertKeyPairsMatch(
+  signingPublicKey: Uint8Array,
+  signPrivate: CryptoKey,
+  dhPublic: CryptoKey,
+  dhPrivate: CryptoKey
+): Promise<void> {
+  const probe = new TextEncoder().encode('lody-e2ee/recovery-key-check/v1\0');
+  const signature = await crypto.subtle.sign('Ed25519', signPrivate, probe);
+  const verifyKey = await crypto.subtle.importKey(
+    'raw',
+    new Uint8Array(signingPublicKey),
+    'Ed25519',
+    false,
+    ['verify']
+  );
+  const signs = await crypto.subtle.verify('Ed25519', verifyKey, signature, probe);
+  // X25519: DH(d, E) == DH(e, D) only if the stated public key belongs to d.
+  const ephemeral = (await crypto.subtle.generateKey('X25519', false, [
+    'deriveBits',
+  ])) as CryptoKeyPair;
+  const ours = new Uint8Array(
+    await crypto.subtle.deriveBits({ name: 'X25519', public: ephemeral.publicKey }, dhPrivate, 256)
+  );
+  const theirs = new Uint8Array(
+    await crypto.subtle.deriveBits({ name: 'X25519', public: dhPublic }, ephemeral.privateKey, 256)
+  );
+  const agrees = ours.every((byte, i) => byte === theirs[i]);
+  ours.fill(0);
+  theirs.fill(0);
+  invariant(signs && agrees, 'invalid-recovery-device');
+}
+
 /** Import a backup secret as non-extractable signing and X25519 handles. */
 export async function importRecoveryDevice(secret: Uint8Array): Promise<RecoveryDeviceHandle> {
   const parsed = decodeSecret(secret);
@@ -110,6 +143,7 @@ export async function importRecoveryDevice(secret: Uint8Array): Promise<Recovery
   const dhPublic = await crypto.subtle.importKey('raw', copy(parsed.enc), 'X25519', true, []);
   parsed.signPkcs8.fill(0);
   parsed.dhPkcs8.fill(0);
+  await assertKeyPairsMatch(parsed.publicKey, signPrivate, dhPublic, dhPrivate);
   const recipientKeyPair = { publicKey: dhPublic, privateKey: dhPrivate } as CryptoKeyPair;
   return {
     publicKey: parsed.publicKey,

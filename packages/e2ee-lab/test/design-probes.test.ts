@@ -185,13 +185,23 @@ describe('design probes: binding, host cache, guest content', () => {
       `${host.baseUrl}/v1/spaces/${alice.genesisHex}/genesis`
     );
     expect(unauthenticatedGenesis.status).toBe(401);
-    const proof = await possessionProof(outsider.account, outsider.device);
+    const challenge = await outsider.fetch('/v1/credentials/challenge', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        account: outsider.account,
+        deviceHex: toHex(outsider.device.publicKey),
+      }),
+    });
+    const { nonce } = (await challenge.json()) as { nonce: string };
+    const proof = await possessionProof(outsider.account, outsider.device, nonce);
     const claimed = await outsider.fetch('/v1/credentials', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({
         account: outsider.account,
         deviceHex: toHex(outsider.device.publicKey),
+        nonce,
         signature: toHex(proof),
         genesisHex: alice.genesisHex,
       }),

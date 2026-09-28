@@ -20,6 +20,9 @@ The gateway (`packages/e2ee-lab/src/platform/gateway.ts`) is the honest-host aut
 3. Reads require current device membership. Content writes use `deviceMayWriteDocument`. Keys writes use exported `canSendEpoch` (since 2026-09-22: any current non-recovery device; the client-side commitment check, not sender role, authenticates the key). Control CAS still checks the record signer equals the credential device and that `extend` succeeds.
 4. Snapshot PUT keeps `createContentSnapshotPublication`. `mayWriteDocument` reads the request’s ledger from `AsyncLocalStorage`, not a process-global genesis.
 5. Attack helpers keep writing `riverrunUrl` with no host ACL. A host 403 is not a client-integrity pass.
+6. (2026-09-26) Only allowlisted headers reach Riverrun (`content-type`, and `stream-expected-offset` for content/keys). Control CAS always uses the host's verified tail. Lifecycle headers such as `Stream-Closed` and the bearer token are never forwarded: a forwarded header froze or forked the control ledger.
+7. (2026-09-26) Key appends must pass core `assertEpochStreamAppend`. Snapshot offsets must lie within the Riverrun tail, and a non-current idempotent admission is not republished.
+8. (2026-09-26) Join requests are signature-checked and never replaced by another signer. A pending userId stays bound to the account that first posted it. Credentials require a single-use host challenge. Harness clock/failpoints are ignored outside test mode.
 
 Host-meta SQLite (`credentials`, `spaces`, join/note mailboxes) is gateway state. It is not a second permission ledger.
 

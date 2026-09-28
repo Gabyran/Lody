@@ -18,12 +18,11 @@ import { EpochKeyringStorage, nodeJournalStoreLayer } from '@lody/e2ee-core/effe
 import { Effect, Either, Layer } from 'effect';
 import type { LedgerCommand } from '@lody/e2ee-core/effect';
 import {
-  collectEpochPackets,
   commitEpochKey,
   decodeRecord,
   hashRecord,
   LedgerClient,
-  recoverHistory,
+  recoverLedgerHistory,
   SigningPointCache,
   type ComparisonNote,
   type JoinRequest,
@@ -44,6 +43,7 @@ import {
   type JoinRequestWire,
 } from './protocol';
 import { makeLabClock } from '../services/clock';
+import type { ContentAuthority } from './content-session';
 import { makeLiveFs, type LabFsShape } from '../services/fs';
 import type { LabFetch } from '../services/http';
 import { runLabPromise } from '../services/run';
@@ -186,6 +186,7 @@ export class DemoSession {
   genesisHex: string | null = null;
   epochKeys = new Map<number, Uint8Array>();
   userId: Uint8Array | null = null;
+  private verifiedLedger: Ledger | null = null;
   membershipId: Uint8Array | null = null;
   readonly baseUrl: string;
   readonly now: () => number;
@@ -286,36 +287,39 @@ export class DemoSession {
   async start(): Promise<void> {
     this.device = this.options.device ?? (await generateDevice());
     this.loadEpochs();
-    const signature = await possessionProof(this.account, this.device);
+    this.credential = await this.requestCredential(null);
+  }
+
+  private async requestCredential(genesisHex: string | null): Promise<IssuedCredential> {
+    const device = this.device;
+    if (!device) throw new Error('not-started');
+    const challenge = await this.fetch('/v1/credentials/challenge', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ account: this.account, deviceHex: deviceHex(device) }),
+    });
+    if (!challenge.ok) throw new Error(`credential-${challenge.status}`);
+    const { nonce } = (await challenge.json()) as { nonce: string };
+    const signature = await possessionProof(this.account, device, nonce);
     const response = await this.fetch('/v1/credentials', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({
         account: this.account,
-        deviceHex: deviceHex(this.device),
+        deviceHex: deviceHex(device),
+        nonce,
         signature: toHex(signature),
+        ...(genesisHex === null ? {} : { genesisHex }),
       }),
     });
     if (!response.ok) throw new Error(`credential-${response.status}`);
-    this.credential = (await response.json()) as IssuedCredential;
+    return (await response.json()) as IssuedCredential;
   }
 
   async reauth(): Promise<void> {
     if (!this.device) throw new Error('not-started');
     this.ledgerClient = null;
-    const signature = await possessionProof(this.account, this.device);
-    const response = await this.fetch('/v1/credentials', {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({
-        account: this.account,
-        deviceHex: deviceHex(this.device),
-        signature: toHex(signature),
-        genesisHex: this.genesisHex,
-      }),
-    });
-    if (!response.ok) throw new Error(`credential-${response.status}`);
-    this.credential = (await response.json()) as IssuedCredential;
+    this.credential = await this.requestCredential(this.genesisHex);
   }
 
   private streamUrl(name: string, genesisHex = this.genesisHex): string {
@@ -339,11 +343,31 @@ export class DemoSession {
   }
 
   async prepareWrite(): Promise<void> {
+    const ledger = await this.readLedger();
+    const { number, keyCommitment } = ledger.state.epoch;
+    const key = this.epochKeys.get(number);
+    if (!key) return;
+    // Seal only with the key the ledger committed for this epoch.
+    const commitment = await commitEpochKey(ledger.state.genesis, number, key);
+    if (toHex(commitment) !== toHex(keyCommitment)) throw new ContextMismatch({ context: 'epoch' });
+  }
+
+  async prepareRead(): Promise<void> {
     await this.readLedger();
+  }
+
+  contentAuthority(): ContentAuthority | null {
+    const ledger = this.verifiedLedger;
+    if (!ledger) return null;
+    return {
+      state: ledger.state,
+      wasDeviceAdmitted: (deviceIdHex) => ledger.wasDeviceAdmitted(deviceIdHex),
+    };
   }
 
   async readLedger(): Promise<Ledger> {
     const ledger = await (await this.openLedger()).read();
+    this.verifiedLedger = ledger;
     this.ledgerEpoch = ledger.state.epoch.number;
     this.canWriteDocument = [...ledger.state.devices.entries()].some(([id, device]) => {
       if (id !== deviceHex(this.device)) return false;
@@ -803,48 +827,18 @@ export class DemoSession {
     const ledger = await this.readLedger();
     const latest = this.epochKeys.get(ledger.state.epoch.number);
     if (!latest) throw new Error('missing-epoch-key');
-    const decoded = decodeRecord(this.genesis);
-    if (decoded.body.type !== 'genesis') throw new Error('not-genesis');
-    const records: Uint8Array[] = [this.genesis];
-    // Public verify path: re-read by hashing through the client ledger.
-    const recovered = await recoverHistory({
-      genesis: ledger.state.genesis,
-      latestEpoch: ledger.state.epoch.number,
-      latestKey: latest,
-      packets: collectEpochPackets(
-        records.concat(await this.suffixRecords(ledger)),
-        decoded.body.fields.epochCommitment
-      ),
-    });
-    this.persistEpochs(recovered);
-    this.epochKeys = recovered;
-    return recovered;
-  }
-
-  private async suffixRecords(ledger: Ledger): Promise<Uint8Array[]> {
-    const client = new StreamsClient({
-      url: this.streamUrl(CONTROL_STREAM),
-      fetch: (input, init) => this.fetch(input, init),
-      retry: { maxAttempts: 0 },
-    });
-    const records: Uint8Array[] = [];
-    let offset = '-1';
-    for (let page = 0; page < 256; page++) {
-      const response = await client.read({ offset });
-      if (!response.ok) break;
-      const body = new Uint8Array(response.result.payload.body);
-      const view = new DataView(body.buffer);
-      let start = 0;
-      while (body.length - start >= 4) {
-        const length = view.getUint32(start, false);
-        records.push(body.slice(start + 4, start + 4 + length));
-        start += 4 + length;
-      }
-      offset = response.result.nextOffset;
-      if (response.result.upToDate) break;
+    // History packets come from the verified ledger, never raw stream bytes.
+    const recovered = await recoverLedgerHistory(ledger, latest);
+    const merged = new Map(this.epochKeys);
+    for (const [epoch, key] of recovered) {
+      const held = merged.get(epoch);
+      // Installed keys are append-only; a different key is corruption, not an update.
+      if (held && toHex(held) !== toHex(key)) throw new ContextMismatch({ context: 'epoch' });
+      merged.set(epoch, key);
     }
-    void ledger;
-    return records;
+    this.persistEpochs(merged);
+    this.epochKeys = merged;
+    return recovered;
   }
 
   async exportNote(): Promise<ComparisonWire> {

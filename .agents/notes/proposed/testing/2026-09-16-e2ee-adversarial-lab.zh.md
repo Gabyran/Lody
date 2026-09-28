@@ -569,3 +569,39 @@ v1 `possessionSigningBytes` 为 `[genesis, signPub, encPub, kind, canManage]`。
 - **改动：** `packages/e2ee-core/src/ledger/keys.ts` `canSendEpoch`；lab `reference-model.ts` `refMaySendEpoch`；账本规范 §8.3/§8.5；白皮书 §4“加入后……任何持有当前密钥的有效设备可发信封”；e2ee-core README/AGENTS/HANDOFF；宿主网关笔记第 3 条。无线格式或操作码变化。
 - **不变的限制：** 已持有 `K_n` 的被撤者仍持有 `K_n`；15 分钟窗口与撤权后换代策略不变。网关仍看不到收件人、只拦发送者；客户端 `open` 检查才是真实边界。
 - 证据：核心 `test/ledger-keys.test.ts` 新用例（member→laptop、machine→R 转发通过；错钥 `invalid-operation`；R 发送与伪造成 personal 的 R `unauthorized`；已撤机器发送 `unauthorized`）；lab `test/gateway.test.ts`（owner/member/guest 密钥流写入放行，recovery 403）、`test/reference-model.test.ts`、`test/design-probes.test.ts`（guest 经网关转发；成员转发通过、错钥被拒）。核心 Vitest 405/405，lab Vitest 133/133（不含外部模型的 `restricted-agent.test.ts`），两包 typecheck 通过，docs check errors `[]`。不是产品 E2EE。未 push/merge。
+
+### 2026-09-26 — 五个方向的安全审查、Lab 复现与修复
+
+- **方法：** 五个并行审查方向：账本策略/编码、恶意服务器下同步、代次密钥、内容/准入、身份/加入/恢复/宿主。各方向用真实密码学与 sqlite Riverrun 写可执行复现；每个发现修复前都重跑确认。测试现断言安全行为；撤回 C1 修复会让核心与 Lab 用例同时失败。
+- **P0 C1 已修：** `installEpochEnvelope` 第三次刷新后按该视图的代次存钥。验签后恰好换代时，`K_n` 会进入 n+1 槽：被撤的 `K_n` 持有者能读后续写入，且已承诺的 `K_{n+1}` 永远装不上。现按验证时的代次安装；Lab 加密前核对承诺。
+- **P1 已修（Lab 宿主是尚未实现的生产网关的参照）：**
+  - **B1/E1：** 网关转发全部客户端头。`Stream-Closed` 可冻结控制账本；客户端自选的期望偏移可让同链头两条记录分叉。现只转发白名单头；控制流 CAS 用宿主已验证的流尾，控制流读不完即失败。
+  - **C2：** 任何可转发设备都能投毒无分帧的密钥流或抢占投递位。现网关调用核心 `assertEpochStreamAppend`：恰一个本 Org 当前代信封，发送者为认证设备、收件人已登记、签名有效。
+  - **D1：** 读端与宿主把 `header.device` 当验签公钥。现由核心 `contentAuthorKey` 从已验证账本取得：当前设备须与成员实例和 userId 一致；被撤设备只作历史作者验签；未登记钥匙拒绝。Lab 作者字段改用账本 userId/成员实例，不再用账号名。
+  - **E2：** 加入信箱对不同签名者 `INSERT OR REPLACE`。现先验签，拒绝其他签名者替换，待处理 userId 绑定首个账户。
+  - **C3：** Lab 恢复历史用未签名流字节并覆盖 keyring。现用 `recoverLedgerHistory`（已验证账本中的历史包），已安装钥匙不覆盖。
+- **P2 已修：**
+  - 核心 API：
+    - 删除 `Ledger.fromInternal`；`Ledger` 与 `LedgerView` 的内部状态在运行时不可达。
+    - `prepareDeviceAdmission` 只取 `grant.kind`。
+    - 快照原字节重试须由签名设备提交。
+    - `importRecoveryDevice` 校验两对钥匙。
+    - 设备/用户存储 `load` 不再建库。
+    - Owner 及接任者须保留 personal 或 R。
+  - Lab 宿主：
+    - 快照偏移须可比较且不超过流尾。
+    - 非当前的幂等重试不再发布。
+    - 测试时钟/故障点仅在测试模式生效。
+    - 不转发 Bearer 令牌。
+    - 登录须用一次性挑战（`e2ee-demo-device/v2`）。
+- **未改：**
+  - 恶意存储仍可阻断分钥或控制流推进，这是已声明的服务端信任前提下的可用性限制。
+  - 快照背书者资格仍按其自称状态检查（§6.1 已记载）。
+  - 被撤历史作者的身份声明无法对照当前状态核验。
+  - Lean 模型尚未加入角色推导管理与 Owner 保留规则；TS 对照模型已更新。
+  - 流读取上限（64 页 / 16 MiB）未改。
+- **证据：** 新测试套件
+  - 核心：`ledger-{authority,canonical,snapshot-trust,immutability}`、`epoch-key-install`、`snapshot-admission-retry`、`identity-recovery`；
+  - Lab：`gateway-headers`、`epoch-key-history`、`content-authority`、`host-hardening`。
+
+  读取前刷新账本后，Lab 边界攻击改为丢弃 bob 最先等待的请求。spec §8.2.2/§8.5/§10 已按 draft 更新。

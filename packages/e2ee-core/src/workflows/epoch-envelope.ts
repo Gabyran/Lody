@@ -83,11 +83,11 @@ export function installEpochEnvelope(
   const owned = new Uint8Array(frame);
   return Effect.gen(function* () {
     const keyring = yield* EpochKeyring;
-    const key = yield* openEpochEnvelope(client, recipient, sender, owned);
-    const view = yield* client.refresh();
-    const epoch = yield* epochNumber(view.inspectState().epoch.number);
-    yield* keyring.put(view.genesis, epoch, key);
-    return { _tag: 'Installed' as const, epoch: view.inspectState().epoch.number };
+    const opened = yield* openVerifiedEnvelope(client, recipient, sender, owned);
+    // Install into the slot whose commitment was checked. A later refresh may already
+    // be at the next epoch; that slot belongs to a different key.
+    yield* keyring.put(opened.genesis, opened.epoch, opened.key);
+    return { _tag: 'Installed' as const, epoch: opened.epoch as number };
   });
 }
 
@@ -140,6 +140,18 @@ export function openEpochEnvelope(
   sender: SigningPublicKey,
   input: Uint8Array
 ) {
+  return openVerifiedEnvelope(client, recipient, sender, input).pipe(
+    Effect.map((opened) => opened.key)
+  );
+}
+
+/** The key together with the exact genesis/epoch whose commitment it matched. */
+function openVerifiedEnvelope(
+  client: LedgerClient,
+  recipient: SigningPublicKey,
+  sender: SigningPublicKey,
+  input: Uint8Array
+) {
   const frame = new Uint8Array(input);
   return Effect.gen(function* () {
     const opener = yield* HpkeRecipient;
@@ -169,7 +181,7 @@ export function openEpochEnvelope(
     yield* checkEpochKey(state, key);
     const latest = yield* client.refresh();
     yield* recheckEnvelopeContext(state, latest.inspectState(), senderBytes, recipientBytes);
-    return key;
+    return { key, genesis: view.genesis, epoch: yield* epochNumber(state.epoch.number) };
   });
 }
 

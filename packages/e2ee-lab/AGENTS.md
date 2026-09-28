@@ -49,6 +49,16 @@ Local deterministic collaboration plus one attack Agent. Not product E2EE.
   `riverrunUrl` on the LabBackend handle, not `/readyz`. CLI `--test` enables
   the harness; default CLI does not. This is not OS isolation.
   Decision: [host gateway](../../.agents/notes/implemented/architecture/2026-09-18-e2ee-host-gateway.md).
+- Host forwards only allowlisted headers to Riverrun (no lifecycle headers, no
+  bearer token). Control appends use the host's verified tail as CAS offset and
+  fail on a partial read. Key appends pass `assertEpochStreamAppend`. Join
+  requests are signature-checked, never replaced by another signer, and bind a
+  pending userId to its first account. Credentials need a single-use challenge.
+  Harness clock/failpoints apply only in test mode. Snapshot offsets must be
+  within the stream tail; a non-current idempotent retry is not republished.
+- Content signing keys come from the session's verified ledger
+  (`contentAuthorKey`), never from header claims; writers use ledger `userId` and
+  membership as author fields. Sealing checks the key against the commitment.
 - Content seal uses the authenticated ledger epoch, not `max(local keys)`.
 - `DemoSession.genesis` is the signed record, NOT the Org hash. Key commitments,
   history and envelope AAD use `ledger.state.genesis`; only replay/bootstrap uses
