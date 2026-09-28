@@ -100,7 +100,8 @@ describe('persistent submission stages', () => {
     };
     await f.journal.accept(record('fixed'));
     await expect(f.journal.submit('session' as SessionId)).rejects.toThrow('Lost local receipt');
-    expect((await f.ports.storage.list())[0]?.stage).toBe('prepared');
+    // Older clients can only replay prepared bytes, so this format must be refused there.
+    expect((await f.ports.storage.list())[0]).toMatchObject({ stage: 'prepared', version: 3 });
     expect(f.writer.readStored().map((turn) => turn.id)).toEqual(['fixed']);
 
     // Simulate a new service using the same persisted intent after restart.
@@ -108,7 +109,7 @@ describe('persistent submission stages', () => {
     await recovered.retry('session' as SessionId);
     expect(resumedCommits).toEqual([false, true]);
     expect(f.writer.readStored().map((turn) => turn.id)).toEqual(['fixed']);
-    expect((await f.ports.storage.list())[0]?.stage).toBe('delivered');
+    expect((await f.ports.storage.list())[0]).toMatchObject({ stage: 'delivered', version: 2 });
   });
 
   it('writes the turn as a local commit that live transports observe', async () => {
@@ -457,7 +458,13 @@ it.each(['seen', undefined] as const)(
 );
 
 describe('workspace commit writes local operations', () => {
-  async function workspaceFixture() {
+  async function workspaceFixture(
+    initialMeta: Partial<import('@lody/shared').SessionMeta> = {
+      id: 'session',
+      machineId: 'machine',
+      userId: 'account',
+    }
+  ) {
     const { IDBFactory } = await import('fake-indexeddb');
     const { createWorkspaceSessionSendJournal } =
       await import('../src/providers/workspace-session-send-journal');
@@ -473,11 +480,7 @@ describe('workspace commit writes local operations', () => {
     });
     const doc = new LoroDoc();
     const session = createConversationSession(doc, { sessionId: 'session' as SessionId });
-    const meta = {
-      id: 'session',
-      machineId: 'machine',
-      userId: 'account',
-    } as import('@lody/shared').SessionMeta;
+    const meta = { ...initialMeta } as import('@lody/shared').SessionMeta;
     const store = {
       doc,
       sessionData: session.sessionData,
@@ -485,6 +488,7 @@ describe('workspace commit writes local operations', () => {
       getState: () => session.mirror.getState(),
       setState: (updater: never) => session.mirror.setState(updater),
     };
+    const syncedMachineIds: (string | undefined)[] = [];
     const resources = createSessionSendResources({
       acquire: async () => store as never,
       releaseRef: () => {},
@@ -505,6 +509,7 @@ describe('workspace commit writes local operations', () => {
       } as never,
       waitForTargetSync: async () => {
         events.push('sync');
+        syncedMachineIds.push(meta.machineId);
       },
     });
     const storage = createSessionSendJournalStorage({
@@ -527,6 +532,7 @@ describe('workspace commit writes local operations', () => {
       journal,
       storage,
       events,
+      syncedMachineIds,
       entry,
       async dispose() {
         stop();
@@ -572,7 +578,7 @@ describe('workspace commit writes local operations', () => {
       const saved = await f.storage.insert({
         ...record('resumed'),
         entry: f.entry('resumed'),
-        version: 2,
+        version: 3,
         stage: 'prepared',
         update: new Uint8Array(),
       });
@@ -581,6 +587,31 @@ describe('workspace commit writes local operations', () => {
       expect((await f.journal.read('resumed'))?.stage).toBe('delivered');
       expect(f.events[0]).toBe('sync');
       expect(f.session.historyWriter.readStored().map((turn) => turn.id)).toEqual(['resumed']);
+    } finally {
+      await f.dispose();
+    }
+  });
+
+  it('writes creation ownership before a resumed first message waits for its target', async () => {
+    const f = await workspaceFixture({});
+    try {
+      const creation = {
+        id: 'session',
+        machineId: 'machine',
+        userId: 'account',
+      } as import('@lody/shared').SessionMeta;
+      await f.storage.insert({
+        ...record('first'),
+        entry: f.entry('first'),
+        creation,
+        version: 3,
+        stage: 'prepared',
+        update: new Uint8Array(),
+      });
+      await f.journal.retry('session' as SessionId);
+      expect((await f.journal.read('first'))?.stage).toBe('delivered');
+      expect(f.syncedMachineIds[0]).toBe('machine');
+      expect(f.session.historyWriter.readStored().map((turn) => turn.id)).toEqual(['first']);
     } finally {
       await f.dispose();
     }

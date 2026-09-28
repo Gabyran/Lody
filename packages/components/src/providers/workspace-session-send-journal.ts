@@ -192,7 +192,17 @@ export function createWorkspaceSessionSendJournal(args: {
     commit: async (record, signal, { resumed }) => {
       const meta = await requireAvailable(record);
       await checkEligibility(record, signal);
-      const legacyUpdate = record.update?.length ? record.update : undefined;
+      if (record.creation) {
+        // Target routing resolves the owning machine from this metadata, so it
+        // precedes catch-up. Repair only absent fields; retain later edits.
+        const patch = Object.fromEntries(
+          Object.entries(record.creation).filter(([key]) => !meta || !(key in meta))
+        );
+        if (Object.keys(patch).length)
+          await runtime.writer.upsertDocMeta(getSessionRoomId(record.sessionId), patch);
+      }
+      const legacyUpdate =
+        record.version !== 3 && record.update?.length ? record.update : undefined;
       // An interrupted attempt can publish the turn before its local receipt
       // persists. Catch up first so the absence check below sees that write.
       if (resumed && !legacyUpdate) await args.waitForTargetSync(record.sessionId, signal);
@@ -233,14 +243,6 @@ export function createWorkspaceSessionSendJournal(args: {
             await runtime.writer.upsertDocMeta(getSessionRoomId(record.sessionId), {
               messageQueueUpdatedAt: Date.now(),
             });
-          if (record.creation) {
-            // Repair only absent creation fields after a partial write; retain later edits.
-            const patch = Object.fromEntries(
-              Object.entries(record.creation).filter(([key]) => !meta || !(key in meta))
-            );
-            if (Object.keys(patch).length)
-              await runtime.writer.upsertDocMeta(getSessionRoomId(record.sessionId), patch);
-          }
           await runtime.repo.flush();
         },
         signal

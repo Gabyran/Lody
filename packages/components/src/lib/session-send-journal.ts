@@ -4,7 +4,12 @@ import type { SessionSendResources } from './session-send-resources';
 import { throwIfSendAborted } from './session-send-resources';
 
 export type SessionSendRecord = {
-  version: 1 | 2;
+  /**
+   * 3 marks a prepared record whose turn is written from `entry`. Older clients
+   * can only replay prepared bytes, so they must refuse it. Every other stage
+   * stays 2: committed turns are already in the document.
+   */
+  version: 1 | 2 | 3;
   attachments?: SessionAttachmentDraft[];
   targetMachineId?: import('@lody/shared').MachineId;
   cancelRequested?: boolean;
@@ -21,7 +26,7 @@ export type SessionSendRecord = {
   stage: 'saved' | 'prepared' | 'committed' | 'delivered';
   /**
    * Operations prepared by older clients; replay imports them instead of appending.
-   * Current clients store empty bytes: older readers reject prepared records without them.
+   * Current clients store empty bytes: older readers reject non-saved records without them.
    */
   update?: Uint8Array;
   error?: string;
@@ -169,7 +174,7 @@ export function createSessionSendJournal(ports: SessionSendJournalPorts) {
             const latestRecord = (await ports.storage.list()).find((item) => item.id === record.id);
             if (!latestRecord) continue;
             record = latestRecord;
-            if (record.version !== 1 && record.version !== 2)
+            if (record.version !== 1 && record.version !== 2 && record.version !== 3)
               throw new Error('Unsupported session send record version');
             if (record.stage === 'delivered') continue;
             const preparation = new AbortController();
@@ -218,6 +223,7 @@ export function createSessionSendJournal(ports: SessionSendJournalPorts) {
                 throwIfSendAborted(preparationSignal);
                 record = {
                   ...record,
+                  version: 3,
                   update: new Uint8Array(),
                   sourceReplica: ports.preparationReplica ?? record.sourceReplica,
                   stage: 'prepared',
@@ -228,7 +234,12 @@ export function createSessionSendJournal(ports: SessionSendJournalPorts) {
               }
               if (record.stage === 'prepared') {
                 await ports.commit(record, signal, { resumed });
-                record = { ...record, stage: 'committed', error: undefined };
+                record = {
+                  ...record,
+                  version: record.version === 3 ? 2 : record.version,
+                  stage: 'committed',
+                  error: undefined,
+                };
                 await ports.storage.put(record);
               }
             } catch (error) {
