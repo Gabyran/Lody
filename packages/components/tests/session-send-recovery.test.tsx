@@ -136,6 +136,143 @@ it.each(['quit', 'reload', 'close'])(
   }
 );
 
+it('shows a new conversation as sending, then failed, then sent in its sidebar row', async () => {
+  const { SidebarRowEndSlot, SidebarSessionTitleText } =
+    await import('../src/components/sidebar-row-shared');
+  vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true);
+  await initI18n();
+  const records = new Map<string, SessionSendRecord>();
+  const resources = createSessionSendResources({
+    acquire: async () => {
+      throw new Error('unused');
+    },
+    releaseRef: () => {},
+  });
+  let reported = deferred<void>();
+  let upload = deferred<void>();
+  let uploadFails = true;
+  const journal = createSessionSendJournal({
+    resources,
+    storage: {
+      list: async () => [...records.values()],
+      insert: async (value) => {
+        const saved = { ...value, sequence: 1 };
+        records.set(saved.id, saved);
+        return saved;
+      },
+      put: async (value) => {
+        records.set(value.id, value);
+      },
+      remove: async (id) => {
+        records.delete(id);
+      },
+      close: async () => {},
+    },
+    lock: async (_key, _signal, run) => run(),
+    prepareInput: async (record, _signal, _checkpoint, report) => {
+      report(record.attachments![0]!.id, 40);
+      reported.resolve();
+      await upload.promise;
+      if (uploadFails) throw new Error('offline');
+    },
+    prepare: async () => new Uint8Array([1]),
+    commit: async () => {},
+    deliver: async () => {},
+  });
+  const runtime = {
+    accountId: 'account',
+    sendJournal: journal,
+    sendResources: resources,
+    dispose: async () => {},
+  };
+  vi.stubGlobal('ipc', undefined);
+  const rootRoute = createRootRoute({
+    component: () => (
+      <>
+        <SessionSendRecovery runtime={runtime as never} />
+        <div data-testid="row">
+          <SidebarSessionTitleText sessionId="session" selected={false}>
+            New conversation
+          </SidebarSessionTitleText>
+          <SidebarRowEndSlot sessionId="session" />
+        </div>
+      </>
+    ),
+  });
+  const router = createRouter({ routeTree: rootRoute, history: createHashHistory() });
+  const container = document.createElement('div');
+  document.body.append(container);
+  const root = createRoot(container);
+  cleanups.push(async () => {
+    upload.resolve();
+    await act(async () => root.unmount());
+    container.remove();
+    await resources.dispose();
+    await journal.close();
+  });
+  await act(async () => {
+    root.render(
+      <Provider store={createStore()}>
+        <RouterProvider router={router} />
+      </Provider>
+    );
+  });
+  await act(async () => router.load());
+  const row = () => container.querySelector('[data-testid="row"]')!;
+  const mark = () => row().querySelector<HTMLElement>('[data-session-row-indicator]');
+  const title = () => row().querySelector('span')!;
+
+  let work!: Promise<void>;
+  await act(async () => {
+    await journal.accept({
+      id: 'first',
+      sessionId: 'session' as SessionId,
+      accountId: 'account',
+      workspaceId: 'workspace',
+      sourceReplica: 'replica',
+      entry: { id: 'first', role: 'user', items: [], timestamp: 't' } as SessionHistory,
+      creation: { id: 'session', title: 'New conversation' } as never,
+      delivery: { kind: 'dispatch' },
+      attachments: [
+        {
+          id: 'video',
+          kind: 'file',
+          source: new Blob([new Uint8Array(1000)]),
+          name: 'demo.mov',
+          mimeType: 'video/quicktime',
+          lastModified: 1,
+        },
+      ],
+    });
+    work = journal.retry('session' as SessionId).catch(() => {});
+    await reported.promise;
+  });
+  expect(mark()?.dataset.sessionSendState).toBe('sending');
+  expect(mark()?.getAttribute('aria-label')).toMatch(/^Sending · .+ \/ .+/);
+  expect(title().className).toContain('text-sidebar-foreground-muted');
+
+  await act(async () => {
+    upload.resolve();
+    await work;
+  });
+  expect(mark()?.dataset.sessionSendState).toBe('failed');
+  expect(mark()?.getAttribute('aria-label')).toBe(
+    'Not sent. Open the conversation to continue sending.'
+  );
+  expect(title().className).toContain('text-sidebar-foreground-muted');
+
+  uploadFails = false;
+  reported = deferred<void>();
+  upload = deferred<void>();
+  upload.resolve();
+  await act(async () => {
+    await journal.retry('session' as SessionId);
+  });
+  expect(records.get('first')?.stage).toBe('delivered');
+  expect(mark()).toBeNull();
+  expect(title().className).not.toContain('text-sidebar-foreground-muted');
+});
+
 it.each(['saved', 'prepared'] as const)(
   'offers inline recovery for a restored %s message without starting it automatically',
   async (stage) => {

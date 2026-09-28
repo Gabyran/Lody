@@ -161,16 +161,16 @@ When actual history or queue content becomes visible, replace the placeholder by
 
 ## 8. Presentation and exit protection
 
-| Surface/stage                    | Presentation and behavior                                                                        |
-| -------------------------------- | ------------------------------------------------------------------------------------------------ |
-| Composer                         | Draft attachments before Send; remove or replace before Send                                      |
+| Surface/stage                    | Presentation and behavior                                                                                                             |
+| -------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------- |
+| Composer                         | Draft attachments before Send; remove or replace before Send                                                                          |
 | Local preparation                | The conversation opens immediately; the pending user-message row says “Waiting to send” and shows per-attachment preparation progress |
-| Remote transfer                  | The same pending user-message row says “Waiting to send · Uploading attachments”; each attachment carries its own progress             |
-| Server confirmation              | “Verifying files,” even at 100% byte transfer                                                    |
-| Failure                          | Name affected attachment and reason; preserve whole message with Retry / Cancel send             |
-| Unknown result                   | “Confirming send result”; do not claim the Daemon has not received it                            |
-| Sidebar/mobile home              | Preparation/upload/failure indicator; new sessions are openable too                              |
-| Agent processing an earlier turn | Preserve Agent activity and add a separate pending indicator; uploading does not mean Agent busy |
+| Remote transfer                  | The same pending user-message row says “Waiting to send · Uploading attachments”; each attachment carries its own progress            |
+| Server confirmation              | “Verifying files,” even at 100% byte transfer                                                                                         |
+| Failure                          | Name affected attachment and reason; preserve whole message with Retry / Cancel send                                                  |
+| Unknown result                   | “Confirming send result”; do not claim the Daemon has not received it                                                                 |
+| Sidebar/mobile home              | Preparation/upload/failure indicator; new sessions are openable too                                                                   |
+| Agent processing an earlier turn | Preserve Agent activity and add a separate pending indicator; uploading does not mean Agent busy                                      |
 
 Use i18n and accessible status names, not only spinners. Subscribe by affected message and throttle progress rather than repainting the entire list per part event. Completion updates only the original target, never navigation.
 
@@ -202,7 +202,7 @@ Storage eviction, disk damage, user clearing, and forced process termination are
 
 Recovery storage permits 100 unfinished messages and 128 MiB of message metadata plus prepared CRDT operations per account/workspace. Attachment source Blobs use the existing per-file/image size and count limits and the browser's actual IndexedDB quota; they do not consume the metadata budget or introduce a smaller per-message limit. A failed storage transaction preserves the composer. After every attachment has a ready receipt, persist the final input and release source Blobs in the same checkpoint; retain source bytes while any preparation still needs retry.
 
-Preparation-stage recovery is classified from live local work and the same account/workspace Web Locks (including waiting executors), never a persisted busy flag. Refresh on startup, conversation entry and foreground return; observing a record must not start old messages. An interrupted message has an inline Continue sending action on desktop and mobile; prepared records additionally offer disclosed discard because history publication may already have happened. A workspace recovery panel remains a secondary overview, not the only recovery entry point.
+Preparation-stage recovery is classified from live local work and the same account/workspace Web Locks (including waiting executors), never a persisted busy flag. Refresh on startup, conversation entry and foreground return; observing a record must not start old messages. An interrupted message has an inline Continue sending action on desktop and mobile; prepared records additionally offer disclosed discard because history publication may already have happened. There is no separate workspace recovery surface: the desktop sidebar row of a conversation with an unsent message shows it in the row's single status mark, sending (filling with bytes sent when measurable) or failed (a stopped or interrupted send, outranking every other row status), and a new conversation's title stays muted until its first message is in history. Folded sidebar groups roll these up with the other row statuses. Committed messages awaiting delivery read as ordinary turns there. This status is local to the device and never synchronized.
 
 ## 10. Acceptance criteria
 

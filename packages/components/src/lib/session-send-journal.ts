@@ -391,9 +391,13 @@ export function createSessionSendJournal(ports: SessionSendJournalPorts) {
       }
       if (!saved) throw new Error('Recovery storage returned no admission receipt');
       const receipt = saved;
-      snapshot = [...snapshot.filter((item) => item.id !== receipt.id), withActivity(receipt)].sort(
-        (a, b) => a.sequence - b.sequence
-      );
+      // The admitting caller starts this work next; publishing the receipt as
+      // interrupted would flash a failure between admission and submission.
+      // The next refresh or finished work restores the observed activity.
+      snapshot = [
+        ...snapshot.filter((item) => item.id !== receipt.id),
+        { ...receipt, activity: 'active' as const },
+      ].sort((a, b) => a.sequence - b.sequence);
       for (const listener of listeners) {
         try {
           listener();

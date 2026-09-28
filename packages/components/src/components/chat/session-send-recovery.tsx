@@ -1,29 +1,36 @@
 import { useSetAtom } from 'jotai';
 import { getSessionRoomId } from '@lody/shared';
 import { pendingSendSessionMetasAtom } from '@/atoms/doc-meta';
+import { sessionSendStatusesAtom } from '@/atoms/session-send-status';
 import { hasUnsavedRendererChanges } from '@/lib/renderer-unload-guards';
 import { getIpcServices, onIpcEvent } from '@/lib/electron-ipc-client';
 import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from 'react';
 import { useBlocker } from '@tanstack/react-router';
 import { useTranslation } from 'react-i18next';
 import type { WorkspaceRuntime } from '@/atoms/runtime';
-import type { SessionSendRecord } from '@/lib/session-send-journal';
+import type { SessionSendViewRecord } from '@/lib/session-send-journal';
 import {
   registerSessionSendExitGuard,
   requestSessionSendExit,
   type SessionSendExitReason,
 } from '@/lib/session-send-exit';
 import { hasPendingSessionSends } from '@/lib/session-send-journal-storage';
+import { deriveSessionSendStatuses } from '@/lib/session-send-status';
+import { toast } from '@/lib/toast';
 import { Button } from '@lody/ui/button';
 import { AlertDialog } from '@lody/ui/alert-dialog';
 
-const EMPTY: readonly SessionSendRecord[] = [];
+const EMPTY: readonly SessionSendViewRecord[] = [];
 const emptySnapshot = () => EMPTY;
 const emptySubscribe = () => () => {};
 
 type ExitRequest = { reason: SessionSendExitReason; resolve: (allow: boolean) => void };
 
-/** Small independent projection; transfer progress never subscribes the conversation tree. */
+/**
+ * Owns the workspace side of pending sends: local placeholder metadata, the
+ * sidebar send status, and exit protection. It draws no surface of its own —
+ * progress and recovery actions live on the conversation's pending rows.
+ */
 export function SessionSendRecovery({ runtime }: { runtime: WorkspaceRuntime | null }) {
   const { t } = useTranslation();
   const journal = runtime?.sendJournal;
@@ -32,8 +39,8 @@ export function SessionSendRecovery({ runtime }: { runtime: WorkspaceRuntime | n
     journal?.getSnapshot ?? emptySnapshot,
     emptySnapshot
   );
-  const pending = records.filter((record) => record.stage !== 'delivered');
   const setPendingMetas = useSetAtom(pendingSendSessionMetasAtom);
+  const setSendStatuses = useSetAtom(sessionSendStatusesAtom);
   useEffect(() => {
     const next = Object.fromEntries(
       records
@@ -45,12 +52,18 @@ export function SessionSendRecovery({ runtime }: { runtime: WorkspaceRuntime | n
     setPendingMetas((previous) =>
       JSON.stringify(previous) === JSON.stringify(next) ? previous : next
     );
-  }, [records, setPendingMetas]);
-  useEffect(() => () => setPendingMetas({}), [runtime, setPendingMetas]);
+    setSendStatuses(deriveSessionSendStatuses(records));
+  }, [records, setPendingMetas, setSendStatuses]);
+  useEffect(
+    () => () => {
+      setPendingMetas({});
+      setSendStatuses({});
+    },
+    [runtime, setPendingMetas, setSendStatuses]
+  );
 
   const exitCommitted = useRef(false);
   const [error, setError] = useState<string | null>(null);
-  const [busy, setBusy] = useState<string | null>(null);
   const [exitRequest, setExitRequest] = useState<ExitRequest | null>(null);
   const exitRef = useRef<ExitRequest | null>(null);
   const cancelRef = useRef<HTMLButtonElement>(null);
@@ -59,6 +72,10 @@ export function SessionSendRecovery({ runtime }: { runtime: WorkspaceRuntime | n
     exitRef.current = null;
     setExitRequest(null);
   }, []);
+
+  useEffect(() => {
+    if (error) toast.error(error, { id: 'session-send-recovery-error' });
+  }, [error]);
 
   useEffect(() => {
     setError(null);
@@ -186,185 +203,39 @@ export function SessionSendRecovery({ runtime }: { runtime: WorkspaceRuntime | n
     return unsubscribe;
   }, [hasPendingWork, runtime, t]);
 
-  const retry = async (record: SessionSendRecord) => {
-    if (!journal) return;
-    setBusy(record.id);
-    try {
-      await journal.retry(record.sessionId);
-      setError(null);
-    } catch (failure) {
-      setError(failure instanceof Error ? failure.message : t('sessions.sendRecoveryUnavailable'));
-    } finally {
-      setBusy(null);
-    }
-  };
-  const cancel = async (record: SessionSendRecord) => {
-    if (!journal) return;
-    setBusy(record.id);
-    try {
-      await journal.cancel(record.id);
-      void journal
-        .retry(record.sessionId)
-        .catch((failure: unknown) => console.warn('Following message remains pending', failure));
-      setError(null);
-    } catch (failure) {
-      setError(failure instanceof Error ? failure.message : t('sessions.sendRecoveryUnavailable'));
-    } finally {
-      setBusy(null);
-    }
-  };
-  const discard = async (record: SessionSendRecord) => {
-    if (!journal) return;
-    setBusy(record.id);
-    try {
-      await journal.discard(record.id);
-      void journal
-        .retry(record.sessionId)
-        .catch((failure: unknown) => console.warn('Following message remains pending', failure));
-      setError(null);
-    } catch (failure) {
-      setError(failure instanceof Error ? failure.message : t('sessions.sendRecoveryUnavailable'));
-    } finally {
-      setBusy(null);
-    }
-  };
   const destructiveExit = exitRequest?.reason === 'logout' || exitRequest?.reason === 'cache-clear';
 
   return (
-    <>
-      {pending.length > 0 || error ? (
-        <details className="fixed right-4 bottom-4 z-40 w-80 max-w-[calc(100vw-2rem)] rounded-lg border bg-background p-3 text-sm shadow-lg">
-          <summary className="cursor-pointer font-medium">
-            <span role="status">{t('sessions.pendingSends', { count: pending.length })}</span>
-          </summary>
-          {error ? (
-            <p className="mt-2 text-destructive" role="alert">
-              {error}
-            </p>
-          ) : null}
-          <ol className="mt-3 max-h-72 space-y-3 overflow-y-auto">
-            {pending.map((record) => (
-              <li key={record.id} className="space-y-2 border-t pt-2">
-                <p className="line-clamp-2 break-words">
-                  {record.entry.items
-                    ?.flatMap((item) =>
-                      item.type === 'text' && 'text' in item && typeof item.text === 'string'
-                        ? [item.text]
-                        : []
-                    )
-                    .join('\n') || t('sessions.attachmentMessage')}
-                </p>
-                <p className="text-xs text-muted-foreground">
-                  {t(
-                    record.stage === 'committed'
-                      ? 'sessions.sendWaitingForSync'
-                      : record.stage === 'prepared'
-                        ? 'sessions.sendConfirmingResult'
-                        : 'sessions.sendSavedLocally'
-                  )}
-                </p>
-                {record.attachments?.map((attachment) => (
-                  <div key={attachment.id} className="space-y-1 text-xs">
-                    <p className="truncate">{attachment.name}</p>
-                    <p>
-                      {attachment.ready
-                        ? t('sessions.attachmentPrepared')
-                        : (attachment.error ?? t('sessions.attachmentPreparingNotSent'))}
-                    </p>
-                    {!attachment.ready && !attachment.error ? (
-                      <progress
-                        className="h-1 w-full"
-                        aria-label={attachment.name}
-                        max={100}
-                        value={attachment.progress ?? 0}
-                      />
-                    ) : null}
-                  </div>
-                ))}
-                {record.error ? <p className="text-xs text-destructive">{record.error}</p> : null}
-                <div className="flex gap-2">
-                  <Button
-                    size="small"
-                    variant="secondary"
-                    disabled={busy !== null}
-                    onClick={() => {
-                      void retry(record);
-                    }}
-                  >
-                    {t('sessions.retryPendingSend')}
-                  </Button>
-                  {record.stage === 'saved' ? (
-                    <Button
-                      size="small"
-                      variant="ghost"
-                      disabled={record.cancelRequested}
-                      onClick={() => {
-                        void cancel(record);
-                      }}
-                    >
-                      {t('sessions.cancelPendingSend')}
-                    </Button>
-                  ) : null}
-                  {record.stage === 'prepared' || record.stage === 'committed' ? (
-                    <Button
-                      size="small"
-                      variant="destructive"
-                      disabled={busy !== null}
-                      onClick={() => {
-                        void discard(record);
-                      }}
-                    >
-                      {t('sessions.discardPendingSend')}
-                    </Button>
-                  ) : null}
-                </div>
-                {record.stage === 'prepared' || record.stage === 'committed' ? (
-                  <p className="text-xs text-muted-foreground">
-                    {t(
-                      record.stage === 'committed'
-                        ? 'sessions.discardPendingSendDescription'
-                        : 'sessions.discardPreparedSendDescription'
-                    )}
-                  </p>
-                ) : null}
-              </li>
-            ))}
-          </ol>
-        </details>
-      ) : null}
-      <AlertDialog.Root
-        open={exitRequest !== null}
-        onOpenChange={(open) => {
-          if (!open) finishExit(false);
-        }}
-      >
-        <AlertDialog.Content initialFocus={cancelRef}>
-          <AlertDialog.Header>
-            <AlertDialog.Title>{t('sessions.pendingSendExitTitle')}</AlertDialog.Title>
-            <AlertDialog.Description>
-              {t(
-                destructiveExit
-                  ? 'sessions.pendingSendDestructiveExit'
-                  : 'sessions.pendingSendRetainedExit'
-              )}
-            </AlertDialog.Description>
-          </AlertDialog.Header>
-          <AlertDialog.Footer>
-            <Button ref={cancelRef} onClick={() => finishExit(false)}>
-              {t('sessions.stayWithPendingSends')}
-            </Button>
-            {destructiveExit ? (
-              <Button variant="destructive" onClick={() => finishExit(true)}>
-                {t('sessions.discardPendingSendsAndContinue')}
-              </Button>
-            ) : (
-              <Button onClick={() => finishExit(true)}>
-                {t('sessions.leaveWithPendingSends')}
-              </Button>
+    <AlertDialog.Root
+      open={exitRequest !== null}
+      onOpenChange={(open) => {
+        if (!open) finishExit(false);
+      }}
+    >
+      <AlertDialog.Content initialFocus={cancelRef}>
+        <AlertDialog.Header>
+          <AlertDialog.Title>{t('sessions.pendingSendExitTitle')}</AlertDialog.Title>
+          <AlertDialog.Description>
+            {t(
+              destructiveExit
+                ? 'sessions.pendingSendDestructiveExit'
+                : 'sessions.pendingSendRetainedExit'
             )}
-          </AlertDialog.Footer>
-        </AlertDialog.Content>
-      </AlertDialog.Root>
-    </>
+          </AlertDialog.Description>
+        </AlertDialog.Header>
+        <AlertDialog.Footer>
+          <Button ref={cancelRef} onClick={() => finishExit(false)}>
+            {t('sessions.stayWithPendingSends')}
+          </Button>
+          {destructiveExit ? (
+            <Button variant="destructive" onClick={() => finishExit(true)}>
+              {t('sessions.discardPendingSendsAndContinue')}
+            </Button>
+          ) : (
+            <Button onClick={() => finishExit(true)}>{t('sessions.leaveWithPendingSends')}</Button>
+          )}
+        </AlertDialog.Footer>
+      </AlertDialog.Content>
+    </AlertDialog.Root>
   );
 }

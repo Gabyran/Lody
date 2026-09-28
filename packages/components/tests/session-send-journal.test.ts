@@ -686,6 +686,8 @@ describe('interrupted work observation', () => {
       },
     });
     await f.journal.accept(record('retry'));
+    // Admission never reads as an interrupted send before its work starts.
+    expect(f.journal.getSnapshot()[0]?.activity).toBe('active');
     const retry = f.journal.retry('session' as SessionId);
     const rejected = expect(retry).rejects.toThrow('offline');
     await entered.promise;

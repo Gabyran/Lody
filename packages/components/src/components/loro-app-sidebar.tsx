@@ -196,11 +196,16 @@ import {
   SessionRowOpenedByMenuItems,
   buildSessionRowOpenedByTreeSlot,
   summarizeSidebarGroupActivity,
+  useSessionUnsentNewConversation,
   useSidebarGroupActivityDescription,
+  withSessionSendStates,
   type SessionRowOpenedByTreeSlot,
   type SidebarGroupActivity,
   SIDEBAR_ROW_LIST_CLASS,
+  SIDEBAR_UNSENT_TITLE_CLASS,
 } from '@/components/sidebar-row-shared';
+import { sessionSendStatesAtom } from '@/atoms/session-send-status';
+import type { SessionSendState } from '@/lib/session-send-status';
 import {
   buildOpenedBySessionTree,
   countOpenedByTreeRoots,
@@ -678,7 +683,17 @@ const LocalProjectSessionItem = memo(function LocalProjectSessionItem({
     if (!canRename) return;
     setRenameTarget({ sessionId: session.id, initialTitle: title });
   }, [canRename, session.id, title]);
-  const titleContent = <span className="truncate font-normal">{title}</span>;
+  const isUnsent = useSessionUnsentNewConversation(session.id);
+  const titleContent = (
+    <span
+      className={cn(
+        'truncate font-normal',
+        isUnsent && !showSelectedState && SIDEBAR_UNSENT_TITLE_CLASS
+      )}
+    >
+      {title}
+    </span>
+  );
   // Copy URL is always available (a private link still works for the owner);
   // sharing is a separate menu item that only appears when the conversation
   // isn't already team-visible.
@@ -765,6 +780,7 @@ const LocalProjectSessionItem = memo(function LocalProjectSessionItem({
             has one, with a faint worktree glyph just to its left; the Archive
             button replaces it on desktop hover. */}
         <SidebarRowEndSlot
+          sessionId={session.id}
           isWaitingPermission={isWaitingPermission}
           isWorking={isWorking}
           hasUnreadMessages={hasUnreadMessages}
@@ -1057,13 +1073,15 @@ const menuTriggerOpenClassName =
 function summarizeLocalSessionsActivity(
   sessions: Iterable<SessionMeta>,
   childSessionsByParent: Map<string, SessionMeta[]>,
-  liveSessionStatuses: ReadonlyMap<string, SessionStatus>
+  liveSessionStatuses: ReadonlyMap<string, SessionStatus>,
+  sendStates: Readonly<Record<string, SessionSendState>>
 ): SidebarGroupActivity {
-  const rows: EffectiveSessionActivitySummary[] = [];
+  const rows: (EffectiveSessionActivitySummary & { sendState?: SessionSendState })[] = [];
   for (const session of sessions) {
-    rows.push(
-      getEffectiveSessionActivitySummary(session, childSessionsByParent, liveSessionStatuses)
-    );
+    rows.push({
+      ...getEffectiveSessionActivitySummary(session, childSessionsByParent, liveSessionStatuses),
+      sendState: sendStates[session.id],
+    });
   }
   return summarizeSidebarGroupActivity(rows);
 }
@@ -1183,16 +1201,25 @@ export const LocalProjectItem = memo(function LocalProjectItem({
   // A folded project still says whether anything inside it needs the user: the
   // mark each hidden row would draw, rolled up. Pinned Sessions are not here —
   // they stay visible in Pinned, so folding the project does not hide them.
+  const sendStates = useAtomValue(sessionSendStatesAtom);
   const collapsedActivity = useMemo(
     () =>
       collapsed && !removalState
         ? summarizeLocalSessionsActivity(
             sessionsForProject,
             childSessionsByParent,
-            liveSessionStatuses
+            liveSessionStatuses,
+            sendStates
           )
         : null,
-    [childSessionsByParent, collapsed, liveSessionStatuses, removalState, sessionsForProject]
+    [
+      childSessionsByParent,
+      collapsed,
+      liveSessionStatuses,
+      removalState,
+      sendStates,
+      sessionsForProject,
+    ]
   );
   const collapsedActivityDescription = useSidebarGroupActivityDescription(collapsedActivity);
   const ariaLabel = [baseAriaLabel, removalStateLabel, collapsedActivityDescription]
@@ -2055,6 +2082,8 @@ export function LoroAppSidebar({
     () => repoSessions.filter((task) => !task.isPinned),
     [repoSessions]
   );
+  // Progress-free: changes only when a local send starts, fails or finishes.
+  const sendStates = useAtomValue(sessionSendStatesAtom);
   const handleRenameSession = useCallback(
     (sessionId: string, nextTitle: string) => {
       return updateSessionTitle(sessionId as SessionId, nextTitle);
@@ -2777,7 +2806,8 @@ export function LoroAppSidebar({
                       ) ?? []
                   ),
                   childSessionsByParent,
-                  liveSessionStatuses
+                  liveSessionStatuses,
+                  sendStates
                 )
               : null;
           const dividerRight =
@@ -3244,8 +3274,12 @@ export function LoroAppSidebar({
   const githubWorktreesLabel = useMemo(() => t('sidebar.githubWorktrees', 'GitHub Worktrees'), [t]);
   const githubWorktreesCollapsedActivity = useMemo(
     () =>
-      githubWorktreesSectionCollapsed ? summarizeSidebarGroupActivity(workspaceRepoSessions) : null,
-    [githubWorktreesSectionCollapsed, workspaceRepoSessions]
+      githubWorktreesSectionCollapsed
+        ? summarizeSidebarGroupActivity(
+            withSessionSendStates(workspaceRepoSessions, (row) => row.sessionId, sendStates)
+          )
+        : null,
+    [githubWorktreesSectionCollapsed, sendStates, workspaceRepoSessions]
   );
   const sidebarTopContent = hasWorkspaceSidebarTopContent(
     localProjectSections.length,
