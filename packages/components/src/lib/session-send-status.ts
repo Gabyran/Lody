@@ -94,23 +94,58 @@ export function selectPendingQueueRecords(
     (record) =>
       record.sessionId === sessionId &&
       isQueueBoundSendRecord(record) &&
-      (record.stage === 'saved' || record.stage === 'prepared') &&
-      !record.cancelRequested &&
+      isUnsent(record) &&
       !queuedTurnIds.has(record.id)
   );
 }
 
+function isUnsent(record: SessionSendViewRecord): boolean {
+  return (record.stage === 'saved' || record.stage === 'prepared') && !record.cancelRequested;
+}
+
+/**
+ * A text-only message has nothing to upload: it reaches history or the queue
+ * within a few local writes. Until it fails or is interrupted it reads as sent
+ * everywhere, never as pending.
+ */
+export function isInstantSendRecord(record: SessionSendViewRecord): boolean {
+  return (
+    isUnsent(record) &&
+    !record.attachments?.length &&
+    !record.error &&
+    record.activity !== 'interrupted'
+  );
+}
+
+/**
+ * Instant messages the conversation shows as ordinary turns before history
+ * holds them. Only a session's leading run qualifies: a message waiting behind
+ * an earlier upload stays a pending row, or it would render above that upload.
+ */
+export function selectInstantHistoryRecords(
+  records: readonly SessionSendViewRecord[]
+): SessionSendViewRecord[] {
+  const blocked = new Set<string>();
+  const selected: SessionSendViewRecord[] = [];
+  for (const record of [...records].sort((a, b) => a.sequence - b.sequence)) {
+    if (!isUnsent(record) || blocked.has(record.sessionId)) continue;
+    if (!isInstantSendRecord(record)) blocked.add(record.sessionId);
+    else if (!isQueueBoundSendRecord(record)) selected.push(record);
+  }
+  return selected;
+}
+
 /**
  * Only messages not yet in history count, the same set the conversation's
- * pending rows show: a committed message already reads as an ordinary turn.
+ * pending rows show: a committed message already reads as an ordinary turn,
+ * and an instant one already reads as sent.
  */
 export function deriveSessionSendStatuses(
   records: readonly SessionSendViewRecord[]
 ): Record<string, SessionSendStatus> {
   const bySession = new Map<string, SessionSendViewRecord[]>();
   for (const record of records) {
-    if (record.stage !== 'saved' && record.stage !== 'prepared') continue;
-    if (record.cancelRequested) continue;
+    if (!isUnsent(record) || isInstantSendRecord(record)) continue;
     const list = bySession.get(record.sessionId);
     if (list) list.push(record);
     else bySession.set(record.sessionId, [record]);

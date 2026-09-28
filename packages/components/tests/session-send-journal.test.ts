@@ -429,7 +429,13 @@ describe('workspace commit writes local operations', () => {
       id: 'session',
       machineId: 'machine',
       userId: 'account',
-    }
+    },
+    requestSessionSteer?: (
+      session: ReturnType<
+        typeof import('../src/lib/conversation-view').createConversationSession
+      >,
+      request: { userTurnId: string }
+    ) => Promise<import('@lody/shared').SessionSteerResponse>
   ) {
     const { IDBFactory } = await import('fake-indexeddb');
     const { createWorkspaceSessionSendJournal } =
@@ -461,6 +467,7 @@ describe('workspace commit writes local operations', () => {
     });
     const events: string[] = [];
     const dispatched: string[] = [];
+    const steered: string[] = [];
     const stop = doc.subscribe((event) => events.push(`doc:${event.by}`));
     const journal = createWorkspaceSessionSendJournal({
       accountId: 'account',
@@ -475,6 +482,11 @@ describe('workspace commit writes local operations', () => {
         requestSessionDispatchTurn: async (_machineId: string, request: { userTurnId: string }) => {
           dispatched.push(request.userTurnId);
           return { accepted: true };
+        },
+        requestSessionSteer: async (_machineId: string, request: { userTurnId: string }) => {
+          steered.push(request.userTurnId);
+          if (!requestSessionSteer) throw new Error('Unexpected steer');
+          return requestSessionSteer(session, request);
         },
       } as never,
       waitForTargetSync: async () => {
@@ -513,6 +525,7 @@ describe('workspace commit writes local operations', () => {
       storage,
       events,
       dispatched,
+      steered,
       syncedMachineIds,
       entry,
       insertPrepared,
@@ -557,6 +570,68 @@ describe('workspace commit writes local operations', () => {
       await f.dispose();
     }
   });
+
+  it.each([
+    ['stale-turn', 'requeued', 'recovered'],
+    ['busy', 'requeued', 'recovered'],
+    ['unsupported', 'requeued', 'recovered'],
+    ['stale-turn', 'kept', 'uncertain'],
+    ['delivery-unknown', 'delivery_unknown', 'uncertain'],
+  ] as const)(
+    'settles a daemon-owned %s guide by its history (%s): %s',
+    async (disposition, history, expected) => {
+      const f = await workspaceFixture(undefined, async (session, request) => {
+        // The daemon writes its verdict into history before it answers.
+        if (history === 'requeued')
+          await session.sessionData.commands.applyHistoryAction({
+            kind: 'user-status',
+            turnId: request.userTurnId,
+            status: 'pending',
+            requeueUndelivered: true,
+          });
+        if (history === 'delivery_unknown')
+          await session.sessionData.commands.applyHistoryAction({
+            kind: 'user-status',
+            turnId: request.userTurnId,
+            status: 'delivery_unknown',
+            steerProjection: true,
+          });
+        return {
+          type: 'session/steer_response',
+          sessionId: 'session' as SessionId,
+          userTurnId: request.userTurnId,
+          applied: false,
+          recoveryOwned: true,
+          disposition,
+        };
+      });
+      try {
+        await f.journal.accept({
+          ...record('guide'),
+          entry: { ...f.entry('guide'), status: 'pending_apply' },
+          delivery: { kind: 'guide', expectedTurnId: 'assistant-turn' },
+        });
+        const retry = f.journal.retry('session' as SessionId);
+        if (expected === 'recovered') await retry;
+        else await expect(retry).rejects.toThrow('Guide outcome is uncertain');
+        const saved = await f.journal.read('guide');
+        expect(f.steered).toEqual(['guide']);
+        // The daemon owns recovery: the renderer never republishes a dispatch.
+        expect(f.dispatched).toEqual([]);
+        expect(f.meta.latestUserMsgId).toBeUndefined();
+        if (expected === 'recovered') {
+          expect(saved).toMatchObject({ stage: 'delivered', guideOffer: 'recovered' });
+          expect(saved?.error).toBeUndefined();
+          expect(f.session.historyWriter.read('guide')?.status).toBe('pending');
+        } else {
+          expect(saved).toMatchObject({ stage: 'committed', guideOffer: 'offered' });
+          expect(saved?.error).toMatch(/Guide outcome is uncertain/);
+        }
+      } finally {
+        await f.dispose();
+      }
+    }
+  );
 
   it('enqueues a queued message with a local commit on the live replica', async () => {
     const f = await workspaceFixture();

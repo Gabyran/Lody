@@ -30,7 +30,8 @@ export type SessionSendRecord = {
    */
   update?: Uint8Array;
   error?: string;
-  guideOffer?: 'offered' | 'applied' | 'not-applied';
+  /** `recovered`: the daemon requeued or settled the guide itself; the renderer must not dispatch it. */
+  guideOffer?: 'offered' | 'applied' | 'not-applied' | 'recovered';
 };
 
 export type SessionSendViewRecord = SessionSendRecord & {

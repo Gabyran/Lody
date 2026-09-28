@@ -1175,7 +1175,13 @@ describe('useSessionActions', () => {
     }
   );
 
-  it('does not redispatch a steer rejected for a reason other than an ended turn', async () => {
+  it.each([
+    [undefined, 'pending_apply', 'uncertain'],
+    [true, 'pending', 'requeued'],
+    [true, 'pending_apply', 'uncertain'],
+  ] as const)(
+    'never redispatches a stale-turn steer (daemon-owned: %s, history %s): %s',
+    async (recoveryOwned, statusAfterRpc, expected) => {
     const sessionId = 'session-steer-stale' as SessionId;
     const userTurnId = 'user-turn-steer-stale';
     const machineId = 'machine-1' as MachineId;
@@ -1210,25 +1216,33 @@ describe('useSessionActions', () => {
         waitUntilSynced: vi.fn(async () => undefined),
       })
     ) as unknown as WorkspaceRuntime['withSessionStore'];
-    runtime.requestSessionSteer = vi.fn(async () => ({
-      type: 'session/steer_response' as const,
-      sessionId,
-      userTurnId,
-      applied: false,
-      disposition: 'stale-turn' as const,
-    })) as WorkspaceRuntime['requestSessionSteer'];
+    runtime.requestSessionSteer = vi.fn(async () => {
+      // A daemon-owned rejection has already requeued the turn in history.
+      history[0].status = statusAfterRpc;
+      return {
+        type: 'session/steer_response' as const,
+        sessionId,
+        userTurnId,
+        applied: false,
+        ...(recoveryOwned ? { recoveryOwned } : {}),
+        disposition: 'stale-turn' as const,
+      };
+    }) as WorkspaceRuntime['requestSessionSteer'];
     runtime.requestSessionDispatchTurn =
       requestSessionDispatchTurn as WorkspaceRuntime['requestSessionDispatchTurn'];
     const actions = await renderActions(runtime);
 
-    await expect(
-      actions.requestSessionSteer(sessionId, 'assistant:user-1', userTurnId, { machineId })
-    ).rejects.toThrow('Guide outcome is uncertain');
+    const result = actions.requestSessionSteer(sessionId, 'assistant:user-1', userTurnId, {
+      machineId,
+    });
+    if (expected === 'requeued') await expect(result).resolves.toBe(false);
+    else await expect(result).rejects.toThrow('Guide outcome is uncertain');
 
-    expect(history[0]).toMatchObject({ status: 'pending_apply' });
+    expect(history[0]).toMatchObject({ status: statusAfterRpc });
     expect(setState).not.toHaveBeenCalled();
     expect(requestSessionDispatchTurn).not.toHaveBeenCalled();
-  });
+    }
+  );
 
   it('closes only the selected tab while retaining all lifecycle and dispatch state', async () => {
     const tree = createContainmentSessions('close', false);

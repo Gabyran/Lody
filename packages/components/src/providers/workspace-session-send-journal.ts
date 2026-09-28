@@ -7,6 +7,7 @@ import {
   type BillingQuotaEntitlement,
 } from '@lody/shared';
 import { prepareDraftAttachments } from '../lib/session-attachment-preparation';
+import { readGuideTurnOutcome } from '../lib/session-guide-outcome';
 import {
   getSessionRoomId,
   isLoroRepoDocDeleted,
@@ -255,19 +256,20 @@ export function createWorkspaceSessionSendJournal(args: {
       let dispatch = record.delivery.kind === 'dispatch';
       if (record.delivery.kind === 'guide') {
         let offer = record.guideOffer;
-        if (offer === 'offered') {
-          const read = await runtime.sendResources.withSessionStore(
-            record.sessionId,
-            (store) => store.sessionData.history.readTurn(record.id),
-            signal
+        const readGuide = async () =>
+          readGuideTurnOutcome(
+            await runtime.sendResources.withSessionStore(
+              record.sessionId,
+              (store) => store.sessionData.history.readTurn(record.id),
+              signal
+            )
           );
-          if (read.state !== 'ready' || !read.turn.status || read.turn.status === 'pending_apply') {
+        if (offer === 'offered') {
+          const outcome = await readGuide();
+          if (outcome === 'uncertain') {
             throw new Error('Guide outcome is uncertain; retry only reconciles the original turn');
           }
-          offer =
-            normalizeSessionTurnInputConfig(read.turn.inputConfig)?._lodyDeliveryKind === 'steer'
-              ? 'applied'
-              : 'not-applied';
+          offer = outcome;
           await checkpoint({ guideOffer: offer });
         }
         if (!offer) {
@@ -288,25 +290,41 @@ export function createWorkspaceSessionSendJournal(args: {
         }
         if (!offer) {
           await checkpoint({ guideOffer: 'offered' });
+          const steerRequest = {
+            sessionId: record.sessionId,
+            expectedTurnId: record.delivery.expectedTurnId,
+            userTurnId: record.id,
+            userId,
+            timestamp: record.entry.timestamp,
+            inputConfig,
+          };
           const [rpc, sync] = await Promise.allSettled([
-            runtime.requestSessionSteer(machineId as MachineId, {
-              sessionId: record.sessionId,
-              expectedTurnId: record.delivery.expectedTurnId,
-              userTurnId: record.id,
-              userId,
-              timestamp: record.entry.timestamp,
-              inputConfig,
-            }),
+            runtime.requestSessionSteer(machineId as MachineId, steerRequest),
             args.waitForTargetSync(record.sessionId, signal),
           ]);
           if (rpc.status === 'rejected') throw rpc.reason;
-          if (rpc.value?.applied) offer = 'applied';
-          else if (rpc.value?.disposition === 'no-active-turn') offer = 'not-applied';
+          let response = rpc.value;
+          if (response?.recoveryOwned && response.disposition === 'promotion-failed') {
+            // The daemon owns this recovery; retry through it, never by dispatching here.
+            response = await runtime.requestSessionSteer(machineId as MachineId, steerRequest);
+          }
+          if (response?.applied) offer = 'applied';
+          else if (response?.recoveryOwned) {
+            // The daemon already requeued (or settled) a guide it proved undelivered.
+            // Its history write, not the disposition, says whether it did.
+            await args.waitForTargetSync(record.sessionId, signal);
+            if ((await readGuide()) === 'uncertain')
+              throw new Error(
+                response.error ?? 'Guide outcome is uncertain; the original turn is retained'
+              );
+            offer = 'recovered';
+          } else if (response?.disposition === 'no-active-turn') offer = 'not-applied';
           else throw new Error('Guide outcome is uncertain; the original turn is retained');
           await checkpoint({ guideOffer: offer });
           if (sync.status === 'rejected') throw sync.reason;
         }
         throwIfSendAborted(signal);
+        if (offer === 'recovered') return;
         await runtime.sendResources.withSessionStore(
           record.sessionId,
           (store) =>

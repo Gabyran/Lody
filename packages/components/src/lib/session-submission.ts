@@ -1,5 +1,6 @@
 import type { SessionAttachmentDraft } from '@/lib/session-attachment-draft';
 import { acceptSessionUserTurn } from './session-send-admission';
+import { readGuideTurnOutcome } from './session-guide-outcome';
 import type {
   SessionHistory,
   SessionHistoryInput,
@@ -420,7 +421,8 @@ export function createSessionSubmission(ports: SessionSubmissionPorts) {
         onRpcDelivered(sessionId, userTurnId);
         return true;
       }
-      if (completed?.guideOffer === 'not-applied') return false;
+      if (completed?.guideOffer === 'not-applied' || completed?.guideOffer === 'recovered')
+        return false;
       throw new Error('Guide outcome is uncertain; the original message is retained');
     }
     const entry = await runtime.sendResources.withSessionStore(sessionId, async (sessionStore) => {
@@ -515,8 +517,18 @@ export function createSessionSubmission(ports: SessionSubmissionPorts) {
       );
       return false;
     }
-    if (response?.recoveryOwned && response.disposition === 'no-active-turn') {
-      return false;
+    if (response?.recoveryOwned) {
+      if (response.disposition === 'no-active-turn') return false;
+      // stale-turn, busy and unsupported are proven undelivered too, and the
+      // daemon requeues the turn itself. Its history write says whether it did.
+      const outcome = await runtime.sendResources.withSessionStore(
+        sessionId,
+        async (sessionStore, signal) => {
+          await sessionStore.waitUntilSynced(signal);
+          return readGuideTurnOutcome(await sessionStore.sessionData.history.readTurn(userTurnId));
+        }
+      );
+      if (outcome !== 'uncertain') return outcome === 'applied';
     }
     log(
       'session steer not applied for %s/%s: %s',

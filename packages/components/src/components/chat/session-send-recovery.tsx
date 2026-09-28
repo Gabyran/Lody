@@ -1,10 +1,22 @@
 import { useSetAtom } from 'jotai';
-import { getSessionRoomId } from '@lody/shared';
+import { getSessionRoomId, type WorkspaceId } from '@lody/shared';
 import { pendingSendSessionMetasAtom } from '@/atoms/doc-meta';
+import {
+  acceptedSessionHistoryProjectionsAtom,
+  addAcceptedSessionHistoryProjection,
+  type AcceptedSessionHistoryProjection,
+} from '@/atoms/session-history-projection';
 import { sessionSendStatusesAtom } from '@/atoms/session-send-status';
 import { hasUnsavedRendererChanges } from '@/lib/renderer-unload-guards';
 import { getIpcServices, onIpcEvent } from '@/lib/electron-ipc-client';
-import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from 'react';
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+  useSyncExternalStore,
+} from 'react';
 import { useBlocker } from '@tanstack/react-router';
 import { useTranslation } from 'react-i18next';
 import type { WorkspaceRuntime } from '@/atoms/runtime';
@@ -15,7 +27,7 @@ import {
   type SessionSendExitReason,
 } from '@/lib/session-send-exit';
 import { hasPendingSessionSends } from '@/lib/session-send-journal-storage';
-import { deriveSessionSendStatuses } from '@/lib/session-send-status';
+import { deriveSessionSendStatuses, selectInstantHistoryRecords } from '@/lib/session-send-status';
 import { toast } from '@/lib/toast';
 import { Button } from '@lody/ui/button';
 import { AlertDialog } from '@lody/ui/alert-dialog';
@@ -41,6 +53,25 @@ export function SessionSendRecovery({ runtime }: { runtime: WorkspaceRuntime | n
   );
   const setPendingMetas = useSetAtom(pendingSendSessionMetasAtom);
   const setSendStatuses = useSetAtom(sessionSendStatusesAtom);
+  const setHistoryProjections = useSetAtom(acceptedSessionHistoryProjectionsAtom);
+  const instantHistory = selectInstantHistoryRecords(records);
+  const instantHistoryKey = instantHistory.map((record) => record.id).join('\n');
+  const instantHistoryRef = useRef(instantHistory);
+  instantHistoryRef.current = instantHistory;
+  useLayoutEffect(() => {
+    // Keyed on membership: journal snapshots change at upload-progress rate, and
+    // every projection change rebuilds the open conversation's view wrapper.
+    // Layout timing: the stream drops these pending rows in the same render, so
+    // the projected turn must land before paint.
+    let next: ReadonlyMap<string, AcceptedSessionHistoryProjection> = new Map();
+    for (const record of instantHistoryRef.current)
+      next = addAcceptedSessionHistoryProjection(next, {
+        workspaceId: record.workspaceId as WorkspaceId,
+        sessionId: record.sessionId,
+        entry: record.entry,
+      });
+    setHistoryProjections(next);
+  }, [instantHistoryKey, setHistoryProjections]);
   useEffect(() => {
     const next = Object.fromEntries(
       records
@@ -58,8 +89,9 @@ export function SessionSendRecovery({ runtime }: { runtime: WorkspaceRuntime | n
     () => () => {
       setPendingMetas({});
       setSendStatuses({});
+      setHistoryProjections(new Map());
     },
-    [runtime, setPendingMetas, setSendStatuses]
+    [runtime, setHistoryProjections, setPendingMetas, setSendStatuses]
   );
 
   const exitCommitted = useRef(false);

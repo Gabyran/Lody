@@ -8,7 +8,7 @@ import { getSessionFileIcon } from '@/components/ai-gui/session-file-card';
 import { ConversationColumn } from '@/components/shared/conversation-column';
 import type { SessionAttachmentDraft } from '@/lib/session-attachment-draft';
 import type { SessionSendRecord, SessionSendViewRecord } from '@/lib/session-send-journal';
-import { isQueueBoundSendRecord } from '@/lib/session-send-status';
+import { isQueueBoundSendRecord, selectInstantHistoryRecords } from '@/lib/session-send-status';
 import { cn } from '@/lib/utils';
 import { Button } from '@lody/ui/button';
 import { Progress } from '@lody/ui/progress';
@@ -415,11 +415,14 @@ export function SessionPendingMessages({ sessionId }: { sessionId: SessionId }) 
         setFailure(error instanceof Error ? error.message : t('sessions.sendRecoveryUnavailable'))
       );
   }, [journal, sessionId, t]);
-  // Queue-bound messages render in the queue sheet, never here.
+  // Queue-bound messages render in the queue sheet, and instant ones as ordinary
+  // turns projected into the conversation; neither renders here.
+  const instant = new Set(selectInstantHistoryRecords(records).map((record) => record.id));
   const pending = records.filter(
     (record) =>
       record.sessionId === sessionId &&
       !isQueueBoundSendRecord(record) &&
+      !instant.has(record.id) &&
       (record.stage === 'saved' || record.stage === 'prepared')
   );
   if (!pending.length) return null;

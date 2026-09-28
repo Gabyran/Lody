@@ -4,7 +4,7 @@ import { useTranslation } from 'react-i18next';
 import { SessionSendProgressRing } from '@/components/sidebar-row-shared';
 import type { SessionAttachmentDraft } from '@/lib/session-attachment-draft';
 import type { SessionSendViewRecord } from '@/lib/session-send-journal';
-import { deriveSessionSendRecordProgress } from '@/lib/session-send-status';
+import { deriveSessionSendRecordProgress, isInstantSendRecord } from '@/lib/session-send-status';
 import { cn } from '@/lib/utils';
 import { IconAction, TextAction } from './message-queue-row';
 
@@ -73,6 +73,8 @@ export function PendingQueueRow({
   const { t } = useTranslation();
   const status = deriveSessionSendRecordProgress(record);
   const failed = status.state === 'failed';
+  // Nothing to upload: it reads as queued, not as sending.
+  const instant = isInstantSendRecord(record);
   const attachments = record.attachments ?? [];
   const inline = attachments.slice(0, MAX_INLINE_ATTACHMENTS);
   const overflow = attachments.length - inline.length;
@@ -114,7 +116,10 @@ export function PendingQueueRow({
         ) : null}
         {/* Muted until it is a real queue item, like an unsent conversation's title. */}
         <div
-          className="min-w-0 flex-1 overflow-hidden text-xs leading-snug text-foreground/55"
+          className={cn(
+            'min-w-0 flex-1 overflow-hidden text-xs leading-snug',
+            instant ? 'text-foreground/80' : 'text-foreground/55'
+          )}
           style={{ display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical' }}
         >
           {queuedText(record)}
@@ -136,7 +141,7 @@ export function PendingQueueRow({
               }}
             />
           </>
-        ) : (
+        ) : instant ? null : (
           <span
             role="status"
             className="flex items-center gap-1 text-[11px] text-muted-foreground tabular-nums"

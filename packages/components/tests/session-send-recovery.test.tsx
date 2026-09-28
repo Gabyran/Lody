@@ -400,6 +400,187 @@ it.each(['saved', 'prepared'] as const)(
   }
 );
 
+it('shows a text-only send as an ordinary turn at once, and as pending only when it fails', async () => {
+  const { SessionPendingMessages } = await import('../src/components/chat/session-pending-messages');
+  const { SidebarRowEndSlot } = await import('../src/components/sidebar-row-shared');
+  const { acceptedSessionHistoryProjectionsAtom } =
+    await import('../src/atoms/session-history-projection');
+  const { runtimeAtom } = await import('../src/atoms/runtime');
+  const { currentWorkspaceIdAtom, currentWorkspaceSlugAtom } =
+    await import('../src/atoms/workspace-context');
+  vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true);
+  vi.stubGlobal('ipc', undefined);
+  await initI18n();
+  const records = new Map<string, SessionSendRecord>();
+  const resources = createSessionSendResources({
+    acquire: async () => {
+      throw new Error('unused');
+    },
+    releaseRef: () => {},
+  });
+  const uploading = deferred<void>();
+  const upload = deferred<void>();
+  let commit = deferred<void>();
+  let commitFails = false;
+  const journal = createSessionSendJournal({
+    resources,
+    storage: {
+      list: async () => [...records.values()],
+      insert: async (value) => {
+        const saved = { ...value, sequence: records.size + 1 };
+        records.set(saved.id, saved);
+        return saved;
+      },
+      put: async (value) => {
+        records.set(value.id, value);
+      },
+      remove: async (id) => {
+        records.delete(id);
+      },
+      close: async () => {},
+    },
+    lock: async (_key, _signal, run) => run(),
+    prepareInput: async (record) => {
+      if (!record.attachments?.length) return;
+      uploading.resolve();
+      await upload.promise;
+    },
+    prepare: async () => new Uint8Array([1]),
+    commit: async () => {
+      if (commitFails) throw new Error('offline');
+      await commit.promise;
+    },
+    deliver: async () => {},
+  });
+  const runtime = {
+    accountId: 'account',
+    workspaceId: 'workspace',
+    workspaceSlug: 'workspace',
+    sendJournal: journal,
+    sendResources: resources,
+    dispose: async () => {},
+  };
+  const store = createStore();
+  store.set(currentWorkspaceIdAtom, 'workspace' as never);
+  store.set(currentWorkspaceSlugAtom, 'workspace');
+  store.set(runtimeAtom, runtime as never);
+  const projected = () =>
+    [...store.get(acceptedSessionHistoryProjectionsAtom).values()].map(
+      (projection) => projection.entry.id
+    );
+  const rootRoute = createRootRoute({
+    component: () => (
+      <>
+        <SessionSendRecovery runtime={runtime as never} />
+        <div data-testid="stream">
+          <SessionPendingMessages sessionId={'session' as SessionId} />
+        </div>
+        <div data-testid="row">
+          <SidebarRowEndSlot sessionId="session" />
+        </div>
+      </>
+    ),
+  });
+  const router = createRouter({ routeTree: rootRoute, history: createHashHistory() });
+  const container = document.createElement('div');
+  document.body.append(container);
+  const root = createRoot(container);
+  cleanups.push(async () => {
+    upload.resolve();
+    commit.resolve();
+    await act(async () => root.unmount());
+    container.remove();
+    await resources.dispose();
+    await journal.close();
+  });
+  await act(async () => {
+    root.render(
+      <Provider store={store}>
+        <RouterProvider router={router} />
+      </Provider>
+    );
+  });
+  await act(async () => router.load());
+  const stream = () => container.querySelector('[data-testid="stream"]')!;
+  const mark = () => container.querySelector<HTMLElement>('[data-session-row-indicator]');
+  const accept = (id: string, withAttachment = false) =>
+    journal.accept({
+      id,
+      sessionId: 'session' as SessionId,
+      accountId: 'account',
+      workspaceId: 'workspace',
+      sourceReplica: 'replica',
+      entry: {
+        id,
+        role: 'user',
+        items: [{ type: 'text', text: `${id} text` }],
+        timestamp: 't',
+      } as SessionHistory,
+      delivery: { kind: 'dispatch' },
+      ...(withAttachment
+        ? {
+            attachments: [
+              {
+                id: `${id}-file`,
+                kind: 'file' as const,
+                source: new Blob(['bytes']),
+                name: 'notes.txt',
+                mimeType: 'text/plain',
+                lastModified: 1,
+              },
+            ],
+          }
+        : {}),
+    });
+
+  // Commit has not landed: the message is already a conversation turn, with no
+  // pending row and no sidebar sending mark.
+  let work!: Promise<void>;
+  await act(async () => {
+    await accept('text');
+    work = journal.retry('session' as SessionId).catch(() => {});
+  });
+  expect(projected()).toEqual(['text']);
+  expect(stream().textContent).toBe('');
+  expect(mark()).toBeNull();
+
+  await act(async () => {
+    commit.resolve();
+    await work;
+  });
+  expect(records.get('text')?.stage).toBe('delivered');
+  expect(projected()).toEqual([]);
+
+  // Behind an earlier upload it keeps its place in line as a pending row.
+  commit = deferred<void>();
+  await act(async () => {
+    await accept('upload', true);
+    await accept('behind');
+    work = journal.retry('session' as SessionId).catch(() => {});
+    await uploading.promise;
+  });
+  expect(projected()).toEqual([]);
+  expect(stream().textContent).toContain('upload text');
+  expect(stream().textContent).toContain('behind text');
+  await act(async () => {
+    upload.resolve();
+    commit.resolve();
+    await work;
+  });
+  expect(records.get('behind')?.stage).toBe('delivered');
+
+  // A failed text-only send leaves the conversation and becomes recoverable.
+  commitFails = true;
+  await act(async () => {
+    await accept('lost');
+    await journal.retry('session' as SessionId).catch(() => {});
+  });
+  expect(projected()).toEqual([]);
+  expect(stream().textContent).toContain('lost text');
+  expect(stream().textContent).toContain('Not sent');
+  expect(mark()?.dataset.sessionSendState).toBe('failed');
+});
+
 it('shows a queue-bound upload in the queue sheet until its queue item replaces it', async () => {
   const { SessionPendingMessages } = await import('../src/components/chat/session-pending-messages');
   const { MessageQueueDisplay } = await import('../src/components/sessions/message-queue');

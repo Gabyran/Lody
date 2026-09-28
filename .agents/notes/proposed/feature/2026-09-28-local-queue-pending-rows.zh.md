@@ -21,6 +21,12 @@ Translation: current
 - **按 turn ID 去重，而不是按阶段。** workspace 的提交端口先写 `mq`，再把记录推进到 `committed`。有一瞬间，队列项和 `prepared` 记录同时存在。`selectPendingQueueRecords` 隐藏 ID 与某个队列项 `userTurnId` 相同的记录，因此每次渲染都只显示一行。
 - **视觉连续。** 本地行沿用队列行的布局（序号、缩略图、两行文本），文字变灰，与侧边栏未发送标题一致。它显示上传进度环和“正在上传 · N%”，缩略图来自本地 Blob。交接时这一行以真实队列行重新挂载，缩略图改为加载已上传的图片。
 - **渲染成本。** 上传进度是高频更新。`session-chat-interface` 只需要知道面板是否有内容（有面板时信息栏布局不同），所以读取 `useHasPendingQueueRecords`：一个布尔值的 `useSyncExternalStore` 快照，只在本地行出现或离开时变化。进度只在 `MessageQueueDisplay` 内订阅。
+- **纯文本消息从不显示为待发送。** 没有附件的消息经过几次本地写入就会进入 history 或队列，但这些写入、资格检查读取和 flush 的耗时，仍足以让“等待发送”行闪一下。`isInstantSendRecord` 覆盖尚未失败或中断的纯文本记录：
+  - dispatch 和 guide 路由通过 `acceptedSessionHistoryProjectionsAtom` 把记录叠加进对话。这是现有的叠加机制，history 中出现同一 ID 后自动去掉叠加条目。`SessionSendRecovery` 在按成员集合触发的 layout effect 中写入它，所以它和待发送行的移除在同一次绘制中完成，也不会随上传进度频繁更新。
+  - 队列面板里的本地行和真实队列行一样，不显示状态。
+  - 侧边栏不显示发送中标记。
+  - 只叠加一个会话最前面连续的这类消息。排在更早上传之后的文本消息保持待发送行，否则会显示在它所等待的上传消息上方。
+  - 失败或中断后，记录变回带恢复操作的待发送行。
 - **上传 shimmer。** 大文件上传时，确定进度环可能长时间停在同一个百分比，看起来像卡住了。现在每 1.8 秒有一道短高光沿已填充的弧线移动（SVG mask 加 `stroke-dashoffset` 动画），`prefers-reduced-motion` 下隐藏。不确定进度环保持旋转。
 
 ## 备选方案
@@ -32,6 +38,7 @@ Translation: current
 ## 验证
 
 - `tests/session-send-recovery.test.tsx` 使用真实的发送日志和队列面板。消息只以面板中的本地行出现，从不出现在会话流里：先是上传 40%，然后失败并显示“继续发送”。提交在写入 `mq` 后暂停时，面板恰好只有一行，就是真实队列项。投递完成后没有本地行。
+- `tests/session-send-recovery.test.tsx` 也覆盖纯文本发送：提交被挡住时，纯文本消息已叠加进对话，没有待发送行，也没有侧边栏标记；排在上传消息之后时按顺序保持为待发送行；提交失败时显示“未发送”，侧边栏出现失败标记。
 - Storybook：`Sessions/MessageQueueDisplay` 的 `LocalUploadRows` 和 `LocalUploadOnly`。
 
 ## 限制
@@ -39,4 +46,4 @@ Translation: current
 - 交接是在同一位置重新挂载，而不是复用 DOM。真实队列行的缩略图从已上传的图片加载，可能短暂显示占位。
 - 只有通过 queue 路由收进日志时才会设置 `record.queue`。guide 回退为后续队列项的发送，在提交前仍显示会话内的待发送行。
 
-相关：[侧边栏发送状态](2026-09-28-sidebar-send-status.zh.md)、[延迟附件发送](../architecture/2026-09-14-deferred-attachment-send.zh.md)。
+相关：[侧边栏发送状态](2026-09-28-sidebar-send-status.zh.md)、[daemon 接手的 guide 结果](../bug-fix/2026-09-28-daemon-owned-guide-outcome.zh.md)、[延迟附件发送](../architecture/2026-09-14-deferred-attachment-send.zh.md)。
