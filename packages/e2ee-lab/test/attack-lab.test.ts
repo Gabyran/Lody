@@ -33,10 +33,13 @@ const ATTACK_METHODS = [
   'advance',
   'advanceUntil',
   'finish',
+  'forkView',
+  'insiderRead',
   'intercept',
   'mutateBackend',
   'observe',
   'readBackend',
+  'releaseView',
   'submitClaim',
 ];
 

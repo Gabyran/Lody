@@ -44,8 +44,16 @@ export function fingerprintOf(
     if (facts.durableLoss) rules.push('durability.lost-document');
     if (!facts.cursorAhead && !facts.durableLoss) rules.push('durability.violation');
   }
-  if (report.confidentiality === 'violation') rules.push('confidentiality.plaintext');
-  if (report.integrity === 'outside-model' || report.detectability === 'outside-model') {
+  const property = (id: string) => report.properties?.find((row) => row.id === id)?.verdict;
+  const insider = property('confidentiality.insider-post-exclusion');
+  if (report.confidentiality === 'violation') {
+    rules.push(insider === 'violation' ? 'confidentiality.insider' : 'confidentiality.plaintext');
+  }
+  if (insider === 'outside-model') rules.push('model.stale-control-view');
+  const unauthorizedContent = report.properties
+    ? property('integrity.content-authorized') === 'outside-model'
+    : report.detectability === 'outside-model';
+  if (report.integrity === 'outside-model' || unauthorizedContent) {
     rules.push('model.unauthorized-content');
   }
   if (report.integrity === 'harness-error' || report.durability === 'harness-error') {

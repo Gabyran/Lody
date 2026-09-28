@@ -10,6 +10,7 @@ import {
   type CollabMaterial,
 } from '../src/scenario';
 import type { AttackAction } from '../src/attack-lab';
+import { fingerprintOf } from '../src/fingerprint';
 
 afterEach(() => cleanupLab());
 
@@ -69,7 +70,60 @@ describe('S1 ongoing-collaboration control', () => {
     expect(run.report.confidentiality).toBe('pass');
     expect(run.report.integrity).toBe('pass');
     expect(run.report.durability).toBe('pass');
+    // Every property is measured in the control run; none is silently uncovered.
+    expect(run.report.properties?.map((row) => [row.id, row.verdict])).toEqual([
+      ['confidentiality.backend-plaintext', 'pass'],
+      ['confidentiality.insider-post-exclusion', 'pass'],
+      ['integrity.ledger-verified', 'pass'],
+      ['integrity.content-authorized', 'pass'],
+      ['integrity.context-bound', 'pass'],
+      ['integrity.forged-claims', 'unavailable'],
+      ['durability.cursor-within-document', 'pass'],
+      ['durability.no-loss', 'pass'],
+    ]);
   }, 180_000);
+});
+
+/** Hide Eve's removal from Bob only, then use Eve's retained keys at the end. */
+function splitViewAgent(): { agent: CollabAgent; seen: { insiderText?: string } } {
+  const seen: { insiderText?: string } = {};
+  const agent: CollabAgent = {
+    act: async (turn) => {
+      if (turn.stepName === 'alice-remove-eve' && turn.turn === 0) {
+        return { op: 'forkView', input: { eventId: 'barrier', actor: 'bob', stream: 'control' } };
+      }
+      if (turn.stepName === 'finish-boundary' && turn.turn === 0) {
+        expect(turn.view.insiders).toEqual(['eve']);
+        const frames = await turn.insiderRead({ insider: 'eve' });
+        seen.insiderText = frames.map((frame) => frame.text).join('\n');
+        return 'pass';
+      }
+      return 'pass';
+    },
+  };
+  return { agent, seen };
+}
+
+describe('S4 excluded insider with a per-client split view', () => {
+  it('judges post-removal content against the insider and replays the fork', async () => {
+    const world = await createCollabWorld({ mode: 'manual' });
+    const { agent, seen } = splitViewAgent();
+    const run = await runCollabScenario({ world, agent });
+    const insider = run.report.properties?.find(
+      (row) => row.id === 'confidentiality.insider-post-exclusion'
+    )?.verdict;
+    // Positive control: Eve's retained epoch-1 key opens her own pre-removal edit.
+    expect(seen.insiderText).toContain('eve-edit');
+    // Bob never saw the removal, so he could not receive epoch 2 and sealed his
+    // "post-removal" edit under epoch 1, which Eve still holds. The leak is real but
+    // rests on withheld control records: the stated freshness limit, not a silent pass.
+    expect(run.outcomes.find((row) => row.name === 'bob-receive-epoch2')?.error).toBeDefined();
+    expect(insider).toBe('outside-model');
+    expect(run.report.confidentiality).toBe('outside-model');
+    expect(fingerprintOf(run.report).rules).toContain('model.stale-control-view');
+    const replay = await replayCollabScenario(run.material);
+    expect(replay.divergence).toBeNull();
+  }, 300_000);
 });
 
 describe('S2 fixed boundary attacks during collaboration', () => {

@@ -613,3 +613,13 @@ v1 `possessionSigningBytes` 为 `[genesis, signPub, encPub, kind, canManage]`。
 - **不变的限制：** 恶意或被改的客户端可以无视此规则；服务器对写者隐藏移除记录仍能绕过（新鲜度限制）；读端仍接受旧代内容。
 - **证据：** 核心 `streams-content.test.ts`（撤权与换代前后的密封判定）；Lab `host-lifecycle.test.ts`「refuses new content after removeMember until the epoch rotates」。两个撤权后写入的旧测试改为先换代。
 - **暴露的 Lab 盲区：** AttackLab 的保密判定只扫描 Riverrun 明文或接受精确明文声明，攻击者不持有任何成员密钥，因此"被移除者与服务器串通"无法衡量。两次真实模型运行（`deepseek-chat`，temperature 0）选了相同的丢弃加 XOR 攻击，未发现问题；协作剧本也从不移除成员。
+
+### 2026-09-28 — 被排除的内部人、按客户端视图与逐属性判定
+
+- **问题：** 上面的移除窗口缺口是手工找到的，AttackLab 测不到：攻击者不持有任何成员密钥，协作剧本从不移除成员，模型 Agent 只做一次计划、最多两步、temperature 0。
+- **决定：** 新增"被排除的内部人"攻击者模式（spec §4）。剧本移除 Eve 后，她留下的代密钥可通过 `insiderRead` 使用：只用这些密钥解密服务器可见的 Loro/Flock 帧（跟随快照压缩）。排除之后密封的内容在写入前登记为受保护；裁判用每个已暴露内部人的密钥尝试打开每一帧。泄露判为 `violation`；若 control/keys 的 `forkView` 曾向诚实客户端隐藏记录（已声明的新鲜度限制），则判为 `outside-model`。`forkView`/`releaseView` 把单个 actor 的追赶读取裁到冻结的字节偏移；Riverrun 偏移就是字节偏移，所以裁剪是精确的。报告新增 `properties`，每条不变量一行，要么实测、要么 `unavailable`；指纹区分 `confidentiality.insider` 与 `model.stale-control-view`。
+- **剧本（`collab-v2`）：** Eve 加入并写入；Bob 排队一条离线编辑；Alice 移除 Eve；移除到换代窗口内的写入以 `rotation-required` 被拒；Alice 换代到 epoch 2 并分发；Alice 和 Bob 在移除后的写入受保护；Bob 上传排队的编辑；Eve 经网关读取被拒；Dave 降为 Guest 后写入被拒。Eve 不参与收敛和客户端检查。
+- **模型 Agent：** 有预算的多轮循环。每次决策可等待指定步骤、拦截、改写后端、分叉/释放视图、以内部人身份读取或提交声明；错误和内部人读取结果反馈给下一次决策。由 `E2EE_AGENT_GOAL`/`MODEL`/`TEMPERATURE`（默认 0.7）/`SEED`/`MAX_DECISIONS` 配置，抽样的种子会被记录。`probe()` 检查端点且不留下计划状态。
+- **新步骤暴露的诚实客户端 bug：** (1) `writeLoro`/`writeFlock` 把 `appendWriteOnly` 的结果存成读取游标。其下界只含本次追加的批次，下一次同步便以该写者身份重新导出所有已导入的操作（降为 Guest 后因 `encrypt_failed` 失败）；其偏移还会跳过上次读取之后别人追加的记录。现在写者保留上次读取的偏移，并把批次版本并入下界。(2) 游标文件按完整流 URL 匹配，宿主换端口重启后游标被丢弃；现改为按流路径匹配。(3) 剧本复用了 Bob 换代前的离线写者，排队编辑仍以 epoch 1 密封，Eve 能打开。核心文档已写明写者在其房间会话内固定；剧本现在关闭过期写者、刷新账本，再通过完整同步上传排队编辑（提交之后才建的写者看不到这次提交，下一次编辑便因缺少 Loro 依赖而失败）。这是契约在起作用，但若产品客户端跨换代持有长生命周期写者，会以同样方式泄露。
+- **证据：** `collab-scenario.test.ts` S1 对照（内部人属性 `pass`）；S4「judges post-removal content against the insider and replays the fork」（在移除 Eve 前冻结 Bob 的 control 视图；Bob 收不到 epoch 2，以 epoch 1 密封，Eve 能打开；`outside-model`；无模型重放不分歧）；`host-lifecycle.test.ts`「lets a demoted guest read after reconnecting from its persisted document」。
+- **限制：** 转让 Owner 与跨流重排尚未进入剧本。内部人预言只衡量可解密性；伪造内容是否被接受仍由既有完整性事实判定。此处未记录新 Agent 的真实模型运行。

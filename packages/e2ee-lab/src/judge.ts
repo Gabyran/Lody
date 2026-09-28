@@ -59,6 +59,37 @@ export function judgeLeak(input: { backendContainsPlaintext: boolean }): JudgeVe
   return input.backendContainsPlaintext ? 'violation' : 'pass';
 }
 
+/**
+ * Content protected from an excluded insider, measured by decrypting server-visible
+ * frames with the insider's retained keys. A leak after the attacker withheld control
+ * or key records from an honest client bypasses the stated freshness assumption.
+ */
+export function judgeInsiderLeak(input: {
+  observed: boolean;
+  leaked: boolean;
+  freshnessBypassed: boolean;
+}): JudgeVerdict {
+  if (!input.observed) return 'unavailable';
+  if (!input.leaked) return 'pass';
+  return input.freshnessBypassed ? 'outside-model' : 'violation';
+}
+
+const SEVERITY: readonly JudgeVerdict[] = [
+  'violation',
+  'harness-error',
+  'outside-model',
+  'unavailable',
+  'pass',
+];
+
+/** Most severe measured verdict; `unavailable` parts never mask a measured pass. */
+export function worstVerdict(parts: readonly JudgeVerdict[]): JudgeVerdict {
+  const measured = parts.filter((part) => part !== 'unavailable');
+  const pool = measured.length > 0 ? measured : parts;
+  for (const verdict of SEVERITY) if (pool.includes(verdict)) return verdict;
+  return 'unavailable';
+}
+
 export function judgeCursor(input: {
   rejected: boolean;
   cursorAdvancedPastBad: boolean;

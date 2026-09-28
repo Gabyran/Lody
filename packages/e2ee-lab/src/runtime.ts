@@ -29,12 +29,23 @@ export type FetchIntercept = {
   readonly bodyHex?: string;
 };
 
+/**
+ * Split view: `actor` sees `stream` only up to byte offset `at`; later records
+ * are withheld from that actor while every other client sees the real tail.
+ */
+export type ViewFreeze = {
+  readonly actor: string;
+  readonly stream: string;
+  readonly at: number;
+};
+
 export class LabRuntime {
   private static readonly live = new Set<LabRuntime>();
   state: SchedulerState;
   readonly paused = new Set<string>();
   readonly frames: ProtocolFrame[] = [];
   private readonly intercepts: FetchIntercept[] = [];
+  private readonly freezes: ViewFreeze[] = [];
   private readonly pendingIntercepts: {
     match: (event: LabEvent) => boolean;
     intercept: Omit<FetchIntercept, 'eventId'>;
@@ -145,6 +156,50 @@ export class LabRuntime {
     this.intercepts.push(input);
   }
 
+  freezeView(input: ViewFreeze): void {
+    this.releaseView(input.actor, input.stream);
+    this.freezes.push(input);
+  }
+
+  releaseView(actor: string, stream: string): void {
+    const index = this.freezes.findIndex((row) => row.actor === actor && row.stream === stream);
+    if (index >= 0) this.freezes.splice(index, 1);
+  }
+
+  views(): readonly ViewFreeze[] {
+    return [...this.freezes];
+  }
+
+  /** Rewrite a plain stream read so the frozen actor never sees bytes past `at`. */
+  private async applyFreeze(
+    actor: string,
+    url: string,
+    method: string,
+    response: Response
+  ): Promise<Response> {
+    const route = /\/ds\/[^/]+\/([^/?]+)(?:\?|$)/.exec(url);
+    const freeze =
+      route && this.freezes.find((row) => row.actor === actor && row.stream === route[1]);
+    if (!freeze || !response.ok) return response;
+    const nextHeader = response.headers.get('stream-next-offset');
+    if (nextHeader === null || Number(nextHeader) <= freeze.at) return response;
+    const width = nextHeader.length;
+    const raw = new URL(url).searchParams.get('offset');
+    const from = raw === null || raw === '' || raw === '-1' ? 0 : Number(raw);
+    if (!Number.isSafeInteger(from)) return response;
+    const bytes = new Uint8Array(await response.arrayBuffer());
+    const keep = method === 'HEAD' ? 0 : Math.max(0, Math.min(bytes.byteLength, freeze.at - from));
+    const headers = new Headers(response.headers);
+    headers.delete('etag');
+    headers.delete('content-length');
+    headers.set('stream-next-offset', String(Math.max(freeze.at, from)).padStart(width, '0'));
+    headers.set('stream-up-to-date', 'true');
+    return new Response(method === 'HEAD' ? null : Buffer.from(bytes.subarray(0, keep)), {
+      status: response.status,
+      headers,
+    });
+  }
+
   /** Attach an intercept to the next requested event matching `match`. */
   interceptWhen(
     match: (event: LabEvent) => boolean,
@@ -249,7 +304,7 @@ export class LabRuntime {
             ? new Response(Buffer.from(fromHexBody(intercept.bodyHex ?? '')), {
                 status: intercept.status ?? 200,
               })
-            : await this.fetchImpl(request);
+            : await this.applyFreeze(actor, url, method, await this.fetchImpl(request));
         if (intercept?.kind === 'truncate') {
           const bytes = new Uint8Array(await response.clone().arrayBuffer());
           const keep = Math.min(1, bytes.byteLength);

@@ -26,11 +26,20 @@ pnpm --filter @lody/e2ee-lab exec tsx src/cli.ts --data-dir /tmp/e2ee-lab-data -
 ```
 
 `check` is typecheck plus tests. Root commands do not build the old demo UI.
-`scenario:collab` runs the ongoing multi-member script (Alice/Bob/Carol/Dave —
-offline reconnect, revocation and epoch rotation, snapshot bootstrap, crash
-recovery): a no-attack control first, then fixed attacks at chosen event
-boundaries. `attack:model` lets a real model pick the boundary and the attack
-while collaboration is in flight. `replay` re-runs CAS, lost-ACK,
+`scenario:collab` runs the ongoing multi-member script (Alice/Bob/Carol/Dave/Eve —
+offline reconnect, revocation and epoch rotation, snapshot bootstrap, removal of
+Eve with the removal-to-rotation window, an offline edit queued before the
+removal and uploaded after it, guest demotion, crash recovery): a no-attack
+control first, then fixed attacks at chosen event boundaries, including a
+per-client split view that hides Eve's removal from Bob. From Eve's removal on,
+the attacker holds her retained keys (`insiderRead`); the judge checks that
+nothing sealed afterwards opens with them. Reports list one verdict per property
+(`report.properties`). `attack:model` runs a budgeted multi-round model agent:
+it may wait for a named step, act, read its errors and insider results, and act
+again. Configure it with `E2EE_AGENT_GOAL` (`insider-read`, `forge-content`,
+`ledger-fork`, `any`), `E2EE_AGENT_MODEL`, `E2EE_AGENT_TEMPERATURE` (default
+0.7), `E2EE_AGENT_SEED`, `E2EE_AGENT_MAX_DECISIONS`, or a custom
+`E2EE_AGENT_URL`/`E2EE_AGENT_KEY`. `replay` re-runs CAS, lost-ACK,
 ciphertext-mutation and the same recorded attack in three fresh directories
 each, model-free, and fails at the first diverging event, entropy request,
 protocol frame or client state. Private device material stays in the test

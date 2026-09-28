@@ -36,7 +36,15 @@ Local deterministic collaboration plus one attack Agent. Not product E2EE.
 - Replay compares events, labeled entropy, and protocol frames. Private device
   material is test-only and never part of the attacker view.
 - Attackers use `createAttackLab` only. That handle does not expose honest
-  client directories, epoch keys, or judge expected plaintext.
+  client directories, epoch keys, or judge expected plaintext. The one exception
+  is an excluded insider: from its removal/revoke on, `insiderRead` uses the keys
+  that party retained, never another client's.
+- Content sealed after an exclusion is registered as protected before the write.
+  An insider opening it is `violation`, or `outside-model` if a control/keys
+  `forkView` withheld records. Every report property row is measured or
+  `unavailable`; never infer a pass from a missing row.
+- Writers must not save an `appendWriteOnly` result as a read cursor: keep the
+  last read offset and merge the batch version into the lower bound.
 - `finish` composes integrity/durability from measured client facts and claims;
   guest-authored content under a malicious Riverrun is `outside-model`, not a
   silent pass. Agent claims without matching facts do not invent violations.

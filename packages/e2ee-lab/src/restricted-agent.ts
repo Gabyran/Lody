@@ -1,4 +1,5 @@
 import type { AttackAction, AttackLab, PublicReport, PublicView } from './attack-lab';
+import { VIEW_STREAMS } from './attack-lab';
 import type { AgentTurn, CollabAgent } from './scenario';
 import { toHex } from './platform/bytes';
 import type { LabFetch } from './services/http';
@@ -20,8 +21,19 @@ export type AgentEndpoint = {
   model: string;
 };
 
+/**
+ * Keys in precedence order. `E2EE_AGENT_URL`/`E2EE_AGENT_KEY` adds a custom
+ * OpenAI-compatible endpoint first; `E2EE_AGENT_MODEL` overrides every model.
+ */
 export function listAgentEndpoints(env: NodeJS.ProcessEnv = process.env): AgentEndpoint[] {
   const endpoints: AgentEndpoint[] = [];
+  if (env.E2EE_AGENT_URL && env.E2EE_AGENT_KEY) {
+    endpoints.push({
+      url: env.E2EE_AGENT_URL,
+      key: env.E2EE_AGENT_KEY,
+      model: env.E2EE_AGENT_MODEL ?? 'gpt-4o-mini',
+    });
+  }
   if (env.XAI_API_KEY) {
     endpoints.push({
       url: 'https://api.x.ai/v1/chat/completions',
@@ -64,7 +76,8 @@ export function listAgentEndpoints(env: NodeJS.ProcessEnv = process.env): AgentE
       model: 'gpt-4o-mini',
     });
   }
-  return endpoints;
+  const model = env.E2EE_AGENT_MODEL;
+  return model ? endpoints.map((endpoint) => ({ ...endpoint, model })) : endpoints;
 }
 
 export function resolveAgentEndpoint(
@@ -83,13 +96,12 @@ const SYSTEM_ATTACK = [
   'Budget exhaustion is not a finding. Never invent success.',
 ].join(' ');
 
-async function chooseStep(
-  view: PublicView,
-  diskHexPrefix: string,
+async function completeJson(
   endpoint: AgentEndpoint,
   fetchImpl: LabFetch,
-  prior: readonly AgentStep[]
-): Promise<AgentStep> {
+  messages: readonly { role: 'system' | 'user'; content: string }[],
+  sampling: { temperature: number; seed?: number }
+): Promise<unknown> {
   const response = await fetchImpl(endpoint.url, {
     method: 'POST',
     signal: AbortSignal.timeout(60_000),
@@ -99,23 +111,10 @@ async function chooseStep(
     },
     body: JSON.stringify({
       model: endpoint.model,
-      temperature: 0,
+      temperature: sampling.temperature,
+      ...(sampling.seed === undefined ? {} : { seed: sampling.seed }),
       response_format: { type: 'json_object' },
-      messages: [
-        { role: 'system', content: SYSTEM_ATTACK },
-        {
-          role: 'user',
-          content: JSON.stringify({
-            events: view.events,
-            genesisHex: view.genesisHex,
-            backendBytes: view.backendBytes,
-            errors: view.errors,
-            diskPrefix: diskHexPrefix.slice(0, 128),
-            priorOps: prior.map((step) => step.op),
-            remainingSteps: Math.max(0, 6 - prior.length),
-          }),
-        },
-      ],
+      messages,
     }),
   });
   if (!response.ok) {
@@ -126,7 +125,40 @@ async function chooseStep(
   };
   const raw = body.choices?.[0]?.message?.content;
   if (!raw) throw new Error('agent-llm-empty');
-  const parsed = JSON.parse(raw) as AgentStep;
+  try {
+    return JSON.parse(raw) as unknown;
+  } catch {
+    return {};
+  }
+}
+
+async function chooseStep(
+  view: PublicView,
+  diskHexPrefix: string,
+  endpoint: AgentEndpoint,
+  fetchImpl: LabFetch,
+  prior: readonly AgentStep[]
+): Promise<AgentStep> {
+  const parsed = (await completeJson(
+    endpoint,
+    fetchImpl,
+    [
+      { role: 'system', content: SYSTEM_ATTACK },
+      {
+        role: 'user',
+        content: JSON.stringify({
+          events: view.events,
+          genesisHex: view.genesisHex,
+          backendBytes: view.backendBytes,
+          errors: view.errors,
+          diskPrefix: diskHexPrefix.slice(0, 128),
+          priorOps: prior.map((step) => step.op),
+          remainingSteps: Math.max(0, 6 - prior.length),
+        }),
+      },
+    ],
+    { temperature: 0 }
+  )) as AgentStep;
   const allowed = new Set([
     'observe',
     'readBackend',
@@ -218,156 +250,258 @@ export async function runRestrictedAgent(
   return lab.finish();
 }
 
-type CollabPlan = {
-  step?: string;
-  op?: 'intercept' | 'readBackend' | 'submitClaim' | 'mutateBackend' | 'pass';
+export type AttackGoal = 'insider-read' | 'forge-content' | 'ledger-fork' | 'any';
+
+const GOALS: Record<AttackGoal, string> = {
+  'insider-read':
+    'Goal: read content written after a member was removed. When a member is removed ' +
+    'its retained keys become yours (view.insiders). Honest writers rotate the epoch ' +
+    'after removal; try to keep some honest member unaware of the removal or rotation ' +
+    '(forkView on its control or keys stream) so it seals with a key the insider holds, ' +
+    'then insiderRead and submitClaim the recovered post-removal text.',
+  'forge-content':
+    'Goal: make an honest member accept ledger records or content that nobody ' +
+    'authorised (mutateBackend on backend bytes, intercept replace of a pending read), ' +
+    'then submitClaim kind forged-accepted.',
+  'ledger-fork':
+    'Goal: show different ledger tails to different members (forkView control for one ' +
+    'member while others continue) and get the stale member to act on the old state.',
+  any: 'Goal: break confidentiality, integrity or durability by any AttackLab action.',
+};
+
+export interface CollabAgentOptions {
+  readonly goal?: AttackGoal;
+  /** Sampling temperature; non-zero by default so repeated runs explore. */
+  readonly temperature?: number;
+  /** Provider sampling seed when supported; recorded with the evidence. */
+  readonly seed?: number;
+  /** Model calls for the whole run. */
+  readonly maxDecisions?: number;
+  readonly fetch?: LabFetch;
+}
+
+export function collabAgentOptionsFromEnv(
+  env: NodeJS.ProcessEnv = process.env
+): CollabAgentOptions {
+  const goal = env.E2EE_AGENT_GOAL as AttackGoal | undefined;
+  const number = (value: string | undefined) =>
+    value === undefined || value === '' || Number.isNaN(Number(value)) ? undefined : Number(value);
+  return {
+    goal: goal && goal in GOALS ? goal : undefined,
+    temperature: number(env.E2EE_AGENT_TEMPERATURE),
+    seed: number(env.E2EE_AGENT_SEED),
+    maxDecisions: number(env.E2EE_AGENT_MAX_DECISIONS),
+  };
+}
+
+type Decision = {
+  op?: string;
+  until?: string;
+  actor?: string;
+  stream?: string;
+  insider?: string;
   kind?: string;
   status?: number;
   bodyHex?: string;
-  evidence?: string;
   needleHex?: string;
   xor?: number;
-  followUp?: CollabPlan;
+  evidence?: string;
+  why?: string;
 };
 
+type HistoryRow = { readonly step: string; readonly decision: Decision; readonly result: string };
+
+const INTERCEPT_KINDS = new Set(['drop', 'replace', 'delay', 'duplicate', 'truncate']);
+const CLAIM_KINDS = new Set(['plaintext', 'forged-accepted', 'cursor-overrun']);
+
+function collabSystemPrompt(goal: AttackGoal): string {
+  return [
+    'You attack an E2EE collaboration while honest members keep working; the step list is',
+    'the honest script. You act only at step boundaries through AttackLab and never see',
+    'honest keys. Reply with ONE JSON decision:',
+    '{"op":"wait","until":"<remaining step>"}',
+    '| {"op":"forkView","actor":"<member>","stream":"control|keys|loro|flock"}',
+    '| {"op":"releaseView","actor":"<member>","stream":"..."}',
+    '| {"op":"insiderRead","insider":"<name from insiders>"}',
+    '| {"op":"intercept","kind":"drop|replace|delay|duplicate|truncate","actor":"<member>?","status":502?,"bodyHex":"..."?}',
+    '| {"op":"mutateBackend","needleHex":"...","xor":255}',
+    '| {"op":"submitClaim","kind":"plaintext|forged-accepted|cursor-overrun","evidence":"..."}',
+    '| {"op":"stop"}.',
+    'Add "why" (one sentence). insiderRead returns decrypted text immediately and you may',
+    'decide again. feedback lists errors from your previous actions; adapt instead of',
+    'repeating them. Never guess plaintext or keys; claims must quote text you recovered.',
+    'Budget exhaustion is not a finding.',
+    GOALS[goal],
+  ].join(' ');
+}
+
+function summarizeFrames(
+  frames: readonly { stream: string; epoch: number; decrypted: boolean; text: string }[]
+): string {
+  const opened = frames.filter((frame) => frame.decrypted);
+  const printable = opened
+    .map((frame) => frame.text.replace(/[^\x20-\x7e]+/g, ' ').trim())
+    .filter((text) => text.length > 0)
+    .map((text) => text.slice(0, 160));
+  return JSON.stringify({
+    frames: frames.length,
+    decrypted: opened.length,
+    epochs: [...new Set(frames.map((frame) => `${frame.stream}@${frame.epoch}`))],
+    text: printable.slice(-12),
+  });
+}
+
 /**
- * One-shot or two-step attack plan. The model may schedule a primary boundary
- * attack and an optional follow-up (mutate/claim) after the first hit.
+ * Real-model attacker for the ongoing-collaboration scenario: a budgeted
+ * observe/decide/act loop over the whole script. The model may wait for a
+ * named step, act, see its errors and insider reads, and act again. Every
+ * applied action is recorded by AttackLab, so replay needs no model.
  */
-async function chooseCollabPlan(
-  turn: AgentTurn,
+export function collabModelAgent(
   endpoint: AgentEndpoint,
-  fetchImpl: LabFetch
-): Promise<CollabPlan> {
-  const response = await fetchImpl(endpoint.url, {
-    method: 'POST',
-    signal: AbortSignal.timeout(60_000),
-    headers: {
-      authorization: `Bearer ${endpoint.key}`,
-      'content-type': 'application/json',
-    },
-    body: JSON.stringify({
-      model: endpoint.model,
-      temperature: 0,
-      response_format: { type: 'json_object' },
-      messages: [
-        {
-          role: 'system',
-          content:
-            'You attack an E2EE collaboration while honest members keep working. ' +
-            'Pick ONE boundary from "remainingSteps" and ONE primary attack. ' +
-            'Optionally add followUp for a second action after the first lands. ' +
-            'Return JSON: ' +
-            '{"step":"<name>","op":"intercept","kind":"drop|replace|delay|duplicate|truncate","status":502,"bodyHex":"...","followUp":{"op":"mutateBackend","needleHex":"...","xor":255}} ' +
-            '| {"step":"<name>","op":"mutateBackend","needleHex":"...","xor":255} ' +
-            '| {"step":"<name>","op":"submitClaim","evidence":"..."} ' +
-            '| {"step":"<name>","op":"readBackend"}. ' +
-            'Prefer intercept or mutateBackend. observe, readBackend, submitClaim, and finish are not hits. ' +
-            'Never guess plaintext or keys. Budget exhaustion is not a finding.',
-        },
+  options: CollabAgentOptions = {}
+): CollabAgent & {
+  probe(): Promise<void>;
+  readonly history: readonly HistoryRow[];
+  readonly sampling: { temperature: number; seed: number; goal: AttackGoal };
+} {
+  const fetchImpl = options.fetch ?? globalThis.fetch.bind(globalThis);
+  const goal = options.goal ?? 'insider-read';
+  const sampling = {
+    temperature: options.temperature ?? 0.7,
+    seed: options.seed ?? Math.floor(Math.random() * 2 ** 31),
+  };
+  const maxDecisions = options.maxDecisions ?? 12;
+  const history: HistoryRow[] = [];
+  let decisions = 0;
+  let waitUntil: string | undefined;
+  let stopped = false;
+
+  const decide = async (turn: AgentTurn): Promise<Decision> => {
+    decisions += 1;
+    const parsed = await completeJson(
+      endpoint,
+      fetchImpl,
+      [
+        { role: 'system', content: collabSystemPrompt(goal) },
         {
           role: 'user',
           content: JSON.stringify({
             step: turn.stepName,
             remainingSteps: turn.remainingSteps,
-            requested: turn.view.events.filter((event) => event.status === 'requested'),
-            genesisHex: turn.view.genesisHex,
-            backendBytes: turn.view.backendBytes,
+            requested: turn.view.events.filter((event) => event.status === 'requested').slice(-8),
+            insiders: turn.view.insiders,
+            views: turn.view.views,
             errors: turn.view.errors,
+            feedback: turn.feedback,
+            history: history.slice(-10),
+            budget: maxDecisions - decisions,
           }),
         },
       ],
-    }),
-  });
-  if (!response.ok) {
-    throw new Error(`agent-llm-${response.status}:${await response.text()}`);
-  }
-  const body = (await response.json()) as {
-    choices?: Array<{ message?: { content?: string } }>;
+      sampling
+    );
+    return (parsed && typeof parsed === 'object' ? parsed : {}) as Decision;
   };
-  const raw = body.choices?.[0]?.message?.content;
-  if (!raw) throw new Error('agent-llm-empty');
-  try {
-    return JSON.parse(raw) as CollabPlan;
-  } catch {
-    return { op: 'pass' };
-  }
-}
 
-const INTERCEPT_KINDS = new Set(['drop', 'replace', 'delay', 'duplicate', 'truncate']);
-
-function planAction(turn: AgentTurn, plan: CollabPlan): AttackAction | 'pass' | 'wait' {
-  if (plan.op === 'intercept') {
-    if (!INTERCEPT_KINDS.has(plan.kind ?? '')) return 'pass';
-    const pending = turn.view.events.find((event) => event.status === 'requested');
-    if (!pending) return 'wait';
-    return {
-      op: 'intercept',
-      input: {
-        eventId: pending.eventId,
-        kind: plan.kind,
-        status: plan.status,
-        bodyHex: plan.bodyHex,
-      },
-    };
-  }
-  if (plan.op === 'mutateBackend' && plan.needleHex) {
-    return {
-      op: 'mutateBackend',
-      input: {
-        eventId: 'barrier',
-        needleHex: plan.needleHex,
-        xor: plan.xor ?? 0xff,
-      },
-    };
-  }
-  if (plan.op === 'submitClaim') {
-    return { op: 'submitClaim', input: { kind: 'plaintext', evidence: plan.evidence } };
-  }
-  if (plan.op === 'readBackend') {
-    return { op: 'readBackend', input: { eventId: 'barrier' } };
-  }
-  return 'pass';
-}
-
-/**
- * Real-model attacker for the ongoing-collaboration scenario. Plans once, may
- * fire a primary attack plus one follow-up. Every honest step stays deterministic.
- */
-export function collabModelAgent(
-  endpoint: AgentEndpoint,
-  fetchImpl: LabFetch = globalThis.fetch.bind(globalThis)
-): CollabAgent {
-  let plan: CollabPlan | null = null;
-  let planStep = -1;
-  let phase: 'primary' | 'follow' | 'done' = 'primary';
-  let attempts = 0;
-  return {
-    act: async (turn) => {
-      if (phase === 'done') return 'pass';
-      if (!plan) {
-        if (attempts >= 3) return 'pass';
-        attempts += 1;
-        const choice = await chooseCollabPlan(turn, endpoint, fetchImpl);
-        const offset = turn.remainingSteps.indexOf(choice.step ?? '');
-        const attackable = choice.op === 'intercept' || choice.op === 'mutateBackend';
-        if (offset < 0 || !attackable) return 'pass';
-        plan = choice;
-        planStep = turn.step + offset;
+  const toAction = (turn: AgentTurn, decision: Decision): AttackAction | string => {
+    switch (decision.op) {
+      case 'forkView':
+      case 'releaseView': {
+        if (!(VIEW_STREAMS as readonly string[]).includes(decision.stream ?? '')) {
+          return 'invalid stream';
+        }
+        const input = { actor: String(decision.actor ?? ''), stream: decision.stream };
+        return decision.op === 'forkView'
+          ? { op: 'forkView', input: { ...input, eventId: 'barrier' } }
+          : { op: 'releaseView', input };
       }
-      if (turn.step < planStep) return 'pass';
-      if (phase === 'primary') {
-        const action = planAction(turn, plan);
-        if (action === 'wait' || action === 'pass') return 'pass';
-        phase = plan.followUp ? 'follow' : 'done';
+      case 'intercept': {
+        if (!INTERCEPT_KINDS.has(decision.kind ?? '')) return 'invalid intercept kind';
+        const pending = turn.view.events.find(
+          (event) =>
+            event.status === 'requested' &&
+            event.phase === 'request-queued' &&
+            (decision.actor === undefined || event.actor === decision.actor)
+        );
+        if (!pending) return 'no pending request for that actor at this step';
+        return {
+          op: 'intercept',
+          input: {
+            eventId: pending.eventId,
+            kind: decision.kind,
+            status: decision.status,
+            bodyHex: decision.bodyHex,
+          },
+        };
+      }
+      case 'mutateBackend':
+        if (!decision.needleHex) return 'missing needleHex';
+        return {
+          op: 'mutateBackend',
+          input: { eventId: 'barrier', needleHex: decision.needleHex, xor: decision.xor ?? 0xff },
+        };
+      case 'submitClaim':
+        if (!CLAIM_KINDS.has(decision.kind ?? '')) return 'invalid claim kind';
+        return { op: 'submitClaim', input: { kind: decision.kind, evidence: decision.evidence } };
+      default:
+        return `unsupported op ${String(decision.op)}`;
+    }
+  };
+
+  return {
+    history,
+    sampling: { ...sampling, goal },
+    async probe() {
+      await completeJson(
+        endpoint,
+        fetchImpl,
+        [{ role: 'user', content: 'Reply with the JSON object {"op":"stop"}.' }],
+        sampling
+      );
+    },
+    act: async (turn) => {
+      if (waitUntil !== undefined) {
+        if (!turn.remainingSteps.includes(waitUntil)) waitUntil = undefined;
+        else if (turn.stepName !== waitUntil) return 'pass';
+        else waitUntil = undefined;
+      }
+      // Information ops answer inside the same boundary; the loop ends on a real action.
+      for (let inner = 0; inner < 3; inner++) {
+        if (stopped || decisions >= maxDecisions) return 'pass';
+        const decision = await decide(turn);
+        if (decision.op === 'stop') {
+          stopped = true;
+          history.push({ step: turn.stepName, decision, result: 'stopped' });
+          return 'pass';
+        }
+        if (decision.op === 'wait') {
+          const until = decision.until;
+          const valid = until !== undefined && turn.remainingSteps.slice(1).includes(until);
+          if (valid) waitUntil = until;
+          history.push({
+            step: turn.stepName,
+            decision,
+            result: valid ? 'waiting' : 'invalid step',
+          });
+          return 'pass';
+        }
+        if (decision.op === 'insiderRead') {
+          const result = await turn
+            .insiderRead({ insider: String(decision.insider ?? '') })
+            .then(summarizeFrames, (error: unknown) => `error: ${String(error)}`);
+          history.push({ step: turn.stepName, decision, result });
+          continue;
+        }
+        const action = toAction(turn, decision);
+        if (typeof action === 'string') {
+          history.push({ step: turn.stepName, decision, result: `rejected: ${action}` });
+          continue;
+        }
+        history.push({ step: turn.stepName, decision, result: 'applied' });
         return action;
       }
-      const follow = plan.followUp;
-      phase = 'done';
-      if (!follow) return 'pass';
-      const action = planAction(turn, follow);
-      if (action === 'wait' || action === 'pass') return 'pass';
-      return action;
+      return 'pass';
     },
   };
 }

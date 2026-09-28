@@ -76,16 +76,17 @@ Translation: current
 
 ## 4. 攻击能力与隔离
 
-两种场景分开报告：
+三种场景分开报告：
 
 - **外部攻击者**：拥有自己的设备密钥，可调用正常服务接口，不能绕过后端权限。
 - **恶意服务器**：可读取并修改 Riverrun 中全部服务器可见数据，可替换/截断/删除/重放响应，对不同客户端提供不同视图。此模式故意绕过服务器权限层，用于检验客户端防线。
+- **恶意服务器串通被排除的内部人**（草案，2026-09-28）：剧本移除成员或撤销设备后，攻击者额外持有该方合法保留的 epoch 密钥，仍拿不到其他客户端的密钥。裁判检验排除之后封装的内容能否用这些密钥打开。
 
 诚实宿主的鉴权是 sqlite Riverrun 前面的薄 HTTP 网关。Riverrun 只存密文并做 CAS，不保存 Org 角色。网关现读已验证控制账本，再套合成员、文档写权和分钥检查。普通 HTTP（`/readyz`、设备凭证）不暴露 Riverrun 地址、数据库路径、failpoint 或请求头时钟。harness 时钟与故障注入是单独的测试能力。恶意服务器测试仍通过实验室句柄上的 `riverrunUrl` 直连；宿主 403 不能代替客户端验签。非空加入 `expiresAt` 在可信准入路径相对宿主时钟检查；`Ledger.verify` 仍不含时间。已在已验证账本中的丢 ACK 重试仍能识别。检查到 CAS 的间隙不是跨流事务。
 
 支持攻击者自行生成任意字节或执行受限数据库修改，不仅提供固定攻击按钮。数据库修改必须在调度器屏障内通过事务，或正确停机再改；处理 WAL/sidecar，记录修改前后数据。物理数据库损坏属于可用性攻击，不能冒充签名绕过。
 
-攻击者不能读取诚实客户端目录、进程内存、环境、密钥、解密日志、恢复文件或裁判预期值，也不能改客户端/裁判代码。隔离使用实际容器/沙箱权限或仅暴露能力接口；同一用户下两个普通进程、目录前缀和 prompt 约束均不构成隔离。不能验证隔离时，只允许固定脚本测试，不启动自由攻击 Agent。
+除已暴露的内部人材料外，攻击者不能读取诚实客户端目录、进程内存、环境、密钥、解密日志、恢复文件或裁判预期值，也不能改客户端/裁判代码。隔离使用实际容器/沙箱权限或仅暴露能力接口；同一用户下两个普通进程、目录前缀和 prompt 约束均不构成隔离。不能验证隔离时，只允许固定脚本测试，不启动自由攻击 Agent。
 
 攻击 Agent 的上下文不得继承调试者看过的秘密。攻击载荷是数据，不是客户端、裁判或工具执行的新指令。执行时间、输入大小、磁盘和输出量设定预算；超限单独报告，不能伪装成通过。
 
@@ -99,12 +100,17 @@ interface AttackLab {
   readBackend(input: BackendRead): Promise<Uint8Array>;
   mutateBackend(input: BackendMutation): Promise<MutationReceipt>;
   intercept(input: ResponseMutation): Promise<MutationReceipt>;
+  forkView(input: { eventId: string; actor: string; stream: StreamName }): Promise<{ at: number }>;
+  releaseView(input: { actor: string; stream: StreamName }): Promise<{ ok: boolean }>;
+  insiderRead(input: { insider: string }): Promise<readonly InsiderFrame[]>;
   submitClaim(input: AttackClaim): Promise<ClaimReceipt>;
   finish(): Promise<PublicReport>;
 }
 ```
 
 这是测试接口，不加入 e2ee-core。CLI/JSON-RPC 可薄封装同一接口。`advanceUntil` 是有界推进，条件未出现也有明确结果。修改必须引用当前事件和具体对象；失效目标返回错误，禁止猜测后静默改别的数据。拦截可以表达 drop、delay、duplicate、replace 和 per-client fork，所有动作记录实际字节与执行位置。
+
+`forkView` 把某个客户端对某条流（control、keys、loro、flock）的视图冻结在当前字节尾部，之后的记录只对该客户端隐藏；冻结 offset 即重放回执。`insiderRead` 用已暴露内部人保留的密钥、不做授权检查地打开所有服务器可见内容帧；它直接读 Riverrun，不经过调度器。`PublicView` 列出已暴露的内部人和生效中的视图分叉。
 
 上面的 Promise 是 Agent/CLI 边界；内部同一实现使用 Effect。首版能力按职责收拢为 Clock、Crypto/Entropy、Network、Storage、Actors、Recorder，不为每个函数新建 service。调度器一次放行一个选定阶段；跨客户端操作仍可在阶段间交错。调度命令需有确认，禁止“后端已经写完、只拦返回值”冒充提交前暂停。
 
@@ -144,7 +150,9 @@ interface AttackLab {
 | 回滚、分叉、伪造对账纸条                  | 本地已有锚点和独立对账分别验证；未经独立核验不得显示 checked      |
 | 密钥历史链、Flock、恢复备份               | 同样通过真实公开 API 验证；恢复只承诺当前实际实现的范围           |
 
-裁判分别输出：保密、身份/权限、完整性、持久性、可用性、可检测性。结果为 `pass`、`violation`、`unavailable`、`outside-model` 或 `harness-error`，不得合并成一个模糊的成功标记。
+裁判分别输出：保密、身份/权限、完整性、持久性、可用性、可检测性。结果为 `pass`、`violation`、`unavailable`、`outside-model` 或 `harness-error`，不得合并成一个模糊的成功标记。报告还按稳定属性 ID 逐条给出判定（如 `confidentiality.insider-post-exclusion`、`integrity.ledger-verified`、`durability.cursor-within-document`）；`unavailable` 表示该属性未被覆盖，绝不算通过。
+
+协作剧本包含一次成员移除：移除之后封装的内容对被移除的内部人保密。若内部人能打开它，且攻击者从未向任何诚实客户端隐藏控制或密钥记录，判 `violation`；若由控制流或密钥流上的 `forkView` 导致，判 `outside-model`（绕过了新鲜度假设）。内部人暴露后，仅凭声称恢复了排除前明文不构成泄密，因为历史包本来就允许该内部人合法推导。
 
 保密挑战使用诚实侧私有生成的未知内容；攻击者提交恢复证据，裁判私下比对。扫描后端明文泄漏是补充检查，不是密码学证明。长度、访问时机和公开账本等元数据不承诺隐藏。已授权恶意成员主动泄密、诚实端私钥被偷不属于服务器保密保证。
 

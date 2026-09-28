@@ -8,14 +8,18 @@ import {
   riverrunNextOffsetEffect,
   riverrunRecordCountEffect,
 } from './attacks';
-import { CONTROL_STREAM, FLOCK_STREAM, LORO_STREAM } from './platform/protocol';
+import { CONTROL_STREAM, FLOCK_STREAM, KEYS_STREAM, LORO_STREAM } from './platform/protocol';
 import {
   composeDurability,
   composeIntegrity,
   judgeClaim,
+  judgeClientDurability,
+  judgeInsiderLeak,
   judgeLeak,
+  worstVerdict,
   type JudgeVerdict,
 } from './judge';
+import { insiderDecryptEffect, type InsiderFrame, type InsiderMaterial } from './insider';
 import { canPermitEvent, type LabEvent } from './scheduler';
 import { firstReplayDivergence, type Divergence } from './replay';
 import { LabRuntime, type ProtocolFrame } from './runtime';
@@ -43,7 +47,30 @@ export interface PublicView {
   readonly genesisHex: string | null;
   readonly backendBytes: number;
   readonly errors: readonly string[];
+  /** Excluded parties whose retained keys the attacker now holds. */
+  readonly insiders: readonly string[];
+  /** Active per-client split views. */
+  readonly views: readonly { readonly actor: string; readonly stream: string }[];
   readonly unmet?: boolean;
+}
+
+/** Stable property ids; each is judged separately so coverage is explicit. */
+export const PROPERTY_IDS = [
+  'confidentiality.backend-plaintext',
+  'confidentiality.insider-post-exclusion',
+  'integrity.ledger-verified',
+  'integrity.content-authorized',
+  'integrity.context-bound',
+  'integrity.forged-claims',
+  'durability.cursor-within-document',
+  'durability.no-loss',
+] as const;
+
+export type PropertyId = (typeof PROPERTY_IDS)[number];
+
+export interface PropertyVerdict {
+  readonly id: PropertyId;
+  readonly verdict: JudgeVerdict;
 }
 
 export interface PublicReport {
@@ -51,6 +78,11 @@ export interface PublicReport {
   readonly integrity: JudgeVerdict;
   readonly durability: JudgeVerdict;
   readonly detectability: JudgeVerdict;
+  /**
+   * One row per PROPERTY_IDS entry; `unavailable` rows are uncovered, not passes.
+   * Always set by `finish`; absent only in reports built outside AttackLab.
+   */
+  readonly properties?: readonly PropertyVerdict[];
   readonly budgetExceeded: boolean;
   readonly claims: number;
 }
@@ -63,6 +95,9 @@ export interface AttackAction {
     | 'readBackend'
     | 'mutateBackend'
     | 'intercept'
+    | 'forkView'
+    | 'releaseView'
+    | 'insiderRead'
     | 'submitClaim'
     | 'finish';
   readonly input?: Record<string, unknown>;
@@ -92,6 +127,21 @@ export interface AttackClaim {
   readonly evidence?: string;
 }
 
+export const VIEW_STREAMS = [CONTROL_STREAM, KEYS_STREAM, LORO_STREAM, FLOCK_STREAM] as const;
+
+/** Withhold everything after the current tail of `stream` from `actor` only. */
+export interface ViewFork {
+  readonly eventId: string;
+  readonly actor: string;
+  readonly stream: (typeof VIEW_STREAMS)[number];
+}
+
+/** Harness-private content an excluded insider must not be able to decrypt. */
+export interface ProtectedSecret {
+  readonly text: string;
+  readonly hiddenFrom: readonly string[];
+}
+
 export interface AttackLab {
   observe(): Promise<PublicView>;
   advance(input: { steps: number }): Promise<PublicView>;
@@ -99,6 +149,10 @@ export interface AttackLab {
   readBackend(input: BackendRead): Promise<Uint8Array>;
   mutateBackend(input: BackendMutation): Promise<{ ok: boolean }>;
   intercept(input: ResponseMutation): Promise<{ ok: boolean }>;
+  forkView(input: ViewFork): Promise<{ at: number }>;
+  releaseView(input: Omit<ViewFork, 'eventId'>): Promise<{ ok: boolean }>;
+  /** Decrypt server-visible content with an exposed insider's retained keys. */
+  insiderRead(input: { insider: string }): Promise<readonly InsiderFrame[]>;
   submitClaim(input: AttackClaim): Promise<{ received: true }>;
   finish(): Promise<PublicReport>;
   actions(): readonly AttackAction[];
@@ -141,6 +195,10 @@ type PrivateState = {
   expectedPlaintext: string;
   genesisHex: () => string | null;
   inspectHonest?: () => Promise<HonestInspect>;
+  insiders: () => readonly InsiderMaterial[];
+  protectedSecrets: () => readonly ProtectedSecret[];
+  /** Streams any client was ever denied the tail of; survives releaseView. */
+  forkedStreams: Set<string>;
   expectedLength: number;
   errors: string[];
   claims: AttackClaim[];
@@ -186,6 +244,8 @@ function publicViewEffect(state: PrivateState): Effect.Effect<PublicView, never,
       genesisHex: state.genesisHex(),
       backendBytes,
       errors: [...state.errors],
+      insiders: state.insiders().map((insider) => insider.name),
+      views: state.runtime.views().map(({ actor, stream }) => ({ actor, stream })),
     };
   });
 }
@@ -549,6 +609,10 @@ export function createAttackLab(input: {
   genesisHex?: string | null | (() => string | null);
   expectedLength?: number;
   inspectHonest?: () => Promise<HonestInspect>;
+  /** Insiders exposed so far (excluded parties now colluding with the server). */
+  insiders?: () => readonly InsiderMaterial[];
+  /** Content each insider must not decrypt; judged at finish. */
+  protectedSecrets?: () => readonly ProtectedSecret[];
   /** Harness-set attacker wall-clock budget; the attacker cannot extend it. */
   maxMs?: number;
   maxMutations?: number;
@@ -563,6 +627,9 @@ export function createAttackLab(input: {
     readBackend: (body) => runLab(lab, readBackendEffect(lab, body)),
     mutateBackend: (body) => runLab(lab, mutateBackendEffect(lab, body)),
     intercept: (body) => runLab(lab, interceptEffect(lab, body)),
+    forkView: (body) => runLab(lab, forkViewEffect(lab, body)),
+    releaseView: (body) => runLab(lab, releaseViewEffect(lab, body)),
+    insiderRead: (body) => runLab(lab, insiderReadEffect(lab, body)),
     submitClaim: (body) => runLab(lab, submitClaimEffect(lab, body)),
     finish: () => runLab(lab, finishEffect(lab)),
     actions: () => [...(secrets.get(lab)?.actions ?? [])],
@@ -584,6 +651,9 @@ export function createAttackLab(input: {
         ? input.genesisHex
         : () => (input.genesisHex as string | null | undefined) ?? null,
     inspectHonest: input.inspectHonest,
+    insiders: input.insiders ?? (() => []),
+    protectedSecrets: input.protectedSecrets ?? (() => []),
+    forkedStreams: new Set(),
     expectedLength: input.expectedLength ?? 1,
     errors: [],
     claims: [],
@@ -733,6 +803,112 @@ function interceptEffect(
   });
 }
 
+function knownActor(state: PrivateState, actor: string): boolean {
+  return actor !== 'script' && state.runtime.events().some((event) => event.actor === actor);
+}
+
+function forkViewEffect(
+  lab: AttackLab,
+  input: ViewFork
+): Effect.Effect<{ at: number }, unknown, LabServices> {
+  return Effect.gen(function* () {
+    const state = priv(lab);
+    yield* assertBudgetEffect(state);
+    recordAction(state, { op: 'forkView', input: { ...input } });
+    if (!(VIEW_STREAMS as readonly string[]).includes(input.stream)) {
+      return yield* Effect.fail(new Error('invalid-stream'));
+    }
+    if (!knownEvent(state, input.eventId) && input.eventId !== 'barrier') {
+      return yield* Effect.fail(new Error('invalid-event'));
+    }
+    if (!knownActor(state, input.actor)) return yield* Effect.fail(new Error('invalid-actor'));
+    const genesisHex = state.genesisHex();
+    if (!genesisHex) return yield* Effect.fail(new Error('no-space'));
+    const tail = yield* riverrunNextOffsetEffect(state.host.riverrunUrl, genesisHex, input.stream);
+    const at = Math.max(0, Number(tail));
+    state.runtime.freezeView({ actor: input.actor, stream: input.stream, at });
+    state.forkedStreams.add(input.stream);
+    state.replayActions[state.replayActions.length - 1] = {
+      op: 'forkView',
+      input: { ...input, receipt: at },
+    };
+    return { at };
+  });
+}
+
+function releaseViewEffect(
+  lab: AttackLab,
+  input: Omit<ViewFork, 'eventId'>
+): Effect.Effect<{ ok: boolean }, unknown, LabServices> {
+  return Effect.gen(function* () {
+    const state = priv(lab);
+    yield* assertBudgetEffect(state);
+    recordAction(state, { op: 'releaseView', input: { ...input } });
+    const held = state.runtime
+      .views()
+      .some((row) => row.actor === input.actor && row.stream === input.stream);
+    state.runtime.releaseView(input.actor, input.stream);
+    return { ok: held };
+  });
+}
+
+function insiderReadEffect(
+  lab: AttackLab,
+  input: { insider: string }
+): Effect.Effect<readonly InsiderFrame[], unknown, LabServices> {
+  return Effect.gen(function* () {
+    const state = priv(lab);
+    yield* assertBudgetEffect(state);
+    recordAction(state, { op: 'insiderRead', input: { ...input } });
+    const insider = state.insiders().find((row) => row.name === input.insider);
+    if (!insider) return yield* Effect.fail(new Error('invalid-insider'));
+    const genesisHex = state.genesisHex();
+    if (!genesisHex) return yield* Effect.fail(new Error('no-space'));
+    const frames = yield* insiderDecryptEffect({
+      riverrunUrl: state.host.riverrunUrl,
+      genesisHex,
+      insider,
+    });
+    if (frames === null) return yield* Effect.fail(new Error('backend-unreadable'));
+    return frames;
+  });
+}
+
+/**
+ * Decrypt with every exposed insider's keys and look for content protected from
+ * that insider. Also honours plaintext claims naming a protected secret.
+ */
+function insiderLeakEffect(
+  state: PrivateState
+): Effect.Effect<{ observed: boolean; leaked: boolean }, never, LabServices> {
+  return Effect.gen(function* () {
+    const insiders = state.insiders();
+    const protectedSecrets = state.protectedSecrets();
+    const genesisHex = state.genesisHex();
+    if (insiders.length === 0 || protectedSecrets.length === 0 || !genesisHex) {
+      return { observed: false, leaked: false };
+    }
+    let leaked = state.claims.some(
+      (claim) =>
+        claim.kind === 'plaintext' &&
+        protectedSecrets.some((secret) => secret.text === claim.evidence)
+    );
+    for (const insider of insiders) {
+      const hidden = protectedSecrets.filter((secret) => secret.hiddenFrom.includes(insider.name));
+      if (hidden.length === 0) continue;
+      const frames = yield* insiderDecryptEffect({
+        riverrunUrl: state.host.riverrunUrl,
+        genesisHex,
+        insider,
+      });
+      if (frames === null) return { observed: false, leaked };
+      const text = frames.map((frame) => frame.text).join('\n');
+      if (hidden.some((secret) => text.includes(secret.text))) leaked = true;
+    }
+    return { observed: true, leaked };
+  });
+}
+
 function submitClaimEffect(
   lab: AttackLab,
   input: AttackClaim
@@ -766,19 +942,42 @@ function finishEffect(lab: AttackLab): Effect.Effect<PublicReport, unknown, LabS
       ? fs.readBytes(state.host.riverrunDbPath)
       : new Uint8Array();
     const leaked = Buffer.from(disk).includes(state.expectedPlaintext);
-    const recovered = state.claims.some(
+    const plaintextClaimed = state.claims.some(
       (claim) => claim.kind === 'plaintext' && claim.evidence === state.expectedPlaintext
     );
+    // An exposed insider may legitimately derive pre-exclusion content (history packets),
+    // so a claim alone no longer proves a breach; plaintext on disk still does.
+    const recovered = plaintextClaimed && state.insiders().length === 0;
     let reachable = false;
     const health = yield* Effect.tryPromise({
       try: () => http.fetch(`${state.host.baseUrl}/healthz`),
       catch: (error) => error,
     }).pipe(Effect.catchAll(() => Effect.succeed(null)));
     if (health) reachable = health.ok;
-    const confidentiality = judgeLeak({ backendContainsPlaintext: leaked || recovered });
+    const backendPlaintext = judgeLeak({ backendContainsPlaintext: leaked || recovered });
+    const insider = yield* insiderLeakEffect(state);
+    const insiderVerdict = judgeInsiderLeak({
+      ...insider,
+      freshnessBypassed:
+        state.forkedStreams.has(CONTROL_STREAM) || state.forkedStreams.has(KEYS_STREAM),
+    });
+    const confidentiality = worstVerdict([backendPlaintext, insiderVerdict]);
+    const properties: Record<PropertyId, JudgeVerdict> = {
+      'confidentiality.backend-plaintext': backendPlaintext,
+      'confidentiality.insider-post-exclusion': insiderVerdict,
+      'integrity.ledger-verified': 'unavailable',
+      'integrity.content-authorized': 'unavailable',
+      'integrity.context-bound': 'unavailable',
+      'integrity.forged-claims': 'unavailable',
+      'durability.cursor-within-document': 'unavailable',
+      'durability.no-loss': 'unavailable',
+    };
     let integrity: JudgeVerdict = 'unavailable';
     let durability: JudgeVerdict = 'unavailable';
-    let detectability: JudgeVerdict = leaked || recovered ? 'violation' : 'pass';
+    let detectability: JudgeVerdict = worstVerdict([
+      leaked || recovered ? 'violation' : 'pass',
+      insiderVerdict,
+    ]);
     if (reachable) {
       const measured = yield* measureHonest(state);
       const observed =
@@ -789,7 +988,9 @@ function finishEffect(lab: AttackLab): Effect.Effect<PublicReport, unknown, LabS
       const claimInputs = state.claims.map((claim) => ({
         kind: claim.kind,
         plaintextRecovered:
-          claim.kind === 'plaintext' && claim.evidence === state.expectedPlaintext,
+          claim.kind === 'plaintext' &&
+          claim.evidence === state.expectedPlaintext &&
+          state.insiders().length === 0,
         unverifiedAccepted: measured.unverifiedAccepted,
         cursorAhead: measured.cursorAhead === true,
       }));
@@ -815,13 +1016,46 @@ function finishEffect(lab: AttackLab): Effect.Effect<PublicReport, unknown, LabS
           break;
         }
       }
-      if (measured.unauthorizedContentAccepted) detectability = 'outside-model';
+      if (measured.unauthorizedContentAccepted && detectability !== 'violation') {
+        detectability = 'outside-model';
+      }
+      if (observed) {
+        properties['integrity.ledger-verified'] =
+          (measured.unverifiedAccepted ?? 0) > 0 ? 'violation' : 'pass';
+        properties['integrity.content-authorized'] = measured.contentScanIncomplete
+          ? 'harness-error'
+          : measured.unauthorizedContentAccepted === undefined
+            ? 'unavailable'
+            : measured.unauthorizedContentAccepted
+              ? 'outside-model'
+              : 'pass';
+        properties['integrity.context-bound'] =
+          measured.wrongContextAccepted === undefined
+            ? 'unavailable'
+            : measured.wrongContextAccepted
+              ? 'violation'
+              : 'pass';
+        const forged = claimInputs.filter((claim) => claim.kind === 'forged-accepted');
+        if (forged.length > 0)
+          properties['integrity.forged-claims'] = worstVerdict(forged.map(judgeClaim));
+        properties['durability.cursor-within-document'] = judgeClientDurability({
+          observed: true,
+          cursorAheadOfDocument: measured.cursorAhead === true,
+          lostDurableData: false,
+        });
+        properties['durability.no-loss'] = judgeClientDurability({
+          observed: true,
+          cursorAheadOfDocument: false,
+          lostDurableData: measured.durableLoss === true,
+        });
+      }
     }
     return {
       confidentiality,
       integrity,
       durability,
       detectability,
+      properties: PROPERTY_IDS.map((id) => ({ id, verdict: properties[id] })),
       budgetExceeded: clock.nowMs() - state.startedMs > state.maxMs,
       claims: state.claims.length,
     };
@@ -885,6 +1119,29 @@ export async function applyAttackAction(
         status: action.input?.status as number | undefined,
         bodyHex: action.input?.bodyHex as string | undefined,
       });
+      return undefined;
+    case 'forkView': {
+      const result = await lab.forkView({
+        eventId: String(action.input?.eventId ?? 'barrier'),
+        actor: String(action.input?.actor ?? ''),
+        stream: String(action.input?.stream ?? CONTROL_STREAM) as ViewFork['stream'],
+      });
+      const receipt = action.input?.receipt;
+      if (receipt !== undefined && result.at !== receipt) {
+        throw new Error(
+          `replay-divergence:forkView:${String(action.input?.stream)}:expected:${String(receipt)}:actual:${result.at}`
+        );
+      }
+      return undefined;
+    }
+    case 'releaseView':
+      await lab.releaseView({
+        actor: String(action.input?.actor ?? ''),
+        stream: String(action.input?.stream ?? CONTROL_STREAM) as ViewFork['stream'],
+      });
+      return undefined;
+    case 'insiderRead':
+      await lab.insiderRead({ insider: String(action.input?.insider ?? '') });
       return undefined;
     case 'submitClaim':
       await lab.submitClaim({
@@ -968,20 +1225,37 @@ export async function replayAttackActions(
       }
     }
   }
-  if (!divergence && expected?.report) {
-    for (const field of ['confidentiality', 'integrity', 'durability', 'detectability'] as const) {
-      if (report[field] !== expected.report[field]) {
-        divergence = {
-          index: 0,
-          field: `verdict.${field}`,
-          expected: String(expected.report[field]),
-          actual: String(report[field]),
-        };
-        break;
-      }
+  if (!divergence && expected?.report) divergence = firstReportDivergence(expected.report, report);
+  return { report, divergence };
+}
+
+/** First differing verdict, including per-property rows. */
+export function firstReportDivergence(
+  expected: PublicReport,
+  actual: PublicReport
+): Divergence | null {
+  for (const field of ['confidentiality', 'integrity', 'durability', 'detectability'] as const) {
+    if (actual[field] !== expected[field]) {
+      return {
+        index: 0,
+        field: `verdict.${field}`,
+        expected: String(expected[field]),
+        actual: String(actual[field]),
+      };
     }
   }
-  return { report, divergence };
+  const byId = new Map((actual.properties ?? []).map((row) => [row.id, row.verdict]));
+  for (const [index, row] of (expected.properties ?? []).entries()) {
+    if (byId.get(row.id) !== row.verdict) {
+      return {
+        index,
+        field: `property.${row.id}`,
+        expected: row.verdict,
+        actual: String(byId.get(row.id)),
+      };
+    }
+  }
+  return null;
 }
 
 function interceptKind(kind: unknown): ResponseMutation['kind'] {

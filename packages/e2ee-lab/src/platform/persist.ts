@@ -64,8 +64,18 @@ export function loadFlockDocument(
 function loadCursorFile(path: string, streamUrl: string, disk: LabFsShape): RemoteCursor | null {
   if (!disk.exists(path)) return null;
   const raw = JSON.parse(disk.readText(path)) as RemoteCursor;
-  if (raw.streamUrl !== streamUrl) return null;
-  return raw;
+  // Same stream path is the same stream: a host restarted on its data directory may
+  // listen on another port, and dropping the cursor would re-export local history.
+  if (streamPath(raw.streamUrl) !== streamPath(streamUrl)) return null;
+  return { ...raw, streamUrl };
+}
+
+function streamPath(url: string): string {
+  try {
+    return new URL(url).pathname;
+  } catch {
+    return url;
+  }
 }
 
 /** Cursor files are invalid unless the matching document snapshot exists. */

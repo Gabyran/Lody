@@ -23,9 +23,17 @@ pnpm --filter @lody/e2ee-lab exec tsx src/cli.ts --data-dir /tmp/e2ee-lab-data -
 ```
 
 `check` 是类型检查加测试。根命令不构建旧 demo UI。`scenario:collab` 运行
-多人持续协作脚本（Alice/Bob/Carol/Dave，离线重连、撤权换代、快照引导、
-崩溃恢复），先无攻击对照，再在指定事件边界注入固定攻击。`attack:model`
-让真实模型在协作进行中选择边界与攻击动作。`replay` 在三个新目录中无模型
+多人持续协作脚本（Alice/Bob/Carol/Dave/Eve，离线重连、撤权换代、快照引导、
+移除 Eve 及移除到换代之间的窗口、移除前排队并在之后上传的离线编辑、降为
+Guest、崩溃恢复），先无攻击对照，再在指定事件边界注入固定攻击，包括只对
+Bob 隐藏 Eve 被移除的按客户端分叉视图。从 Eve 被移除起，攻击者持有她保留的
+密钥（`insiderRead`）；裁判检查此后封装的内容都无法用这些密钥打开。报告按属性
+逐条给出判定（`report.properties`）。`attack:model` 运行有预算的多轮模型
+Agent：可等待指定步骤、行动、读取错误与内部人读取结果，再继续行动。可用
+`E2EE_AGENT_GOAL`（`insider-read`、`forge-content`、`ledger-fork`、`any`）、
+`E2EE_AGENT_MODEL`、`E2EE_AGENT_TEMPERATURE`（默认 0.7）、`E2EE_AGENT_SEED`、
+`E2EE_AGENT_MAX_DECISIONS`，或自定义 `E2EE_AGENT_URL`/`E2EE_AGENT_KEY` 配置。
+`replay` 在三个新目录中无模型
 重放 CAS、丢 ACK、密文篡改和同一份攻击记录，并在首个事件、随机请求、
 协议帧或客户端状态分歧处失败。私有设备材料留在测试进程内，不写入公开记录。
 独立复现包（`e2ee-lab-repro/v1`）绑定 HEAD **和**脏树哈希；`repro-cli.ts replay`

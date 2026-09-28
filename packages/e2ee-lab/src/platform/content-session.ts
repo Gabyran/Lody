@@ -213,6 +213,48 @@ function gatedCursorStore(session: ContentClient, inner: RemoteCursorStore): Rem
   };
 }
 
+type VersionEntry = number | { physicalTime?: number; logicalCounter?: number };
+
+function laterEntry(left: VersionEntry | undefined, right: VersionEntry): VersionEntry {
+  if (left === undefined) return right;
+  if (typeof left === 'number' || typeof right === 'number') {
+    return Math.max(Number(left), Number(right));
+  }
+  const order =
+    (left.physicalTime ?? 0) - (right.physicalTime ?? 0) ||
+    (left.logicalCounter ?? 0) - (right.logicalCounter ?? 0);
+  return order >= 0 ? left : right;
+}
+
+/**
+ * `appendWriteOnly` reports only the appended batch's version and the post-append tail;
+ * it is not a read cursor. Keep the last read offset so remote records appended since are
+ * still imported, and add the batch to the server lower bound instead of replacing it.
+ * Replacing it made the next sync re-export every imported op under this writer.
+ */
+async function saveWriterCursor(
+  store: RemoteCursorStore,
+  streamUrl: string,
+  appended: unknown,
+  now: number
+): Promise<void> {
+  const localVersion = (appended as { localVersion?: unknown } | undefined)?.localVersion;
+  if (!localVersion || typeof localVersion !== 'object') return;
+  const previous = await store.load(streamUrl);
+  const merged: Record<string, VersionEntry> = {
+    ...((previous?.serverLowerBoundVersion ?? {}) as Record<string, VersionEntry>),
+  };
+  for (const [peer, entry] of Object.entries(localVersion as Record<string, VersionEntry>)) {
+    merged[peer] = laterEntry(merged[peer], entry);
+  }
+  await store.save({
+    streamUrl,
+    nextOffset: previous?.nextOffset ?? '-1',
+    serverLowerBoundVersion: merged as RemoteCursor['serverLowerBoundVersion'],
+    updatedAtMs: now,
+  });
+}
+
 function loroCursorStore(session: ContentClient): RemoteCursorStore {
   const inner = session.clientDir
     ? new FileRemoteCursorStore(session.clientDir, 'loro', sessionFs(session))
@@ -280,13 +322,7 @@ export async function writeLoro(session: ContentClient, text: string): Promise<v
   }
   const value = 'value' in appended ? appended.value : undefined;
   if (session.clientDir && value && 'nextOffset' in value && typeof value.nextOffset === 'string') {
-    await cursorStore.save({
-      streamUrl,
-      nextOffset: value.nextOffset,
-      serverLowerBoundVersion:
-        (value.localVersion as RemoteCursor['serverLowerBoundVersion']) ?? {},
-      updatedAtMs: sessionNow(session),
-    });
+    await saveWriterCursor(cursorStore, streamUrl, value, sessionNow(session));
   }
   await crdt.close();
 }
@@ -375,13 +411,7 @@ export async function writeFlock(
     'nextOffset' in result &&
     typeof result.nextOffset === 'string'
   ) {
-    await cursorStore.save({
-      streamUrl,
-      nextOffset: result.nextOffset,
-      serverLowerBoundVersion:
-        (result.localVersion as RemoteCursor['serverLowerBoundVersion']) ?? {},
-      updatedAtMs: sessionNow(session),
-    });
+    await saveWriterCursor(cursorStore, streamUrl, result, sessionNow(session));
   }
   await crdt.close();
 }

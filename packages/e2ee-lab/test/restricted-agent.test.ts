@@ -10,6 +10,7 @@ import {
 } from '../src/attack-lab';
 import { writeFileSync } from 'node:fs';
 import {
+  collabAgentOptionsFromEnv,
   collabModelAgent,
   listAgentEndpoints,
   runRestrictedAgentWithFallback,
@@ -118,16 +119,9 @@ describe('P4 restricted LLM Agent', () => {
     let endpointUsed: (typeof endpoints)[number] | undefined;
     let probeError: unknown;
     for (const endpoint of endpoints) {
-      const candidate = collabModelAgent(endpoint);
+      const candidate = collabModelAgent(endpoint, collabAgentOptionsFromEnv());
       try {
-        await candidate.act({
-          step: 0,
-          stepName: 'probe',
-          turn: 0,
-          remainingSteps: collabScript().map((step) => step.name),
-          view: { events: [], genesisHex: null, backendBytes: 0, errors: [] },
-          readBackend: async () => new Uint8Array(),
-        });
+        await candidate.probe();
         agent = candidate;
         endpointUsed = endpoint;
         break;
@@ -152,7 +146,8 @@ describe('P4 restricted LLM Agent', () => {
       (outcome) => outcome.error && !outcome.name.startsWith('agent:')
     );
     const attackActions = run.material.actions.filter(
-      (action) => action.op === 'intercept' || action.op === 'mutateBackend'
+      (action) =>
+        action.op === 'intercept' || action.op === 'mutateBackend' || action.op === 'forkView'
     );
     // A real attack, chosen while collaboration was in flight — not just
     // observe/readBackend/submitClaim/finish.
@@ -172,7 +167,10 @@ describe('P4 restricted LLM Agent', () => {
     const mutated = run.material.actions.some(
       (action) => action.op === 'mutateBackend' && action.input?.receipt === true
     );
-    expect(intercepted || mutated).toBe(true);
+    const forked = run.material.actions.some(
+      (action) => action.op === 'forkView' && typeof action.input?.receipt === 'number'
+    );
+    expect(intercepted || mutated || forked).toBe(true);
     expect(JSON.stringify(run.lab.actions())).not.toContain(world.secret);
 
     // Same record replays model-free in three fresh directory sets.
@@ -195,9 +193,11 @@ describe('P4 restricted LLM Agent', () => {
           {
             host: new URL(endpointUsed.url).host,
             model: endpointUsed.model,
+            sampling: agent.sampling,
+            decisions: agent.history,
             attackOps: attackActions.map((action) => action.op),
             marks: run.material.marks,
-            hit: { intercepted, mutated },
+            hit: { intercepted, mutated, forked },
             report: run.report,
             replays: replays.map((r) => ({ report: r.report, divergence: r.divergence })),
           },

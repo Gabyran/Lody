@@ -11,6 +11,7 @@ import { Either } from 'effect';
 import {
   applyAttackAction,
   createAttackLab,
+  firstReportDivergence,
   harnessReplayActions,
   harnessReplayMaterial,
   inspectClient,
@@ -19,9 +20,12 @@ import {
   type BackendRead,
   type ClientDigest,
   type HonestInspect,
+  type ProtectedSecret,
   type PublicReport,
   type PublicView,
 } from './attack-lab';
+import type { InsiderFrame, InsiderMaterial } from './insider';
+import { REPRO_SCENARIO_COLLAB } from './identity';
 import { firstReplayDivergence, type Divergence } from './replay';
 import {
   bootstrapLoroFromSnapshot,
@@ -54,9 +58,10 @@ import { makeLiveFs } from './services/fs';
 const here = dirname(fileURLToPath(import.meta.url));
 const tsxLoader = pathToFileURL(createRequire(import.meta.url).resolve('tsx')).href;
 
-export const COLLAB_SCENARIO = 'collab-v1';
+export const COLLAB_SCENARIO = REPRO_SCENARIO_COLLAB;
 
-const MEMBERS = ['alice', 'bob', 'carol', 'dave'] as const;
+const MEMBERS = ['alice', 'bob', 'carol', 'dave', 'eve'] as const;
+type Member = (typeof MEMBERS)[number];
 const EXTRA_DEVICES = ['spare', 'crash'] as const;
 
 export interface CollabWorld {
@@ -75,7 +80,14 @@ export interface CollabWorld {
   secret: string;
   genesisHex: string;
   joins: Record<string, JoinRequestWire | undefined>;
+  memberships: Record<string, Uint8Array | undefined>;
   offlineWriter?: ReturnType<typeof loroWriter>;
+  /** Removed members; honest measurement skips them. */
+  excluded: Set<Member>;
+  /** Excluded parties whose retained keys the attacker holds from exclusion on. */
+  insiders: InsiderMaterial[];
+  /** Content each insider must never decrypt. */
+  protectedSecrets: ProtectedSecret[];
   /** Deterministic wall clock (Flock physicalTime; host clock is harness/DI). */
   readonly now: () => number;
 }
@@ -92,7 +104,10 @@ export interface AgentTurn {
   /** Names of this and all later script steps, so a planning agent can pick a boundary. */
   readonly remainingSteps: readonly string[];
   readonly view: PublicView;
+  /** Errors from this agent's actions since its previous turn. */
+  readonly feedback: readonly string[];
   readBackend(input: BackendRead): Promise<Uint8Array>;
+  insiderRead(input: { insider: string }): Promise<readonly InsiderFrame[]>;
 }
 
 /** Model or scripted attacker. `pass` lets the step drain untouched. */
@@ -201,6 +216,10 @@ export async function createCollabWorld(options: CollabWorldOptions = {}): Promi
       `collab-secret-${toHex(liveEntropy.fill('collab-secret', new Uint8Array(6)))}`,
     genesisHex: '',
     joins: {},
+    memberships: {},
+    excluded: new Set(),
+    insiders: [],
+    protectedSecrets: [],
     hostFacade: undefined as unknown as LabBackend,
     now: options.now ?? (() => 1_700_000_000_000 + tick++),
   };
@@ -303,6 +322,142 @@ async function spawnCrashClient(
   );
 }
 
+async function receiveEpoch(w: CollabWorld, name: Member, epoch: number): Promise<void> {
+  await w.members[name].readLedger();
+  await w.members[name].receiveEpochKey(
+    w.members.alice.device,
+    epoch,
+    await lastFrame(w.members[name])
+  );
+}
+
+/** Register before writing, so a write that should have been refused is still judged. */
+function protect(w: CollabWorld, label: string, hiddenFrom: readonly string[]): string {
+  const text = `${label}:${w.secret}`;
+  w.protectedSecrets.push({ text, hiddenFrom });
+  return text;
+}
+
+/**
+ * Member removal and the revoke-to-rotate window. Eve's retained keys go to the
+ * attacker at removal; everything sealed afterwards must stay opaque to her,
+ * including an offline edit Bob queued while she was still a member.
+ */
+function exclusionSteps(): readonly CollabStep[] {
+  return [
+    step('eve-request-join', async (w) => {
+      w.joins['eve'] = await w.members.eve.requestJoin(w.genesisHex);
+    }),
+    step('alice-approve-eve', async (w) => {
+      const approved = await w.members.alice.approveJoin(w.joins['eve']!);
+      if (approved.status !== 'committed') throw new Error(`approve-eve:${approved.status}`);
+      w.memberships['eve'] = approved.membershipId;
+    }),
+    step('alice-deliver-epoch1-eve', async (w) => {
+      await w.members.alice.deliverEpochKey(w.members.eve.device, 1);
+    }),
+    step('eve-receive-epoch1', (w) => receiveEpoch(w, 'eve', 1)),
+    step('eve-write-loro', async (w) => {
+      await writeLoro(w.members.eve, 'eve-edit');
+    }),
+    step('bob-sync-eve', async (w) => {
+      expectText(await readLoro(w.members.bob), 'eve-edit');
+    }),
+    step('bob-offline-queue', async (w) => {
+      const doc = w.members.bob.loroDoc;
+      if (!doc) throw new Error('offline-no-doc');
+      w.offlineWriter = loroWriter(w.members.bob, doc);
+      const text = doc.getText('text');
+      text.insert(text.toString().length, ` ${protect(w, 'bob-queued', ['eve'])}`);
+      doc.commit();
+      persistLoroDocument(w.dirs['bob']!, doc);
+    }),
+    step('alice-remove-eve', async (w) => {
+      const removed = await w.members.alice.removeMember(w.memberships['eve']!);
+      if (removed.status !== 'committed') throw new Error(`remove-eve:${removed.status}`);
+      w.excluded.add('eve');
+      w.insiders.push({ name: 'eve', epochKeys: new Map(w.members.eve.epochKeys) });
+    }),
+    step('alice-window-write-refused', async (w) => {
+      let refused = false;
+      try {
+        await writeLoro(w.members.alice, protect(w, 'window', ['eve']));
+      } catch (error) {
+        refused = String(error).includes('rotation-required');
+      }
+      if (!refused) throw new Error('window-write-accepted');
+    }),
+    step('alice-publish-epoch2', async (w) => {
+      const published = await w.members.alice.publishEpoch();
+      if (published.status !== 'committed' || published.epoch !== 2) {
+        throw new Error(`publish-epoch2:${published.status}:${published.epoch}`);
+      }
+    }),
+    ...(['bob', 'carol', 'dave'] as const).flatMap((name) => [
+      step(`alice-deliver-epoch2-${name}`, async (w) => {
+        await w.members.alice.deliverEpochKey(w.members[name].device, 2);
+      }),
+      step(`${name}-receive-epoch2`, (w) => receiveEpoch(w, name, 2)),
+    ]),
+    step('alice-write-epoch2', async (w) => {
+      await writeLoro(w.members.alice, protect(w, 'alice-post-removal', ['eve']));
+    }),
+    step('bob-reconnect-queued', async (w) => {
+      const stale = w.offlineWriter;
+      const doc = w.members.bob.loroDoc;
+      if (!stale || !doc) throw new Error('offline-missing');
+      // A content session is fixed to one write epoch, so the pre-rotation writer must not
+      // upload. A writer built now never saw the queued commit; a full sync exports it.
+      await stale.close();
+      w.offlineWriter = undefined;
+      await w.members.bob.readLedger();
+      expectText(await readLoro(w.members.bob), 'bob-queued');
+    }),
+    step('bob-write-epoch2', async (w) => {
+      await writeLoro(w.members.bob, protect(w, 'bob-post-removal', ['eve']));
+    }),
+    step('carol-sync-epoch2', async (w) => {
+      const text = await readLoro(w.members.carol);
+      expectText(text, 'alice-post-removal');
+      expectText(text, 'bob-post-removal');
+      expectText(text, 'bob-queued');
+    }),
+    step('eve-read-after-removal', async (w) => {
+      const text = await readLoro(w.members.eve).catch(() => '');
+      for (const secret of w.protectedSecrets) {
+        if (text.includes(secret.text)) throw new Error('removed-member-read-protected');
+      }
+    }),
+    step('alice-demote-carol', async (w) => {
+      const carol = w.memberships['carol'];
+      if (!carol) throw new Error('carol-no-membership');
+      const demoted = await w.members.alice.submit({
+        type: 'setRole',
+        membershipId: carol,
+        role: 'guest',
+      });
+      if (demoted.status !== 'committed') throw new Error(`demote-carol:${demoted.status}`);
+    }),
+    step('carol-write-refused', async (w) => {
+      let refused = false;
+      // A refused local edit would stay in Carol's document and be retried on every sync,
+      // so attempt it on a throwaway in-memory view of the same session.
+      const scratch = Object.create(w.members.carol, {
+        loroDoc: { value: null, writable: true },
+        clientDir: { value: undefined },
+      }) as HonestClient;
+      try {
+        await writeLoro(scratch, 'carol-as-guest');
+      } catch {
+        refused = true;
+      }
+      scratch.loroDoc?.free();
+      if (!refused) throw new Error('guest-write-accepted');
+      expectText(await readLoro(w.members.carol), 'alice-post-removal');
+    }),
+  ];
+}
+
 /**
  * The canonical multi-member collaboration script. Deterministic and
  * sequential: at most one honest operation is in flight, so the recorded
@@ -380,6 +535,7 @@ export function collabScript(): readonly CollabStep[] {
     step('alice-approve-carol', async (w) => {
       const approved = await w.members.alice.approveJoin(w.joins['carol']!);
       if (approved.status !== 'committed') throw new Error(`approve-carol:${approved.status}`);
+      w.memberships['carol'] = approved.membershipId;
     }),
     step('alice-deliver-epoch0-carol', async (w) => {
       await w.members.alice.deliverEpochKey(w.members.carol.device, 0);
@@ -497,6 +653,7 @@ export function collabScript(): readonly CollabStep[] {
       expectText(boot.text, 'snap-checkpoint');
       expectText(await readLoro(w.members.dave), 'epoch-one');
     }),
+    ...exclusionSteps(),
     step('alice-admit-crash', async (w) => {
       const admitted = await w.members.alice.admitDevice(w.devices['crash']!, 'personal');
       if (admitted.status !== 'committed') throw new Error(`admit-crash:${admitted.status}`);
@@ -526,16 +683,22 @@ export function collabScript(): readonly CollabStep[] {
     }),
     step('final-converge', async (w) => {
       for (const name of MEMBERS) {
+        if (w.excluded.has(name)) continue;
         // Replace the stale member object so later measurement reads through
         // the restarted host, not the closed port.
         w.members[name] = await reconnect(w, name);
         await w.members[name].adoptGenesis(w.genesisHex);
-        const text = await readLoro(w.members[name]);
+        const text = await readLoro(w.members[name]).catch((error: unknown) => {
+          throw new Error(`${name}:${String(error)}`);
+        });
         for (const marker of [
           'alice-online',
           'bob-edit',
           'bob-offline',
           'epoch-one',
+          'eve-edit',
+          'alice-post-removal',
+          'bob-queued',
           'crash-mid',
         ]) {
           expectText(text, marker);
@@ -595,14 +758,20 @@ export interface CollabRunOptions {
   readonly maxActions?: number;
 }
 
-function labFor(world: CollabWorld): AttackLab {
+function honestMembers(world: CollabWorld): readonly HonestClient[] {
+  return MEMBERS.filter((name) => !world.excluded.has(name)).map((name) => world.members[name]);
+}
+
+function labFor(world: CollabWorld, genesisHex?: string): AttackLab {
   return createAttackLab({
     host: world.hostFacade,
     runtime: world.runtime,
     clientDirs: world.clientDirs,
     expectedPlaintext: world.secret,
-    genesisHex: () => world.genesisHex || null,
-    inspectHonest: inspectClients(() => Object.values(world.members), world.hostFacade),
+    genesisHex: () => world.genesisHex || genesisHex || null,
+    inspectHonest: inspectClients(() => honestMembers(world), world.hostFacade),
+    insiders: () => world.insiders,
+    protectedSecrets: () => world.protectedSecrets,
     // A full collab run plus model latency needs more than the 30s default.
     maxMs: 600_000,
   });
@@ -647,6 +816,36 @@ export async function runCollabScenario(options: CollabRunOptions): Promise<Coll
   const requestedCount = (): number =>
     world.runtime.events().filter((event) => event.status === 'requested').length;
 
+  let feedbackFrom = 0;
+  const ask = async (
+    stepIndex: number,
+    stepName: string,
+    turn: number,
+    remainingSteps: readonly string[]
+  ): Promise<AttackAction | readonly AttackAction[] | 'pass'> => {
+    const feedback = outcomes
+      .slice(feedbackFrom)
+      .filter((row) => row.error && /^(attack|agent):/.test(row.name))
+      .map((row) => `${row.name}: ${row.error}`);
+    feedbackFrom = outcomes.length;
+    const view = await lab.observe();
+    try {
+      return await agent!.act({
+        step: stepIndex,
+        stepName,
+        turn,
+        remainingSteps,
+        view,
+        feedback,
+        readBackend: (input) => lab.readBackend(input),
+        insiderRead: (input) => lab.insiderRead(input),
+      });
+    } catch (error) {
+      outcomes.push({ name: `agent:${stepName}`, error: String(error) });
+      return 'pass';
+    }
+  };
+
   const agentTurns = async (
     stepIndex: number,
     stepName: string,
@@ -660,21 +859,12 @@ export async function runCollabScenario(options: CollabRunOptions): Promise<Coll
     for (let turn = 0; turn < maxTurns && !report && actionCount < maxActions; turn++) {
       if (settled || requestedCount() === 0) break;
       const before = harnessReplayActions(lab).length;
-      const view = await lab.observe();
-      let choice: AttackAction | readonly AttackAction[] | 'pass';
-      try {
-        choice = await agent!.act({
-          step: stepIndex,
-          stepName,
-          turn,
-          remainingSteps: script.slice(stepIndex).map((s) => s.name),
-          view,
-          readBackend: (input) => lab.readBackend(input),
-        });
-      } catch (error) {
-        outcomes.push({ name: `agent:${stepName}`, error: String(error) });
-        choice = 'pass';
-      }
+      const choice = await ask(
+        stepIndex,
+        stepName,
+        turn,
+        script.slice(stepIndex).map((s) => s.name)
+      );
       if (choice === 'pass') {
         markRecorded(stepIndex, before);
         break;
@@ -715,21 +905,7 @@ export async function runCollabScenario(options: CollabRunOptions): Promise<Coll
   if (agent && !report) {
     for (let turn = 0; turn < maxTurns && !report && actionCount < maxActions; turn++) {
       const before = harnessReplayActions(lab).length;
-      const view = await lab.observe();
-      let choice: AttackAction | readonly AttackAction[] | 'pass';
-      try {
-        choice = await agent.act({
-          step: script.length,
-          stepName: 'finish-boundary',
-          turn,
-          remainingSteps: [],
-          view,
-          readBackend: (input) => lab.readBackend(input),
-        });
-      } catch (error) {
-        outcomes.push({ name: 'agent:finish-boundary', error: String(error) });
-        choice = 'pass';
-      }
+      const choice = await ask(script.length, 'finish-boundary', turn, []);
       if (choice === 'pass') {
         markRecorded(script.length, before);
         break;
@@ -795,15 +971,7 @@ export async function replayCollabScenario(material: CollabMaterial): Promise<Co
     secret: material.secret,
     seeds: material.seeds,
   });
-  const lab = createAttackLab({
-    host: world.hostFacade,
-    runtime: world.runtime,
-    clientDirs: world.clientDirs,
-    expectedPlaintext: material.secret,
-    genesisHex: material.genesisHex || null,
-    inspectHonest: inspectClients(() => Object.values(world.members), world.hostFacade),
-    maxMs: 600_000,
-  });
+  const lab = labFor(world, material.genesisHex);
   const script = collabScript();
   const byStep = new Map<number, AttackAction[]>();
   material.actions.forEach((action, index) => {
@@ -914,15 +1082,5 @@ export function firstCollabDivergence(
       }
     }
   }
-  for (const field of ['confidentiality', 'integrity', 'durability', 'detectability'] as const) {
-    if (expected.report[field] !== actual.report[field]) {
-      return {
-        index: 0,
-        field: `verdict.${field}`,
-        expected: String(expected.report[field]),
-        actual: String(actual.report[field]),
-      };
-    }
-  }
-  return null;
+  return firstReportDivergence(expected.report, actual.report);
 }

@@ -8,7 +8,7 @@ const here = dirname(fileURLToPath(import.meta.url));
 const labRoot = join(here, '..');
 
 export const REPRO_FORMAT = 'e2ee-lab-repro/v1';
-export const REPRO_SCENARIO_COLLAB = 'collab-v1';
+export const REPRO_SCENARIO_COLLAB = 'collab-v2';
 export const REPRO_SCENARIO_DEFECT = 'defect-v1';
 
 export interface ImplementationIdentity {

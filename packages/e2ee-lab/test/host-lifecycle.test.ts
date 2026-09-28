@@ -14,6 +14,7 @@ import { exportDevice, generateDevice } from '../src/platform/device';
 import { riverrunRecordCount } from '../src/attacks';
 import { fromHex, toHex } from '../src/platform/bytes';
 import { maliciousAppendCas } from '../src/attacks';
+import { insiderDecrypt } from '../src/insider';
 import { LoroDoc } from 'loro-crdt';
 import { InMemoryRemoteCursorStore } from '@loro-dev/streams-crdt/loro';
 import { openEpochEnvelope } from '@lody/e2ee-core/ledger';
@@ -558,20 +559,52 @@ describe('lab host lifecycle', () => {
     expect(alice.canWriteDocument).toBe(false);
 
     // Bob keeps K_0 and reads Riverrun directly, bypassing the gateway (colluding server).
-    const colluding = () =>
-      readLoro(
-        Object.create(bob, {
-          baseUrl: { value: host.riverrunUrl },
-          prepareRead: { value: undefined },
-          loroDoc: { value: null, writable: true },
-        })
-      ).catch((error: unknown) => `refused:${String(error)}`);
+    const colluding = async () =>
+      (await insiderDecrypt({
+        riverrunUrl: host.riverrunUrl,
+        genesisHex: alice.genesisHex!,
+        insider: { name: 'bob', epochKeys: new Map(bob.epochKeys) },
+      }))!
+        .map((frame) => frame.text)
+        .join('\n');
+    expect(await colluding()).toContain('before-removal;');
     expect(await colluding()).not.toContain('during-window;');
 
     expect((await alice.publishEpoch()).status).toBe('committed');
     await writeLoro(alice, 'after-rotation;');
     expect(await readLoro(alice)).toContain('after-rotation;');
-    expect(await colluding()).not.toContain('after-rotation;');
+    const after = await colluding();
+    expect(after).toContain('before-removal;');
+    expect(after).not.toContain('after-rotation;');
+  });
+
+  it('lets a demoted guest read after reconnecting from its persisted document', async () => {
+    const host = await launchLab();
+    const alice = await labClient({ host, account: 'alice' });
+    const bob = await labClient({ host, account: 'bob' });
+    await alice.createSpace();
+    const admitted = await alice.approveJoin(await bob.requestJoin(alice.genesisHex!), 'member');
+    await bob.readLedger();
+    await bob.receiveEpochKey(alice.device, 0, await alice.deliverEpochKey(bob.device, 0));
+    await writeLoro(alice, 'alice-first;');
+    await writeLoro(bob, 'bob-first;');
+    expect(await readLoro(alice)).toContain('bob-first;');
+    expect(
+      (await alice.submit({ type: 'setRole', membershipId: admitted.membershipId, role: 'guest' }))
+        .status
+    ).toBe('committed');
+    await writeLoro(alice, 'alice-after-demotion;');
+    expect(await readLoro(bob)).toContain('alice-after-demotion;');
+    bob.close();
+    const restarted = await labClient({
+      host,
+      account: 'bob',
+      device: await exportDevice(bob.device),
+      clientDir: bob.clientDir,
+    });
+    await restarted.adoptGenesis(alice.genesisHex!);
+    await writeLoro(alice, 'alice-after-restart;');
+    expect(await readLoro(restarted)).toContain('alice-after-restart;');
   });
 
   it('rejects content writes from a guest', async () => {
