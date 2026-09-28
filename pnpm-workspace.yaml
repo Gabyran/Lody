@@ -49,7 +49,7 @@ catalog:
   effect: 3.18.4
   jotai: ^2.16.0
   loro-adaptors: ^0.6.1
-  loro-crdt: ^1.15.1
+  loro-crdt: 1.16.3
   loro-mirror: 2.3.2
   loro-mirror-jotai: 2.3.2
   loro-mirror-react: 2.3.2
@@ -79,6 +79,8 @@ minimumReleaseAge: 10080
 
 # Grandfather versions already locked on main; later releases remain quarantined.
 minimumReleaseAgeExclude:
+  # Explicit Loro fix for concurrent-import replay stalls, reviewed in this change.
+  - loro-crdt@1.16.3
   # Explicit Streams upgrade; keep the exception limited to the reviewed release.
   - '@loro-dev/streams-crdt@0.16.0'
   - '@loro-dev/streams-client@0.8.0'
@@ -168,6 +170,7 @@ onlyBuiltDependencies:
 overrides:
   acp-extension-core: workspace:*
   electron-builder-squirrel-windows: ^26.15.3
+  '@loro-dev/loro-cli>loro-crdt': 1.16.3
   tsx@4.21.0>esbuild: 0.27.0
   vite@7.3.1>esbuild: 0.27.0
   # Keep a single zod major graph so better-auth/better-call peer types do not

@@ -112,8 +112,8 @@ catalogs:
       specifier: ^0.6.1
       version: 0.6.1
     loro-crdt:
-      specifier: ^1.15.1
-      version: 1.15.1
+      specifier: 1.16.3
+      version: 1.16.3
     loro-mirror:
       specifier: 2.3.2
       version: 2.3.2
@@ -157,6 +157,7 @@ catalogs:
 overrides:
   acp-extension-core: workspace:*
   electron-builder-squirrel-windows: ^26.15.3
+  '@loro-dev/loro-cli>loro-crdt': 1.16.3
   tsx@4.21.0>esbuild: 0.27.0
   vite@7.3.1>esbuild: 0.27.0
   zod: 4.3.6
@@ -242,8 +243,8 @@ importers:
         specifier: 'catalog:'
         version: 13.0.3
       loro-crdt:
-        specifier: 1.15.1
-        version: 1.15.1
+        specifier: 1.16.3
+        version: 1.16.3
       shell-env:
         specifier: ^4.0.3
         version: 4.0.3
@@ -292,7 +293,7 @@ importers:
         version: 0.4.3
       '@loro-dev/streams-crdt':
         specifier: 'catalog:'
-        version: 0.16.0(@loro-dev/flock-wasm@0.4.3)(loro-crdt@1.15.1)
+        version: 0.16.0(@loro-dev/flock-wasm@0.4.3)(loro-crdt@1.16.3)
       '@modelcontextprotocol/node':
         specifier: 2.0.0
         version: 2.0.0(@modelcontextprotocol/server@2.0.0)(hono@4.12.14)
@@ -400,10 +401,10 @@ importers:
         version: link:../../packages/code-review-viewer
       loro-mirror:
         specifier: 'catalog:'
-        version: 2.3.2(loro-crdt@1.15.1)
+        version: 2.3.2(loro-crdt@1.16.3)
       loro-repo:
         specifier: 'catalog:'
-        version: 0.21.0(@loro-dev/flock-wasm@0.4.3)(@loro-dev/flock@4.4.4)(@loro-dev/streams-crdt@0.16.0(@loro-dev/flock-wasm@0.4.3)(loro-crdt@1.15.1))(@types/better-sqlite3@7.6.13)(better-sqlite3@13.0.3)(loro-crdt@1.15.1)
+        version: 0.21.0(@loro-dev/flock-wasm@0.4.3)(@loro-dev/flock@4.4.4)(@loro-dev/streams-crdt@0.16.0(@loro-dev/flock-wasm@0.4.3)(loro-crdt@1.16.3))(@types/better-sqlite3@7.6.13)(better-sqlite3@13.0.3)(loro-crdt@1.16.3)
       ora:
         specifier: ^8.2.0
         version: 8.2.0
@@ -1035,13 +1036,13 @@ importers:
         version: 0.4.3
       '@loro-dev/streams-crdt':
         specifier: 'catalog:'
-        version: 0.16.0(@loro-dev/flock-wasm@0.4.3)(loro-crdt@1.15.1)
+        version: 0.16.0(@loro-dev/flock-wasm@0.4.3)(loro-crdt@1.16.3)
       '@meowdown/core':
         specifier: 0.59.0
-        version: 0.59.0(@lezer/common@1.5.2)(@shikijs/types@4.3.1)(@types/hast@3.0.5)(highlight.js@11.11.1)(loro-crdt@1.15.1)(lowlight@3.3.0)(prosemirror-model@1.25.11)(prosemirror-state@1.4.4)(prosemirror-transform@1.12.0)(prosemirror-view@1.42.2)(refractor@5.0.0)
+        version: 0.59.0(@lezer/common@1.5.2)(@shikijs/types@4.3.1)(@types/hast@3.0.5)(highlight.js@11.11.1)(loro-crdt@1.16.3)(lowlight@3.3.0)(prosemirror-model@1.25.11)(prosemirror-state@1.4.4)(prosemirror-transform@1.12.0)(prosemirror-view@1.42.2)(refractor@5.0.0)
       '@meowdown/react':
         specifier: 0.59.0
-        version: 0.59.0(@date-fns/tz@1.4.1)(@lezer/common@1.5.2)(@lezer/highlight@1.2.3)(@shikijs/types@4.3.1)(@types/hast@3.0.5)(@types/react@19.2.17)(date-fns@4.1.0)(highlight.js@11.11.1)(loro-crdt@1.15.1)(lowlight@3.3.0)(prosemirror-model@1.25.11)(prosemirror-state@1.4.4)(prosemirror-transform@1.12.0)(prosemirror-view@1.42.2)(react-dom@19.2.0(react@19.2.0))(react@19.2.0)(refractor@5.0.0)
+        version: 0.59.0(@date-fns/tz@1.4.1)(@lezer/common@1.5.2)(@lezer/highlight@1.2.3)(@shikijs/types@4.3.1)(@types/hast@3.0.5)(@types/react@19.2.17)(date-fns@4.1.0)(highlight.js@11.11.1)(loro-crdt@1.16.3)(lowlight@3.3.0)(prosemirror-model@1.25.11)(prosemirror-state@1.4.4)(prosemirror-transform@1.12.0)(prosemirror-view@1.42.2)(react-dom@19.2.0(react@19.2.0))(react@19.2.0)(refractor@5.0.0)
       '@number-flow/react':
         specifier: ^0.6.2
         version: 0.6.2(react-dom@19.2.0(react@19.2.0))(react@19.2.0)
@@ -1056,7 +1057,7 @@ importers:
         version: 1.10.3(@types/react@19.2.17)(posthog-js@1.396.6)(react@19.2.0)
       '@prosekit/react':
         specifier: 0.8.0-beta.24
-        version: 0.8.0-beta.24(@lezer/common@1.5.2)(@lezer/highlight@1.2.3)(@shikijs/types@4.3.1)(@types/hast@3.0.5)(highlight.js@11.11.1)(loro-crdt@1.15.1)(lowlight@3.3.0)(prosemirror-model@1.25.11)(prosemirror-state@1.4.4)(prosemirror-transform@1.12.0)(prosemirror-view@1.42.2)(react-dom@19.2.0(react@19.2.0))(react@19.2.0)(refractor@5.0.0)
+        version: 0.8.0-beta.24(@lezer/common@1.5.2)(@lezer/highlight@1.2.3)(@shikijs/types@4.3.1)(@types/hast@3.0.5)(highlight.js@11.11.1)(loro-crdt@1.16.3)(lowlight@3.3.0)(prosemirror-model@1.25.11)(prosemirror-state@1.4.4)(prosemirror-transform@1.12.0)(prosemirror-view@1.42.2)(react-dom@19.2.0(react@19.2.0))(react@19.2.0)(refractor@5.0.0)
       '@radix-ui/react-accordion':
         specifier: ^1.2.12
         version: 1.2.12(@types/react-dom@19.2.3(@types/react@19.2.17))(@types/react@19.2.17)(react-dom@19.2.0(react@19.2.0))(react@19.2.0)
@@ -1194,25 +1195,25 @@ importers:
         version: 5.0.9
       loro-adaptors:
         specifier: 'catalog:'
-        version: 0.6.1(@loro-dev/flock@4.4.4)(loro-crdt@1.15.1)
+        version: 0.6.1(@loro-dev/flock@4.4.4)(loro-crdt@1.16.3)
       loro-crdt:
         specifier: 'catalog:'
-        version: 1.15.1
+        version: 1.16.3
       loro-mirror:
         specifier: 'catalog:'
-        version: 2.3.2(loro-crdt@1.15.1)
+        version: 2.3.2(loro-crdt@1.16.3)
       loro-mirror-jotai:
         specifier: 'catalog:'
-        version: 2.3.2(jotai@2.17.1(@babel/core@7.29.0)(@babel/template@7.28.6)(@types/react@19.2.17)(react@19.2.0))(loro-crdt@1.15.1)(loro-mirror@2.3.2(loro-crdt@1.15.1))
+        version: 2.3.2(jotai@2.17.1(@babel/core@7.29.0)(@babel/template@7.28.6)(@types/react@19.2.17)(react@19.2.0))(loro-crdt@1.16.3)(loro-mirror@2.3.2(loro-crdt@1.16.3))
       loro-mirror-react:
         specifier: 'catalog:'
-        version: 2.3.2(loro-crdt@1.15.1)(loro-mirror@2.3.2(loro-crdt@1.15.1))(react@19.2.0)
+        version: 2.3.2(loro-crdt@1.16.3)(loro-mirror@2.3.2(loro-crdt@1.16.3))(react@19.2.0)
       loro-repo:
         specifier: 'catalog:'
-        version: 0.21.0(@loro-dev/flock-wasm@0.4.3)(@loro-dev/flock@4.4.4)(@loro-dev/streams-crdt@0.16.0(@loro-dev/flock-wasm@0.4.3)(loro-crdt@1.15.1))(@types/better-sqlite3@7.6.13)(better-sqlite3@12.10.0)(loro-crdt@1.15.1)
+        version: 0.21.0(@loro-dev/flock-wasm@0.4.3)(@loro-dev/flock@4.4.4)(@loro-dev/streams-crdt@0.16.0(@loro-dev/flock-wasm@0.4.3)(loro-crdt@1.16.3))(@types/better-sqlite3@7.6.13)(better-sqlite3@12.10.0)(loro-crdt@1.16.3)
       loro-websocket:
         specifier: 'catalog:'
-        version: 0.6.2(@loro-dev/flock@4.4.4)(loro-crdt@1.15.1)
+        version: 0.6.2(@loro-dev/flock@4.4.4)(loro-crdt@1.16.3)
       lowlight:
         specifier: ^3.3.0
         version: 3.3.0
@@ -1510,7 +1511,7 @@ importers:
         version: 0.0.27
       '@loro-dev/streams-crdt':
         specifier: 'catalog:'
-        version: 0.16.0(@loro-dev/flock-wasm@0.4.3)(loro-crdt@1.15.1)
+        version: 0.16.0(@loro-dev/flock-wasm@0.4.3)(loro-crdt@1.16.3)
       acp-extension-core:
         specifier: workspace:*
         version: link:../acp-extension-core
@@ -1540,10 +1541,10 @@ importers:
         version: 10.2.0
       loro-crdt:
         specifier: 'catalog:'
-        version: 1.15.1
+        version: 1.16.3
       loro-mirror:
         specifier: 'catalog:'
-        version: 2.3.2(loro-crdt@1.15.1)
+        version: 2.3.2(loro-crdt@1.16.3)
       zod:
         specifier: 4.3.6
         version: 4.3.6
@@ -1559,7 +1560,7 @@ importers:
         version: 24.10.12
       loro-repo:
         specifier: 'catalog:'
-        version: 0.21.0(@loro-dev/flock-wasm@0.4.3)(@loro-dev/flock@4.4.4)(@loro-dev/streams-crdt@0.16.0(@loro-dev/flock-wasm@0.4.3)(loro-crdt@1.15.1))(@types/better-sqlite3@7.6.13)(better-sqlite3@12.10.0)(loro-crdt@1.15.1)
+        version: 0.21.0(@loro-dev/flock-wasm@0.4.3)(@loro-dev/flock@4.4.4)(@loro-dev/streams-crdt@0.16.0(@loro-dev/flock-wasm@0.4.3)(loro-crdt@1.16.3))(@types/better-sqlite3@7.6.13)(better-sqlite3@12.10.0)(loro-crdt@1.16.3)
       typescript:
         specifier: 'catalog:'
         version: 5.9.3
@@ -10356,8 +10357,8 @@ packages:
       yjs:
         optional: true
 
-  loro-crdt@1.15.1:
-    resolution: {integrity: sha512-J3568cXG75MNotTJg2XVhlIEW8POjAZRFhK+3yXYBaQVB1LHn/Ksk3DIqoTOBUf+cgE4yVeqPbh7VUTX2QLV2g==}
+  loro-crdt@1.16.3:
+    resolution: {integrity: sha512-0FP3TsPTCIVLg7fbjh7cJTt3evpbFD/KRfnd4k9R3ZuDTzl83nuiYK/8LRxQ35xKzcHAcvMowoL9pecNDw1bkw==}
 
   loro-mirror-jotai@2.3.2:
     resolution: {integrity: sha512-iWyv2gs/Vqg01PwwMikCHXbfX7YPppMIK+YD70mXsKTRTkGhVyTx2WFmTJ221sgA9PhAQlafW+z7/8kZWMizCw==}
@@ -15776,18 +15777,18 @@ snapshots:
       '@loro-dev/streams-client': 0.7.0
       better-sqlite3: 12.10.0
       js-yaml: 4.1.1
-      loro-crdt: 1.15.1
+      loro-crdt: 1.16.3
 
   '@loro-dev/streams-client@0.7.0': {}
 
   '@loro-dev/streams-client@0.8.0': {}
 
-  '@loro-dev/streams-crdt@0.16.0(@loro-dev/flock-wasm@0.4.3)(loro-crdt@1.15.1)':
+  '@loro-dev/streams-crdt@0.16.0(@loro-dev/flock-wasm@0.4.3)(loro-crdt@1.16.3)':
     dependencies:
       '@loro-dev/streams-client': 0.8.0
     optionalDependencies:
       '@loro-dev/flock-wasm': 0.4.3
-      loro-crdt: 1.15.1
+      loro-crdt: 1.16.3
 
   '@lydell/node-pty-darwin-arm64@1.2.0-beta.14':
     optional: true
@@ -15861,7 +15862,7 @@ snapshots:
     transitivePeerDependencies:
       - supports-color
 
-  '@meowdown/core@0.59.0(@lezer/common@1.5.2)(@shikijs/types@4.3.1)(@types/hast@3.0.5)(highlight.js@11.11.1)(loro-crdt@1.15.1)(lowlight@3.3.0)(prosemirror-model@1.25.11)(prosemirror-state@1.4.4)(prosemirror-transform@1.12.0)(prosemirror-view@1.42.2)(refractor@5.0.0)':
+  '@meowdown/core@0.59.0(@lezer/common@1.5.2)(@shikijs/types@4.3.1)(@types/hast@3.0.5)(highlight.js@11.11.1)(loro-crdt@1.16.3)(lowlight@3.3.0)(prosemirror-model@1.25.11)(prosemirror-state@1.4.4)(prosemirror-transform@1.12.0)(prosemirror-view@1.42.2)(refractor@5.0.0)':
     dependencies:
       '@codemirror/language': 6.12.4
       '@codemirror/language-data': 6.5.2
@@ -15870,9 +15871,9 @@ snapshots:
       '@meowdown/markdown': 0.59.0
       '@ocavue/utils': 1.7.0
       '@prosekit/core': 0.13.0-beta.7(prosemirror-model@1.25.11)(prosemirror-state@1.4.4)(prosemirror-transform@1.12.0)
-      '@prosekit/extensions': 0.18.0-beta.19(@lezer/common@1.5.2)(@lezer/highlight@1.2.3)(@shikijs/types@4.3.1)(@types/hast@3.0.5)(highlight.js@11.11.1)(loro-crdt@1.15.1)(lowlight@3.3.0)(prosemirror-model@1.25.11)(prosemirror-state@1.4.4)(prosemirror-transform@1.12.0)(prosemirror-view@1.42.2)(refractor@5.0.0)
+      '@prosekit/extensions': 0.18.0-beta.19(@lezer/common@1.5.2)(@lezer/highlight@1.2.3)(@shikijs/types@4.3.1)(@types/hast@3.0.5)(highlight.js@11.11.1)(loro-crdt@1.16.3)(lowlight@3.3.0)(prosemirror-model@1.25.11)(prosemirror-state@1.4.4)(prosemirror-transform@1.12.0)(prosemirror-view@1.42.2)(refractor@5.0.0)
       '@prosekit/pm': 0.1.19-beta.4
-      '@prosekit/web': 0.9.0-beta.24(@lezer/common@1.5.2)(@lezer/highlight@1.2.3)(@shikijs/types@4.3.1)(@types/hast@3.0.5)(highlight.js@11.11.1)(loro-crdt@1.15.1)(lowlight@3.3.0)(prosemirror-model@1.25.11)(prosemirror-state@1.4.4)(prosemirror-transform@1.12.0)(prosemirror-view@1.42.2)(refractor@5.0.0)
+      '@prosekit/web': 0.9.0-beta.24(@lezer/common@1.5.2)(@lezer/highlight@1.2.3)(@shikijs/types@4.3.1)(@types/hast@3.0.5)(highlight.js@11.11.1)(loro-crdt@1.16.3)(lowlight@3.3.0)(prosemirror-model@1.25.11)(prosemirror-state@1.4.4)(prosemirror-transform@1.12.0)(prosemirror-view@1.42.2)(refractor@5.0.0)
       hast-util-to-mdast: 10.1.2
       katex: 0.18.1
       mdast-util-to-markdown: 2.1.2
@@ -15910,14 +15911,14 @@ snapshots:
       '@lezer/common': 1.5.2
       '@lezer/markdown': 1.7.2
 
-  '@meowdown/react@0.59.0(@date-fns/tz@1.4.1)(@lezer/common@1.5.2)(@lezer/highlight@1.2.3)(@shikijs/types@4.3.1)(@types/hast@3.0.5)(@types/react@19.2.17)(date-fns@4.1.0)(highlight.js@11.11.1)(loro-crdt@1.15.1)(lowlight@3.3.0)(prosemirror-model@1.25.11)(prosemirror-state@1.4.4)(prosemirror-transform@1.12.0)(prosemirror-view@1.42.2)(react-dom@19.2.0(react@19.2.0))(react@19.2.0)(refractor@5.0.0)':
+  '@meowdown/react@0.59.0(@date-fns/tz@1.4.1)(@lezer/common@1.5.2)(@lezer/highlight@1.2.3)(@shikijs/types@4.3.1)(@types/hast@3.0.5)(@types/react@19.2.17)(date-fns@4.1.0)(highlight.js@11.11.1)(loro-crdt@1.16.3)(lowlight@3.3.0)(prosemirror-model@1.25.11)(prosemirror-state@1.4.4)(prosemirror-transform@1.12.0)(prosemirror-view@1.42.2)(react-dom@19.2.0(react@19.2.0))(react@19.2.0)(refractor@5.0.0)':
     dependencies:
       '@base-ui/react': 1.6.0(@date-fns/tz@1.4.1)(@types/react@19.2.17)(date-fns@4.1.0)(react-dom@19.2.0(react@19.2.0))(react@19.2.0)
-      '@meowdown/core': 0.59.0(@lezer/common@1.5.2)(@shikijs/types@4.3.1)(@types/hast@3.0.5)(highlight.js@11.11.1)(loro-crdt@1.15.1)(lowlight@3.3.0)(prosemirror-model@1.25.11)(prosemirror-state@1.4.4)(prosemirror-transform@1.12.0)(prosemirror-view@1.42.2)(refractor@5.0.0)
+      '@meowdown/core': 0.59.0(@lezer/common@1.5.2)(@shikijs/types@4.3.1)(@types/hast@3.0.5)(highlight.js@11.11.1)(loro-crdt@1.16.3)(lowlight@3.3.0)(prosemirror-model@1.25.11)(prosemirror-state@1.4.4)(prosemirror-transform@1.12.0)(prosemirror-view@1.42.2)(refractor@5.0.0)
       '@ocavue/utils': 1.7.0
       '@prosekit/core': 0.13.0-beta.7(prosemirror-model@1.25.11)(prosemirror-state@1.4.4)(prosemirror-transform@1.12.0)
       '@prosekit/pm': 0.1.19-beta.4
-      '@prosekit/react': 0.8.0-beta.24(@lezer/common@1.5.2)(@lezer/highlight@1.2.3)(@shikijs/types@4.3.1)(@types/hast@3.0.5)(highlight.js@11.11.1)(loro-crdt@1.15.1)(lowlight@3.3.0)(prosemirror-model@1.25.11)(prosemirror-state@1.4.4)(prosemirror-transform@1.12.0)(prosemirror-view@1.42.2)(react-dom@19.2.0(react@19.2.0))(react@19.2.0)(refractor@5.0.0)
+      '@prosekit/react': 0.8.0-beta.24(@lezer/common@1.5.2)(@lezer/highlight@1.2.3)(@shikijs/types@4.3.1)(@types/hast@3.0.5)(highlight.js@11.11.1)(loro-crdt@1.16.3)(lowlight@3.3.0)(prosemirror-model@1.25.11)(prosemirror-state@1.4.4)(prosemirror-transform@1.12.0)(prosemirror-view@1.42.2)(react-dom@19.2.0(react@19.2.0))(react@19.2.0)(refractor@5.0.0)
       beautiful-mermaid: 1.1.3
       clsx: 2.1.1
       github-slugger: 2.0.0
@@ -16611,7 +16612,7 @@ snapshots:
       - prosemirror-state
       - prosemirror-transform
 
-  '@prosekit/extensions@0.18.0-beta.19(@lezer/common@1.5.2)(@lezer/highlight@1.2.3)(@shikijs/types@4.3.1)(@types/hast@3.0.5)(highlight.js@11.11.1)(loro-crdt@1.15.1)(lowlight@3.3.0)(prosemirror-model@1.25.11)(prosemirror-state@1.4.4)(prosemirror-transform@1.12.0)(prosemirror-view@1.42.2)(refractor@5.0.0)':
+  '@prosekit/extensions@0.18.0-beta.19(@lezer/common@1.5.2)(@lezer/highlight@1.2.3)(@shikijs/types@4.3.1)(@types/hast@3.0.5)(highlight.js@11.11.1)(loro-crdt@1.16.3)(lowlight@3.3.0)(prosemirror-model@1.25.11)(prosemirror-state@1.4.4)(prosemirror-transform@1.12.0)(prosemirror-view@1.42.2)(refractor@5.0.0)':
     dependencies:
       '@ocavue/utils': 1.7.0
       '@prosekit/core': 0.13.0-beta.7(prosemirror-model@1.25.11)(prosemirror-state@1.4.4)(prosemirror-transform@1.12.0)
@@ -16629,7 +16630,7 @@ snapshots:
       server-dom-shim: 1.1.0
       shiki: 4.3.1
     optionalDependencies:
-      loro-crdt: 1.15.1
+      loro-crdt: 1.16.3
     transitivePeerDependencies:
       - '@lezer/common'
       - '@lezer/highlight'
@@ -16655,11 +16656,11 @@ snapshots:
       prosemirror-transform: 1.12.0
       prosemirror-view: 1.42.2
 
-  '@prosekit/react@0.8.0-beta.24(@lezer/common@1.5.2)(@lezer/highlight@1.2.3)(@shikijs/types@4.3.1)(@types/hast@3.0.5)(highlight.js@11.11.1)(loro-crdt@1.15.1)(lowlight@3.3.0)(prosemirror-model@1.25.11)(prosemirror-state@1.4.4)(prosemirror-transform@1.12.0)(prosemirror-view@1.42.2)(react-dom@19.2.0(react@19.2.0))(react@19.2.0)(refractor@5.0.0)':
+  '@prosekit/react@0.8.0-beta.24(@lezer/common@1.5.2)(@lezer/highlight@1.2.3)(@shikijs/types@4.3.1)(@types/hast@3.0.5)(highlight.js@11.11.1)(loro-crdt@1.16.3)(lowlight@3.3.0)(prosemirror-model@1.25.11)(prosemirror-state@1.4.4)(prosemirror-transform@1.12.0)(prosemirror-view@1.42.2)(react-dom@19.2.0(react@19.2.0))(react@19.2.0)(refractor@5.0.0)':
     dependencies:
       '@prosekit/core': 0.13.0-beta.7(prosemirror-model@1.25.11)(prosemirror-state@1.4.4)(prosemirror-transform@1.12.0)
       '@prosekit/pm': 0.1.19-beta.4
-      '@prosekit/web': 0.9.0-beta.24(@lezer/common@1.5.2)(@lezer/highlight@1.2.3)(@shikijs/types@4.3.1)(@types/hast@3.0.5)(highlight.js@11.11.1)(loro-crdt@1.15.1)(lowlight@3.3.0)(prosemirror-model@1.25.11)(prosemirror-state@1.4.4)(prosemirror-transform@1.12.0)(prosemirror-view@1.42.2)(refractor@5.0.0)
+      '@prosekit/web': 0.9.0-beta.24(@lezer/common@1.5.2)(@lezer/highlight@1.2.3)(@shikijs/types@4.3.1)(@types/hast@3.0.5)(highlight.js@11.11.1)(loro-crdt@1.16.3)(lowlight@3.3.0)(prosemirror-model@1.25.11)(prosemirror-state@1.4.4)(prosemirror-transform@1.12.0)(prosemirror-view@1.42.2)(refractor@5.0.0)
       '@prosemirror-adapter/core': 0.5.5
       '@prosemirror-adapter/react': 0.5.5(react-dom@19.2.0(react@19.2.0))(react@19.2.0)
     optionalDependencies:
@@ -16683,7 +16684,7 @@ snapshots:
       - y-prosemirror
       - yjs
 
-  '@prosekit/web@0.9.0-beta.24(@lezer/common@1.5.2)(@lezer/highlight@1.2.3)(@shikijs/types@4.3.1)(@types/hast@3.0.5)(highlight.js@11.11.1)(loro-crdt@1.15.1)(lowlight@3.3.0)(prosemirror-model@1.25.11)(prosemirror-state@1.4.4)(prosemirror-transform@1.12.0)(prosemirror-view@1.42.2)(refractor@5.0.0)':
+  '@prosekit/web@0.9.0-beta.24(@lezer/common@1.5.2)(@lezer/highlight@1.2.3)(@shikijs/types@4.3.1)(@types/hast@3.0.5)(highlight.js@11.11.1)(loro-crdt@1.16.3)(lowlight@3.3.0)(prosemirror-model@1.25.11)(prosemirror-state@1.4.4)(prosemirror-transform@1.12.0)(prosemirror-view@1.42.2)(refractor@5.0.0)':
     dependencies:
       '@aria-ui/core': 0.2.1
       '@aria-ui/elements': 0.1.12
@@ -16691,7 +16692,7 @@ snapshots:
       '@floating-ui/dom': 1.8.0
       '@ocavue/utils': 1.7.0
       '@prosekit/core': 0.13.0-beta.7(prosemirror-model@1.25.11)(prosemirror-state@1.4.4)(prosemirror-transform@1.12.0)
-      '@prosekit/extensions': 0.18.0-beta.19(@lezer/common@1.5.2)(@lezer/highlight@1.2.3)(@shikijs/types@4.3.1)(@types/hast@3.0.5)(highlight.js@11.11.1)(loro-crdt@1.15.1)(lowlight@3.3.0)(prosemirror-model@1.25.11)(prosemirror-state@1.4.4)(prosemirror-transform@1.12.0)(prosemirror-view@1.42.2)(refractor@5.0.0)
+      '@prosekit/extensions': 0.18.0-beta.19(@lezer/common@1.5.2)(@lezer/highlight@1.2.3)(@shikijs/types@4.3.1)(@types/hast@3.0.5)(highlight.js@11.11.1)(loro-crdt@1.16.3)(lowlight@3.3.0)(prosemirror-model@1.25.11)(prosemirror-state@1.4.4)(prosemirror-transform@1.12.0)(prosemirror-view@1.42.2)(refractor@5.0.0)
       '@prosekit/pm': 0.1.19-beta.4
       prosemirror-tables: 1.8.5
     transitivePeerDependencies:
@@ -23628,42 +23629,42 @@ snapshots:
     dependencies:
       js-tokens: 4.0.0
 
-  loro-adaptors@0.6.1(@loro-dev/flock@4.4.4)(loro-crdt@1.15.1):
+  loro-adaptors@0.6.1(@loro-dev/flock@4.4.4)(loro-crdt@1.16.3):
     dependencies:
       loro-protocol: 0.3.0
     optionalDependencies:
       '@loro-dev/flock': 4.4.4
-      loro-crdt: 1.15.1
+      loro-crdt: 1.16.3
 
-  loro-crdt@1.15.1: {}
+  loro-crdt@1.16.3: {}
 
-  loro-mirror-jotai@2.3.2(jotai@2.17.1(@babel/core@7.29.0)(@babel/template@7.28.6)(@types/react@19.2.17)(react@19.2.0))(loro-crdt@1.15.1)(loro-mirror@2.3.2(loro-crdt@1.15.1)):
+  loro-mirror-jotai@2.3.2(jotai@2.17.1(@babel/core@7.29.0)(@babel/template@7.28.6)(@types/react@19.2.17)(react@19.2.0))(loro-crdt@1.16.3)(loro-mirror@2.3.2(loro-crdt@1.16.3)):
     dependencies:
       jotai: 2.17.1(@babel/core@7.29.0)(@babel/template@7.28.6)(@types/react@19.2.17)(react@19.2.0)
-      loro-crdt: 1.15.1
-      loro-mirror: 2.3.2(loro-crdt@1.15.1)
+      loro-crdt: 1.16.3
+      loro-mirror: 2.3.2(loro-crdt@1.16.3)
 
-  loro-mirror-react@2.3.2(loro-crdt@1.15.1)(loro-mirror@2.3.2(loro-crdt@1.15.1))(react@19.2.0):
+  loro-mirror-react@2.3.2(loro-crdt@1.16.3)(loro-mirror@2.3.2(loro-crdt@1.16.3))(react@19.2.0):
     dependencies:
-      loro-crdt: 1.15.1
-      loro-mirror: 2.3.2(loro-crdt@1.15.1)
+      loro-crdt: 1.16.3
+      loro-mirror: 2.3.2(loro-crdt@1.16.3)
       react: 19.2.0
 
-  loro-mirror@2.3.2(loro-crdt@1.15.1):
+  loro-mirror@2.3.2(loro-crdt@1.16.3):
     dependencies:
       immer: 10.2.0
-      loro-crdt: 1.15.1
+      loro-crdt: 1.16.3
 
   loro-protocol@0.3.0: {}
 
-  loro-repo@0.21.0(@loro-dev/flock-wasm@0.4.3)(@loro-dev/flock@4.4.4)(@loro-dev/streams-crdt@0.16.0(@loro-dev/flock-wasm@0.4.3)(loro-crdt@1.15.1))(@types/better-sqlite3@7.6.13)(better-sqlite3@12.10.0)(loro-crdt@1.15.1):
+  loro-repo@0.21.0(@loro-dev/flock-wasm@0.4.3)(@loro-dev/flock@4.4.4)(@loro-dev/streams-crdt@0.16.0(@loro-dev/flock-wasm@0.4.3)(loro-crdt@1.16.3))(@types/better-sqlite3@7.6.13)(better-sqlite3@12.10.0)(loro-crdt@1.16.3):
     dependencies:
       '@loro-dev/flock-wasm': 0.4.3
-      '@loro-dev/streams-crdt': 0.16.0(@loro-dev/flock-wasm@0.4.3)(loro-crdt@1.15.1)
-      loro-adaptors: 0.6.1(@loro-dev/flock@4.4.4)(loro-crdt@1.15.1)
-      loro-crdt: 1.15.1
+      '@loro-dev/streams-crdt': 0.16.0(@loro-dev/flock-wasm@0.4.3)(loro-crdt@1.16.3)
+      loro-adaptors: 0.6.1(@loro-dev/flock@4.4.4)(loro-crdt@1.16.3)
+      loro-crdt: 1.16.3
       loro-protocol: 0.3.0
-      loro-websocket: 0.6.2(@loro-dev/flock@4.4.4)(loro-crdt@1.15.1)
+      loro-websocket: 0.6.2(@loro-dev/flock@4.4.4)(loro-crdt@1.16.3)
     optionalDependencies:
       '@types/better-sqlite3': 7.6.13
       better-sqlite3: 12.10.0
@@ -23673,14 +23674,14 @@ snapshots:
       - utf-8-validate
       - yjs
 
-  loro-repo@0.21.0(@loro-dev/flock-wasm@0.4.3)(@loro-dev/flock@4.4.4)(@loro-dev/streams-crdt@0.16.0(@loro-dev/flock-wasm@0.4.3)(loro-crdt@1.15.1))(@types/better-sqlite3@7.6.13)(better-sqlite3@13.0.3)(loro-crdt@1.15.1):
+  loro-repo@0.21.0(@loro-dev/flock-wasm@0.4.3)(@loro-dev/flock@4.4.4)(@loro-dev/streams-crdt@0.16.0(@loro-dev/flock-wasm@0.4.3)(loro-crdt@1.16.3))(@types/better-sqlite3@7.6.13)(better-sqlite3@13.0.3)(loro-crdt@1.16.3):
     dependencies:
       '@loro-dev/flock-wasm': 0.4.3
-      '@loro-dev/streams-crdt': 0.16.0(@loro-dev/flock-wasm@0.4.3)(loro-crdt@1.15.1)
-      loro-adaptors: 0.6.1(@loro-dev/flock@4.4.4)(loro-crdt@1.15.1)
-      loro-crdt: 1.15.1
+      '@loro-dev/streams-crdt': 0.16.0(@loro-dev/flock-wasm@0.4.3)(loro-crdt@1.16.3)
+      loro-adaptors: 0.6.1(@loro-dev/flock@4.4.4)(loro-crdt@1.16.3)
+      loro-crdt: 1.16.3
       loro-protocol: 0.3.0
-      loro-websocket: 0.6.2(@loro-dev/flock@4.4.4)(loro-crdt@1.15.1)
+      loro-websocket: 0.6.2(@loro-dev/flock@4.4.4)(loro-crdt@1.16.3)
     optionalDependencies:
       '@types/better-sqlite3': 7.6.13
       better-sqlite3: 13.0.3
@@ -23690,11 +23691,11 @@ snapshots:
       - utf-8-validate
       - yjs
 
-  loro-websocket@0.6.2(@loro-dev/flock@4.4.4)(loro-crdt@1.15.1):
+  loro-websocket@0.6.2(@loro-dev/flock@4.4.4)(loro-crdt@1.16.3):
     dependencies:
       '@types/ws': 8.18.1
-      loro-adaptors: 0.6.1(@loro-dev/flock@4.4.4)(loro-crdt@1.15.1)
-      loro-crdt: 1.15.1
+      loro-adaptors: 0.6.1(@loro-dev/flock@4.4.4)(loro-crdt@1.16.3)
+      loro-crdt: 1.16.3
       loro-protocol: 0.3.0
       ws: 8.21.3
     transitivePeerDependencies:
