@@ -34,6 +34,7 @@ import { useComposerNavigationFocus } from '../chat/submission/use-composer-navi
 import { usePostHog } from '@posthog/react';
 import {
   getAcpCapabilityCacheKey,
+  resolveSessionAcpTargetId,
   getProjectRefBranch,
   getServerNow,
   getSessionPullRequestLegacyFields,
@@ -1313,7 +1314,8 @@ const SessionDetail = ({
     useResolvedMachineMeta(activeSessionMachineId);
   const canForkSession = useCallback(
     (target: SessionMeta): boolean => {
-      if (target.isArchived || !target.agentConfigId) return false;
+      if (target.isArchived || !target.agentConfigId || !resolveSessionAcpTargetId(target))
+        return false;
       const capability =
         sessionMachine?.acpCapabilities?.[getAcpCapabilityCacheKey(target.agentConfigId)];
       return (
@@ -1327,6 +1329,7 @@ const SessionDetail = ({
     (target: SessionMeta): boolean => {
       if (
         !target.agentConfigId ||
+        !resolveSessionAcpTargetId(target) ||
         !target.project ||
         (target.project.kind !== 'local' && target.project.kind !== 'github')
       ) {
