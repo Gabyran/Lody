@@ -3,6 +3,7 @@
 Status: implemented
 Translation: current
 Related: [English](2026-09-28-loro-concurrent-import-replay.md)
+Pull request: [#1098](https://github.com/LodyAI/Lody/pull/1098)
 
 ## 摘要
 
