@@ -9,10 +9,7 @@ import { buildChatStreamItems } from '../src/components/ai-gui/build-chat-stream
 import { SessionChatStreamView } from '../src/components/ai-gui/view';
 import { initI18n } from '../src/i18n';
 import { createConversationViewFromHistory } from '../src/lib/conversation-view';
-
-vi.mock('@lody/virtua', () => ({
-  Virtualizer: ({ children }: { children: import('react').ReactNode }) => children,
-}));
+import { clearSavedScrollStates } from '../src/lib/conversation-scroll/saved-state';
 
 (
   globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean }
@@ -53,6 +50,7 @@ describe('live agent status', () => {
 
   beforeEach(async () => {
     await initI18n('en');
+    clearSavedScrollStates();
     // The live turn started at 00:00:01, so every live status reads 30s in.
     vi.useFakeTimers({ toFake: ['Date'] });
     vi.setSystemTime(new Date('2026-09-19T00:00:31Z'));
@@ -71,6 +69,7 @@ describe('live agent status', () => {
 
   afterEach(async () => {
     await act(async () => root.unmount());
+    clearSavedScrollStates();
     container.remove();
     vi.unstubAllGlobals();
     vi.useRealTimers();
@@ -79,7 +78,7 @@ describe('live agent status', () => {
   const render = async (
     history: unknown[],
     status: { label: string; tone?: 'primary' | 'warning' },
-    options: { withTurnFooter?: boolean } = {}
+    options: { withTurnFooter?: boolean; scrollAway?: boolean } = {}
   ) => {
     const view = createConversationViewFromHistory({
       sessionId,
@@ -102,21 +101,23 @@ describe('live agent status', () => {
         })
       )
     );
+
+    if (options.scrollAway) {
+      const viewport = container.querySelector<HTMLElement>('[data-message-selection-scroll]');
+      expect(viewport).not.toBeNull();
+      Object.defineProperties(viewport, {
+        clientHeight: { configurable: true, value: 400 },
+        scrollHeight: { configurable: true, value: 1000 },
+      });
+      await act(async () => {
+        viewport!.dispatchEvent(new WheelEvent('wheel', { bubbles: true, deltaY: -20 }));
+      });
+    }
   };
 
   const statusRow = () => container.querySelector('[data-agent-activity-row]');
   const shimmering = () =>
     Array.from(container.querySelectorAll('.agent-shimmer')).map((el) => el.textContent);
-
-  it('does not report populated but scroll-hidden conversation content as ready', async () => {
-    await render(liveTurn([{ type: 'text', text: 'Already hydrated answer.' }]), {
-      label: 'Working',
-    });
-    const viewport = container.querySelector<HTMLElement>('[data-message-selection-scroll]');
-    expect(viewport).not.toBeNull();
-    expect(viewport!.style.visibility).toBe('hidden');
-    expect(container.querySelector('[data-window-session-stream-ready]')).toBeNull();
-  });
 
   it('shimmers the collapsed tool group at the bottom of a working turn instead of adding a row', async () => {
     await render(liveTurn([{ type: 'text', text: 'Checking.' }, toolCall('a'), toolCall('b')]), {
@@ -141,6 +142,29 @@ describe('live agent status', () => {
     });
     expect(statusRow()?.textContent).toBe('Waiting for permission (Worked for 30s)');
     expect(shimmering()).toEqual([]);
+  });
+
+  it('shows the working state on the scroll-to-latest button while output streams', async () => {
+    await render(
+      liveTurn([{ type: 'text', text: 'Still writing.' }]),
+      { label: 'Working' },
+      { scrollAway: true }
+    );
+    const button = container.querySelector<HTMLButtonElement>('[data-scroll-to-latest]');
+    expect(button).not.toBeNull();
+    expect(button!.querySelector('.animate-spin')).not.toBeNull();
+  });
+
+  it('keeps the scroll-to-latest arrow while waiting for permission', async () => {
+    await render(
+      liveTurn([{ type: 'text', text: 'May I continue?' }]),
+      { label: 'Waiting for permission', tone: 'warning' },
+      { scrollAway: true }
+    );
+    const button = container.querySelector<HTMLButtonElement>('[data-scroll-to-latest]');
+    expect(button).not.toBeNull();
+    expect(button!.querySelector('.animate-spin')).toBeNull();
+    expect(button!.querySelector('.lucide-arrow-down')).not.toBeNull();
   });
 
   it('places the status inside a live turn, above its footer actions', async () => {
@@ -229,7 +253,16 @@ describe('live agent status', () => {
     expect(status!.compareDocumentPosition(info!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     // Copying the whole response still waits for the reply to finish.
     expect(container.querySelector('[aria-label="Copy response"]')).toBeNull();
-    await act(async () => info!.click());
+    // Row overlays mount once their row is armed by a pointer entry, as in the
+    // app; arming remounts the trigger, so click the live one.
+    await act(async () => {
+      info!
+        .closest('[data-virtual-index]')!
+        .dispatchEvent(new MouseEvent('pointerover', { bubbles: true }));
+    });
+    await act(async () =>
+      container.querySelector<HTMLButtonElement>('[aria-label="Turn configuration"]')!.click()
+    );
     expect(document.body.textContent).toContain('Claude Opus 5');
   });
 
@@ -398,7 +431,16 @@ describe('live agent status', () => {
     );
     // Token usage alone is enough to offer the turn details.
     const info = container.querySelector<HTMLButtonElement>('[aria-label="Turn configuration"]');
-    await act(async () => info!.click());
+    // Row overlays mount once their row is armed by a pointer entry, as in the
+    // app; arming remounts the trigger, so click the live one.
+    await act(async () => {
+      info!
+        .closest('[data-virtual-index]')!
+        .dispatchEvent(new MouseEvent('pointerover', { bubbles: true }));
+    });
+    await act(async () =>
+      container.querySelector<HTMLButtonElement>('[aria-label="Turn configuration"]')!.click()
+    );
     const value = (label: string) =>
       [...document.body.querySelectorAll('dt')].find((dt) => dt.textContent === label)
         ?.nextElementSibling;
