@@ -12,11 +12,12 @@ import {
   isLoroRepoDocDeleted,
   normalizeSessionTurnInputConfig,
   type MachineId,
+  type MessageQueueItem,
   type SessionId,
   type SessionMeta,
 } from '@lody/shared';
 import { IndexedDBStorageAdaptor } from 'loro-repo/storage/indexeddb';
-import type { WorkspaceRuntime } from '../atoms/runtime';
+import type { SessionDocDraft, SessionDocStore, WorkspaceRuntime } from '../atoms/runtime';
 import { createSessionSendJournal, type SessionSendRecord } from '../lib/session-send-journal';
 import {
   createSessionSendJournalStorage,
@@ -110,6 +111,9 @@ export function createWorkspaceSessionSendJournal(args: {
       signal
     );
   };
+  const isWritten = async (record: SessionSendRecord, store: SessionDocStore) =>
+    (await store.sessionData.history.readTurn(record.id)).state !== 'missing' ||
+    (!!record.queue && (store.getState().mq ?? []).some((item) => item.userTurnId === record.id));
   let notify = () => {};
   return createSessionSendJournal({
     resources: runtime.sendResources,
@@ -175,28 +179,23 @@ export function createWorkspaceSessionSendJournal(args: {
     prepare: async (record, signal) => {
       await requireAvailable(record);
       await checkEligibility(record, signal);
-      return runtime.sendResources.withSessionStore(
+      await runtime.sendResources.withSessionStore(
         record.sessionId,
         async (store) => {
           const current = await store.sessionData.history.readTurn(record.id);
           if (current.state !== 'missing')
-            throw new Error(
-              'Submission identity already exists; original operations are required for recovery'
-            );
-          const update = record.queue
-            ? await runtime.writer.prepareSessionMessage(record.sessionId, record.queue)
-            : await store.sessionData.commands.prepareAppendTurn(record.entry);
-          // Captured dependencies must be persisted before publishing the prepared update.
-          await runtime.repo.flush();
-          throwIfSendAborted(signal);
-          return update;
+            throw new Error('Submission identity already exists in this conversation');
         },
         signal
       );
     },
-    commit: async (record, signal) => {
+    commit: async (record, signal, { resumed }) => {
       const meta = await requireAvailable(record);
       await checkEligibility(record, signal);
+      const legacyUpdate = record.update?.length ? record.update : undefined;
+      // An interrupted attempt can publish the turn before its local receipt
+      // persists. Catch up first so the absence check below sees that write.
+      if (resumed && !legacyUpdate) await args.waitForTargetSync(record.sessionId, signal);
       await runtime.sendResources.withSessionStore(
         record.sessionId,
         async (store) => {
@@ -217,8 +216,19 @@ export function createWorkspaceSessionSendJournal(args: {
             }
           }
           throwIfSendAborted(signal);
-          if (!record.update) throw new Error('Prepared submission has no saved operations');
-          await store.sessionData.commands.applyPreparedTurn(record.update);
+          if (legacyUpdate) {
+            await store.sessionData.commands.applyPreparedTurn(legacyUpdate);
+          } else if (!resumed || !(await isWritten(record, store))) {
+            // Local commits are what the transports upload; never write via import.
+            if (record.queue) {
+              const item = record.queue as MessageQueueItem;
+              store.setState((draft: SessionDocDraft) => {
+                draft.mq = [...((draft.mq ?? []) as MessageQueueItem[]), item];
+              });
+            } else {
+              await store.sessionData.commands.appendTurn(record.entry);
+            }
+          }
           if (record.queue)
             await runtime.writer.upsertDocMeta(getSessionRoomId(record.sessionId), {
               messageQueueUpdatedAt: Date.now(),

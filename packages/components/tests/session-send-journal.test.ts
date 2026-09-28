@@ -73,9 +73,10 @@ function fixture(overrides: Partial<SessionSendJournalPorts> = {}) {
     resources,
     storage,
     lock: async (_key, _signal, execute) => execute(),
-    prepare: async (value) => writer.prepareAppend(value.entry),
-    commit: async (value) => {
-      writer.applyPrepared(value.update!);
+    prepare: async () => {},
+    commit: async (value, _signal, { resumed }) => {
+      if (resumed && writer.read(value.id)) return;
+      writer.append(value.entry);
     },
     deliver: async () => {},
     ...overrides,
@@ -84,11 +85,14 @@ function fixture(overrides: Partial<SessionSendJournalPorts> = {}) {
 }
 
 describe('persistent submission stages', () => {
-  it('replays exactly the saved operations after an applied write loses its acknowledgment', async () => {
+  it('resumes an applied write that lost its acknowledgment without appending again', async () => {
     const f = fixture();
     let loseAck = true;
-    f.ports.commit = async (value) => {
-      f.writer.applyPrepared(value.update!);
+    const resumedCommits: boolean[] = [];
+    const commit = f.ports.commit;
+    f.ports.commit = async (value, signal, options) => {
+      resumedCommits.push(options.resumed);
+      await commit(value, signal, options);
       if (loseAck) {
         loseAck = false;
         throw new Error('Lost local receipt');
@@ -102,8 +106,20 @@ describe('persistent submission stages', () => {
     // Simulate a new service using the same persisted intent after restart.
     const recovered = createSessionSendJournal(f.ports);
     await recovered.retry('session' as SessionId);
+    expect(resumedCommits).toEqual([false, true]);
     expect(f.writer.readStored().map((turn) => turn.id)).toEqual(['fixed']);
     expect((await f.ports.storage.list())[0]?.stage).toBe('delivered');
+  });
+
+  it('writes the turn as a local commit that live transports observe', async () => {
+    const f = fixture();
+    const origins: (string | undefined)[] = [];
+    const stop = f.doc.subscribe((event) => origins.push(event.by));
+    await f.journal.accept(record('local'));
+    await f.journal.submit('session' as SessionId);
+    stop();
+    expect(origins).toEqual(['local']);
+    expect([...f.doc.oplogVersion().toJSON().keys()]).toEqual([f.doc.peerIdStr]);
   });
 
   it('publishes nothing when saving the prepared operation fails', async () => {
@@ -249,10 +265,14 @@ describe('IndexedDB recovery receipts', () => {
   });
 });
 
-it('exports imported prepared operations to the actual Streams adapter without reauthoring', async () => {
+it('exports legacy prepared operations to the actual Streams adapter without reauthoring', async () => {
   const { createLoroDocAdapter } = await import('@loro-dev/streams-crdt/loro');
   const local = new LoroDoc();
   const remote = new LoroDoc();
+  const legacy = new LoroDoc();
+  createHistoryWriter(legacy).append(record('prepared').entry);
+  const prepared = legacy.export({ mode: 'update' });
+  legacy.free();
   const writer = createHistoryWriter(local);
   const adapter = createLoroDocAdapter(local);
   const target = createLoroDocAdapter(remote);
@@ -260,7 +280,7 @@ it('exports imported prepared operations to the actual Streams adapter without r
     void target.applyRemoteUpdates(batch.updates, target.emptyVersion());
   });
   try {
-    writer.applyPrepared(writer.prepareAppend(record('prepared').entry));
+    writer.applyPrepared(prepared);
     expect(createHistoryWriter(remote).readStored()).toEqual([]);
     const missing = adapter.exportUpdates(target.emptyVersion());
     expect(missing).toBeTruthy();
@@ -435,6 +455,159 @@ it.each(['seen', undefined] as const)(
     }
   }
 );
+
+describe('workspace commit writes local operations', () => {
+  async function workspaceFixture() {
+    const { IDBFactory } = await import('fake-indexeddb');
+    const { createWorkspaceSessionSendJournal } =
+      await import('../src/providers/workspace-session-send-journal');
+    const { createSessionSendJournalStorage } =
+      await import('../src/lib/session-send-journal-storage');
+    const { createConversationSession } = await import('../src/lib/conversation-view');
+    vi.stubGlobal('indexedDB', new IDBFactory());
+    vi.stubGlobal('BroadcastChannel', undefined);
+    vi.stubGlobal('navigator', {
+      locks: {
+        request: async (_key: string, _options: unknown, run: () => Promise<unknown>) => run(),
+      },
+    });
+    const doc = new LoroDoc();
+    const session = createConversationSession(doc, { sessionId: 'session' as SessionId });
+    const meta = {
+      id: 'session',
+      machineId: 'machine',
+      userId: 'account',
+    } as import('@lody/shared').SessionMeta;
+    const store = {
+      doc,
+      sessionData: session.sessionData,
+      history: session.history,
+      getState: () => session.mirror.getState(),
+      setState: (updater: never) => session.mirror.setState(updater),
+    };
+    const resources = createSessionSendResources({
+      acquire: async () => store as never,
+      releaseRef: () => {},
+    });
+    const events: string[] = [];
+    const stop = doc.subscribe((event) => events.push(`doc:${event.by}`));
+    const journal = createWorkspaceSessionSendJournal({
+      accountId: 'account',
+      sourceReplica: 'original',
+      token: () => null,
+      localMachineId: () => null,
+      runtime: {
+        workspaceId: 'workspace',
+        sendResources: resources,
+        repo: { getDocMeta: async () => ({ meta }), flush: async () => {} },
+        writer: { upsertDocMeta: async (_room: string, patch: object) => Object.assign(meta, patch) },
+        requestSessionDispatchTurn: async () => ({ accepted: true }),
+      } as never,
+      waitForTargetSync: async () => {
+        events.push('sync');
+      },
+    });
+    const storage = createSessionSendJournalStorage({
+      accountId: 'account',
+      workspaceId: 'workspace',
+    });
+    const entry = (id: string) => ({
+      ...record(id).entry,
+      userId: 'account',
+      status: 'pending' as const,
+      inputConfig: {
+        cliType: 'builtin',
+        agentType: 'codex',
+        inputBlocks: [{ type: 'text', text: id }],
+      },
+    });
+    return {
+      doc,
+      session,
+      journal,
+      storage,
+      events,
+      entry,
+      async dispose() {
+        stop();
+        await resources.dispose();
+        await journal.close();
+        await storage.close();
+        session.dispose();
+        doc.free();
+        vi.unstubAllGlobals();
+      },
+    };
+  }
+
+  it('enqueues a queued message with a local commit on the live replica', async () => {
+    const f = await workspaceFixture();
+    try {
+      await f.journal.accept({
+        ...record('queued'),
+        entry: f.entry('queued'),
+        delivery: { kind: 'queue' },
+        queue: {
+          userTurnId: 'queued',
+          task: 'queued text',
+          userId: 'account',
+          timestamp: '2026-01-01T00:00:00Z',
+          isEditing: false,
+        },
+      });
+      await f.journal.retry('session' as SessionId);
+      expect((await f.journal.read('queued'))?.stage).toBe('delivered');
+      expect(f.session.mirror.getState().mq?.map((item) => item.userTurnId)).toEqual(['queued']);
+      expect(f.events.filter((event) => event.startsWith('doc:'))).not.toContain('doc:import');
+      expect([...f.doc.oplogVersion().toJSON().keys()]).toEqual([f.doc.peerIdStr]);
+    } finally {
+      await f.dispose();
+    }
+  });
+
+  it('catches up before resuming and keeps a turn written by the interrupted attempt', async () => {
+    const f = await workspaceFixture();
+    try {
+      f.session.historyWriter.append(f.entry('resumed'));
+      const saved = await f.storage.insert({
+        ...record('resumed'),
+        entry: f.entry('resumed'),
+        version: 2,
+        stage: 'prepared',
+        update: new Uint8Array(),
+      });
+      f.events.length = 0;
+      await f.journal.retry(saved.sessionId);
+      expect((await f.journal.read('resumed'))?.stage).toBe('delivered');
+      expect(f.events[0]).toBe('sync');
+      expect(f.session.historyWriter.readStored().map((turn) => turn.id)).toEqual(['resumed']);
+    } finally {
+      await f.dispose();
+    }
+  });
+
+  it('imports operations prepared by an older client exactly once', async () => {
+    const f = await workspaceFixture();
+    try {
+      const legacy = new LoroDoc();
+      createHistoryWriter(legacy).append(f.entry('legacy'));
+      const update = legacy.export({ mode: 'update' });
+      legacy.free();
+      await f.storage.insert({
+        ...record('legacy'),
+        entry: f.entry('legacy'),
+        version: 2,
+        stage: 'prepared',
+        update,
+      });
+      await f.journal.retry('session' as SessionId);
+      expect((await f.journal.read('legacy'))?.stage).toBe('delivered');
+      expect(f.session.historyWriter.readStored().map((turn) => turn.id)).toEqual(['legacy']);
+    } finally {
+      await f.dispose();
+    }
+  });
+});
 
 describe('interrupted work observation', () => {
   it('does not start recovered messages and distinguishes another window owner', async () => {

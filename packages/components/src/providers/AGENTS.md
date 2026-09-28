@@ -116,7 +116,8 @@ Workspace `sendResources` owns preparation, cancellation and store borrows acros
 React unmount. Dispose before transports/caches; join noncancelable IPC. Only the
 cache disposes stores. Cancel I/O, fence late results, await multipart cleanup.
 
-Admission uses the scoped journal and HistoryWriter. Persist exact operations
-before import; never re-append on recovery. Lock submission/delivery separately;
+Admission uses the scoped journal and HistoryWriter. Commit turns and queue rows
+locally; a resumed commit catches up and appends only when the id is absent.
+Legacy saved bytes are imported, then synced. Lock submission/delivery separately;
 sync before retiring records. Observe live work and scoped Web Locks; reads must
 not restart interrupted sends. Keep recovery actions reachable inline on mobile.

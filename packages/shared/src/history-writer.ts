@@ -322,9 +322,10 @@ export interface HistoryWriter {
     updater: (history: SessionHistoryInput[]) => SessionHistoryInput[]
   ): () => void;
   append(entry: SessionHistory): void;
-  /** Validate and author on a fork without publishing; persist these bytes before import. */
-  prepareAppend(entry: SessionHistory): Uint8Array;
-  /** Replay previously persisted prepared operations; importing twice is idempotent. */
+  /**
+   * Replay operations persisted by older clients' send journals; importing twice
+   * is idempotent. Imported ops are not local edits: the caller must sync them.
+   */
   applyPrepared(update: Uint8Array): void;
   replace(turnId: string, entry: SessionHistory): boolean;
   /**
@@ -536,17 +537,6 @@ export function createHistoryWriter(doc: LoroDoc, readHistory?: () => readonly S
         planWrite(current as SessionHistory[], restored, (_old, value) => value)();
         consumed = true;
       };
-    },
-    prepareAppend(entry) {
-      const from = doc.version();
-      const fork = doc.fork();
-      try {
-        createHistoryWriter(fork).append(entry);
-        return fork.export({ mode: 'update', from });
-      } finally {
-        fork.free();
-        from.free();
-      }
     },
     applyPrepared(update) {
       const imported = doc.import(update);

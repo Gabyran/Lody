@@ -1291,13 +1291,26 @@ describe('single history writer', () => {
 });
 
 
-describe('prepared history operation recovery', () => {
-  it('does not publish preparation and replays the same operation only once across replicas', () => {
+describe('legacy prepared history operation recovery', () => {
+  // Older send journals persisted operations authored on a fork of the live doc.
+  const legacyPrepare = (doc: Loro, value: SessionHistory) => {
+    const from = doc.version();
+    const fork = doc.fork();
+    try {
+      createHistoryWriter(fork).append(value);
+      return fork.export({ mode: 'update', from });
+    } finally {
+      fork.free();
+      from.free();
+    }
+  };
+
+  it('replays the same saved operation only once across replicas', () => {
     const original = new Loro();
     const writer = createHistoryWriter(original);
     writer.append(entry('existing'));
     const persistedBaseline = original.export({ mode: 'snapshot' });
-    const prepared = writer.prepareAppend(entry('fixed-id'));
+    const prepared = legacyPrepare(original, entry('fixed-id'));
     expect(writer.readStored().map((turn) => turn.id)).toEqual(['existing']);
     writer.applyPrepared(prepared);
     writer.applyPrepared(prepared);
@@ -1318,21 +1331,12 @@ describe('prepared history operation recovery', () => {
     const original = new Loro();
     const writer = createHistoryWriter(original);
     writer.append(entry('dependency'));
-    const prepared = writer.prepareAppend(entry('fixed-id'));
+    const prepared = legacyPrepare(original, entry('fixed-id'));
     const recovered = new Loro();
     const recoveredWriter = createHistoryWriter(recovered);
     expect(() => recoveredWriter.applyPrepared(prepared)).toThrow(/dependencies/);
     recovered.import(original.export({ mode: 'snapshot' }));
     recoveredWriter.applyPrepared(prepared);
     expect(recoveredWriter.readStored().map((turn) => turn.id)).toEqual(['dependency', 'fixed-id']);
-  });
-
-  it('preserves the source when validation fails', () => {
-    const original = new Loro();
-    const writer = createHistoryWriter(original);
-    writer.append(entry('existing'));
-    const before = original.toJSON();
-    expect(() => writer.prepareAppend({ ...entry('invalid'), items: [{ type: 'text', text: 123 }] } as unknown as SessionHistory)).toThrow();
-    expect(original.toJSON()).toEqual(before);
   });
 });

@@ -272,9 +272,9 @@ const createRuntime = (
       close: async () => {},
     },
     lock: async (_key, _signal, execute) => execute(),
-    prepare: async (value) => historyWriter.prepareAppend(value.entry),
+    prepare: async () => {},
     commit: async (value) => {
-      historyWriter.applyPrepared(value.update!);
+      historyWriter.append(value.entry);
       sessionHistory.splice(0, sessionHistory.length, ...historyWriter.readStored());
     },
     deliver: async () => {},

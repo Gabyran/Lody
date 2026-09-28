@@ -19,7 +19,10 @@ export type SessionSendRecord = {
   queue?: Record<string, unknown>;
   delivery: { kind: 'queue' | 'dispatch' } | { kind: 'guide'; expectedTurnId: string };
   stage: 'saved' | 'prepared' | 'committed' | 'delivered';
-  /** Exact authored operations: replay imports these bytes, never appends again. */
+  /**
+   * Operations prepared by older clients; replay imports them instead of appending.
+   * Current clients store empty bytes: older readers reject prepared records without them.
+   */
   update?: Uint8Array;
   error?: string;
   guideOffer?: 'offered' | 'applied' | 'not-applied';
@@ -56,10 +59,18 @@ export type SessionSendJournalPorts = {
     ) => Promise<void>,
     report: (id: string, progress: number) => void
   ): Promise<void>;
-  /** Flush the source baseline, validate once, and prepare immutable CRDT operations. */
-  prepare(record: SessionSendRecord, signal: AbortSignal): Promise<Uint8Array>;
-  /** Recover the original baseline, import exact operations and confirm local persistence. */
-  commit(record: SessionSendRecord, signal: AbortSignal): Promise<void>;
+  /** Validate once before the record may publish anything. */
+  prepare(record: SessionSendRecord, signal: AbortSignal): Promise<void>;
+  /**
+   * Write the turn as a local commit and confirm local persistence. `resumed`
+   * means an earlier attempt may already have written it, so the port must
+   * look for the turn before writing again.
+   */
+  commit(
+    record: SessionSendRecord,
+    signal: AbortSignal,
+    options: { resumed: boolean }
+  ): Promise<void>;
   /** Resolve only on a target receipt; uncertainty keeps the committed record. */
   deliver(
     record: SessionSendRecord,
@@ -164,6 +175,7 @@ export function createSessionSendJournal(ports: SessionSendJournalPorts) {
             const preparation = new AbortController();
             preparations.set(record.id, preparation);
             const preparationSignal = AbortSignal.any([signal, preparation.signal]);
+            const resumed = record.stage === 'prepared';
             try {
               if (record.cancelRequested) {
                 await ports.storage.remove(record.id);
@@ -202,11 +214,11 @@ export function createSessionSendJournal(ports: SessionSendJournalPorts) {
                   }
                 );
                 throwIfSendAborted(preparationSignal);
-                const update = await ports.prepare(record, preparationSignal);
+                await ports.prepare(record, preparationSignal);
                 throwIfSendAborted(preparationSignal);
                 record = {
                   ...record,
-                  update,
+                  update: new Uint8Array(),
                   sourceReplica: ports.preparationReplica ?? record.sourceReplica,
                   stage: 'prepared',
                   error: undefined,
@@ -215,7 +227,7 @@ export function createSessionSendJournal(ports: SessionSendJournalPorts) {
                 await ports.storage.put(record);
               }
               if (record.stage === 'prepared') {
-                await ports.commit(record, signal);
+                await ports.commit(record, signal, { resumed });
                 record = { ...record, stage: 'committed', error: undefined };
                 await ports.storage.put(record);
               }
@@ -227,7 +239,7 @@ export function createSessionSendJournal(ports: SessionSendJournalPorts) {
                 continue;
               }
               // Failed preparation/commit blocks later same-session submissions.
-              // Keep exact operations across lost acknowledgements and interruption.
+              // Keep the record across lost acknowledgements so a retry reconciles the turn.
               await ports.storage.put({
                 ...record,
                 error: error instanceof Error ? error.message : 'Submission interrupted',
@@ -296,8 +308,8 @@ export function createSessionSendJournal(ports: SessionSendJournalPorts) {
     read: async (id: string) => (await ports.storage.list()).find((record) => record.id === id),
     /**
      * A native queue steer changes an already delivered queue operation into a
-     * normal history turn. Keep its durable identity, but prepare fresh history
-     * operations before the queue row may be removed.
+     * normal history turn. Keep its durable identity, but write the history turn
+     * before the queue row may be removed.
      */
     promoteQueuedTurn: async (
       id: string,

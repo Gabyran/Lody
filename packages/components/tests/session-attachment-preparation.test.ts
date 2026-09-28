@@ -97,9 +97,9 @@ function fixture() {
         token: () => 'token',
         localMachineId: () => local.machineId as never,
       }),
-    prepare: async (record) => writer.prepareAppend(record.entry),
+    prepare: async () => {},
     commit: async (record) => {
-      writer.applyPrepared(record.update!);
+      writer.append(record.entry);
     },
     deliver: async () => {},
   });

@@ -56,6 +56,7 @@
   reject lineage cycles, and retain incomplete observation across snapshots. Declare
   nested transcript streaming fields in `schema.ts`; legacy rows stay unchanged.
 
-- Durable submission preparation stays within HistoryWriter: prepare on a fork,
-  persist the exact operations and their baseline before publishing, then replay
-  those operations without another append. Missing dependencies are not acceptance.
+- Submissions append on the live doc as local commits; transports upload only
+  local events. Never author on a fork and import the export: it misses upload,
+  copies the whole doc and adds a permanent peer. `applyPrepared` only replays
+  bytes saved by older clients; missing dependencies are not acceptance.
