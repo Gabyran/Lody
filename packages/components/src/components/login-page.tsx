@@ -41,6 +41,7 @@ import {
 import { isSafeAuthRedirect } from '@/lib/auth-redirect';
 import { openExternalUrl } from '@/lib/native-browser';
 import { scheduleIdleTask } from '@/lib/idle-task';
+import { preloadMainLayout } from '@/components/preloaded-main-layout';
 import { runNativeOAuthSignIn } from '@/lib/native-oauth';
 import { syncNativeAuthSession } from '@/lib/native-auth-session-sync';
 import { isNativeAppShell } from '@/lib/native-platform';
@@ -701,11 +702,13 @@ export function LoginPage({
   const discordLabel = getProviderLabel('discord');
   const emailEntryLabel = t('login.continueWithEmail', 'Continue with email');
 
-  // Warm the workspace layout chunk while this page waits on the user, so the
-  // post-sign-in route swap does not start by fetching it. Idle-scheduled so it
-  // never competes with this page's own paint, and swallowing the failure keeps
-  // a cache warm-up from being reported as a renderer error; the real import
-  // runs again and surfaces its own.
+  // Warm the workspace layout while this page waits on the user, so the
+  // post-sign-in route swap neither fetches nor suspends. `preloadMainLayout`,
+  // not a bare `import()`: it records the module, so `PreloadedMainLayout`
+  // mounts it directly instead of suspending into the boot shell for a commit.
+  // Idle-scheduled so it never competes with this page's own paint; a failure
+  // is swallowed because it is only a warm-up, and is not cached, so the real
+  // mount retries and surfaces its own error.
   //
   // The cost is explicit: on web and mobile this is a real network request that
   // /login did not use to make, and a visitor who never signs in pays it too.
@@ -713,7 +716,7 @@ export function LoginPage({
   // away immediately, so a fetch started at click time is usually discarded,
   // and the whole point is to have the chunk before the redirect returns.
   useEffect(
-    () => scheduleIdleTask(() => void import('@/components/main-layout').catch(() => {})),
+    () => scheduleIdleTask(() => void preloadMainLayout().catch(() => {})),
     []
   );
 
