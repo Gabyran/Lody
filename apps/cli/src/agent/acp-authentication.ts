@@ -371,7 +371,7 @@ function formatAuthenticationExitError(
 ): string {
   const base = `${displayName} authentication exited with code ${exitCode ?? 'unknown'}`;
   if (agentType !== 'codex') return base;
-  return `${base}. Make sure device-code login is enabled in your ChatGPT security settings or workspace permissions, then try again.`;
+  return `${base}. Check the Codex login log on the execution machine for the cause, then try again.`;
 }
 
 async function buildAuthenticationProcessEnv(options: {
@@ -531,8 +531,6 @@ export async function probeBuiltinAuthentication(
 }
 
 export class AcpAuthenticationManager {
-  // Each builtin provider has one shared credential store, so concurrent login
-  // attempts are intentionally keyed by agent type.
   private readonly runningByAgentType = new Map<string, RunningAuthentication>();
   private readonly authenticationTimeoutMs: number;
   private readonly terminationGraceMs: number;
@@ -565,7 +563,15 @@ export class AcpAuthenticationManager {
     customAcp?: CustomAcpLaunchSpec;
     runtimeOverrides?: BuiltinRuntimeOverrides;
     env?: Record<string, string>;
+    codexProfile?: ResolvedCodexProfile;
     onProgress?: (event: AcpAuthenticationProgressEvent) => void;
+    authenticateManagedProfile?: (context: {
+      signal: AbortSignal;
+      requestInput: (
+        form: MachineAcpAuthenticationForm,
+        message: string
+      ) => Promise<Record<string, unknown>>;
+    }) => Promise<void>;
   }): Promise<AcpAuthenticationResult> {
     const isBuiltinAuthentication =
       options.cliType === 'builtin' && isManagedBuiltinAgentType(options.agentType);
@@ -595,6 +601,9 @@ export class AcpAuthenticationManager {
     this.runningByAgentType.set(options.agentType, running);
 
     let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
+    let releaseProfile:
+      | import('./codex-profile-process-usage').CodexProfileProcessUsage
+      | undefined;
     const interruptedResult = (): AcpAuthenticationResult | null => {
       if (running.cancelled) {
         options.onProgress?.({ status: 'cancelled' });
@@ -622,6 +631,35 @@ export class AcpAuthenticationManager {
     timeoutHandle.unref?.();
 
     try {
+      if (options.authenticateManagedProfile) {
+        await options.authenticateManagedProfile({
+          signal: running.abortController.signal,
+          requestInput: async (form, message) => {
+            const interactionId = randomUUID();
+            const pending = this.waitForAuthenticationInput(running, interactionId);
+            if (!pending) throw new Error('Authentication input is already pending');
+            options.onProgress?.({ status: 'input-required', interactionId, message, form });
+            const input = await pending;
+            if (input.action !== 'accept')
+              throw new DOMException('Authentication cancelled', 'AbortError');
+            return input.content ?? {};
+          },
+        });
+        const interruption = interruptedResult();
+        if (interruption) return interruption;
+        options.onProgress?.({ status: 'authenticated' });
+        return { success: true, disposition: 'authenticated' };
+      }
+      if (options.codexProfile) {
+        if (await getCodexProfileStore().isReady(options.codexProfile)) {
+          throw new Error(
+            'This provider already has a Codex account. Add a new provider to sign in to another account.'
+          );
+        }
+        releaseProfile = await registerCodexProfileProcess(options.codexProfile, {
+          directNative: true,
+        });
+      }
       if (!isBuiltinAuthentication) {
         return await this.authenticateProtocolDrivenAcp(options, running);
       }
@@ -651,12 +689,13 @@ export class AcpAuthenticationManager {
       const launchInterruption = interruptedResult();
       if (launchInterruption) return launchInterruption;
 
-      const env = await buildAuthenticationProcessEnv({
+      let env = await buildAuthenticationProcessEnv({
         launch,
         agentType: options.agentType,
         env: options.env,
         resolveLoginShellEnv: this.resolveLoginShellEnv,
       });
+      if (options.codexProfile) env = codexProfileEnvironment(options.codexProfile, env);
       const preparationInterruption = interruptedResult();
       if (preparationInterruption) return preparationInterruption;
 
@@ -664,13 +703,16 @@ export class AcpAuthenticationManager {
       const { child } = startProcess(
         {
           command: launch.command,
-          args: launch.args,
+          args: options.codexProfile
+            ? ['-c', 'forced_login_method="chatgpt"', ...launch.args]
+            : launch.args,
           options: { cwd: os.homedir(), env, stdio: ['pipe', 'pipe', 'pipe'] },
           processGroup: true,
         },
         withSpawn(this.spawnProcess)
       );
       running.child = child;
+      releaseProfile?.recordNativePid(child.pid);
       child.stdin?.on('error', (error: unknown) => {
         this.logger.debug(
           `[acp-auth] ${displayName} authorization input failed: ${formatErrorMessage(error)}`
@@ -720,6 +762,8 @@ export class AcpAuthenticationManager {
         return { success: false, disposition: 'error', error };
       }
 
+      if (options.codexProfile) await getCodexProfileStore().markChatgptReady(options.codexProfile);
+
       options.onProgress?.({ status: 'authenticated' });
       return { success: true, disposition: 'authenticated' };
     } catch (error) {
@@ -729,6 +773,7 @@ export class AcpAuthenticationManager {
       options.onProgress?.({ status: 'error', error: message });
       return { success: false, disposition: 'error', error: message };
     } finally {
+      await releaseProfile?.();
       if (timeoutHandle) {
         clearTimeout(timeoutHandle);
       }
@@ -1183,3 +1228,5 @@ export class AcpAuthenticationManager {
     });
   }
 }
+import { getCodexProfileStore, type ResolvedCodexProfile } from './codex-profile-store';
+import { registerCodexProfileProcess, codexProfileEnvironment } from './codex-profile-runtime';

@@ -1,10 +1,10 @@
 # Shared UI helpers and file surfaces
 
-`CLAUDE.md` is a symlink to this file. Edit `AGENTS.md` only.
-These rules also bind callers changing crash recovery, localStorage caches, file
-surfaces, or Electron IPC typing. Read the relevant sections before those changes.
-Rationale: [components](../../../../.agents/docs/components-package.md) and
-[file paths](../../../../.agents/docs/components-file-paths.md).
+Rules bind callers too.
+Background: [components](../../../../.agents/docs/components-package.md),
+[files](../../../../.agents/docs/components-file-paths.md).
+
+- Send acceptance and RPC await local commits, never Repo-wide flush.
 
 ## Electron IPC types
 
@@ -118,3 +118,5 @@ Rationale: [components](../../../../.agents/docs/components-package.md) and
   `formatAgentRateLimitWindowLabel`, even when duration/utilization/reset match.
 - Before creating top-level or child sessions, call `filterAcpSessionConfigOptionValues()`
   so cached values outside the current selector schema are neither dispatched nor persisted.
+
+Attachment transfer lifecycle changes follow [workspace ownership](../providers/AGENTS.md#attachment-transfer-ownership).

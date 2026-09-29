@@ -1,3 +1,5 @@
+import type { ChildProcess } from 'node:child_process';
+
 import { Data, Deferred, Duration, Effect, Exit } from 'effect';
 
 import { formatErrorMessage } from '@/utils/format-error';
@@ -24,6 +26,8 @@ export interface CommandSpec {
   readonly timeout?: Duration.DurationInput;
   /** Combined ceiling per stream; exceeding it fails with `CommandOutputTooLarge`. */
   readonly maxOutputBytes?: number;
+  /** Runs right after the OS call, for a caller that must record the pid. */
+  readonly onSpawned?: (child: ChildProcess) => void;
 }
 
 export interface CommandOutput extends ProcessExit {
@@ -99,6 +103,7 @@ export const runCommand = (
           },
           processGroup: true,
           onSpawned: (child) => {
+            spec.onSpawned?.(child);
             child.stdout?.on('data', (chunk: Buffer) => {
               stdoutBytes += chunk.length;
               if (stdoutBytes > maxBytes) overflow();
