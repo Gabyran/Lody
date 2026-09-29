@@ -127,7 +127,7 @@ Lody 这一层的缺陷（#4 unload/invalidate 顺序、#774 join 永久停在 c
     Effect 只接管打开、join、重连、持久化调度与关闭。
   - `effect` 作为两个库的 peerDependency，与 Lody 共用同一份并对齐版本（当前 3.18.4）。
   - Promise 门面必须让其他使用方的现有测试不改即通过，作为库侧 PR 的验收条件。
-- **顺序**：先完成 [loro-repo Flock 持久化迁移](2026-09-27-loro-repo-flock-persistence-migration.zh.md)，
+- **顺序**：先完成 [loro-repo Flock 持久化迁移](../../implemented/architecture/2026-09-27-loro-repo-flock-persistence-migration.zh.md)，
   再开始库的 Effect 改造，避免两项工作同时改写持久化层。库的改造在各自仓库立项、各自出计划。
 - **Lody 不被阻塞**：Lody 侧按 `loro-repo/effect` 的预期接口定义 `LoroRepo` Tag，先用临时 Layer
   适配现有 Promise 版本并登记删除；库发布 Effect 入口后只替换该 Layer，SessionDocuments、
