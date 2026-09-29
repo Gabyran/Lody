@@ -2100,6 +2100,48 @@ export async function readSessionMachineAccess(args: {
   });
 }
 
+export type MachineAccessReaders = {
+  /** Access of the CLI token's user: owned, or shared with the team (and project shared). */
+  asTokenUser: typeof canRequestMachineForCliToken;
+  /** A requester served by the token user's machines; the target must be one of them. */
+  asServedRequester: typeof canUseMachineForCliToken;
+};
+
+const defaultMachineAccessReaders: MachineAccessReaders = {
+  asTokenUser: canRequestMachineForCliToken,
+  asServedRequester: canUseMachineForCliToken,
+};
+
+/**
+ * A delegated caller acts through the machine it runs on, so the target is
+ * reachable when that machine's owner (the token user) may use it. A different
+ * human driving a shared machine must additionally be served on the target, so
+ * delegation never widens what that human could reach alone.
+ */
+export async function readDelegatedMachineAccess(
+  input: {
+    token: string;
+    tokenUserId: string;
+    workspaceId: string;
+    machineId: string;
+    requesterUserId: string;
+    localProjectId?: string;
+  },
+  readers: MachineAccessReaders = defaultMachineAccessReaders
+): Promise<MachineAccessCheckResult> {
+  const target = {
+    token: input.token,
+    workspaceId: input.workspaceId,
+    machineId: input.machineId,
+    ...(input.localProjectId ? { localProjectId: input.localProjectId } : {}),
+  };
+  const owner = await readers.asTokenUser({ ...target, requesterUserId: input.tokenUserId });
+  if (!owner.allowed || input.requesterUserId === input.tokenUserId) {
+    return owner;
+  }
+  return await readers.asServedRequester({ ...target, requesterUserId: input.requesterUserId });
+}
+
 async function readResolvedSessionMachineAccess(args: {
   auth: AuthContext;
   workspaceId: WorkspaceId;
@@ -2107,18 +2149,18 @@ async function readResolvedSessionMachineAccess(args: {
   requester: ResolvedSessionRequester;
   localProjectId?: string;
 }): Promise<MachineAccessCheckResult> {
-  const readAccess = args.requester.isDelegated
-    ? canUseMachineForCliToken
-    : canRequestMachineForCliToken;
+  const target = {
+    token: args.auth.token,
+    workspaceId: args.workspaceId,
+    machineId: args.machineId,
+    requesterUserId: args.requester.userId,
+    ...(args.localProjectId ? { localProjectId: args.localProjectId } : {}),
+  };
   return await readMachineAccessWithBoundedRetry({
     verify: async () =>
-      await readAccess({
-        token: args.auth.token,
-        workspaceId: args.workspaceId,
-        machineId: args.machineId,
-        requesterUserId: args.requester.userId,
-        ...(args.localProjectId ? { localProjectId: args.localProjectId } : {}),
-      }),
+      args.requester.isDelegated
+        ? await readDelegatedMachineAccess({ ...target, tokenUserId: args.auth.userId })
+        : await canRequestMachineForCliToken(target),
     onRetry: ({ attempt, maxAttempts, delayMs, error }) => {
       getLogger('session').warn(
         `Machine access verification unavailable; retrying ` +

@@ -23,7 +23,9 @@ import {
   normalizeLocalProjectRootPath,
 } from '@lody/shared/node/local-project';
 
+import type { MachineAccessCheckResult } from '@/lib/workspace';
 import {
+  type MachineAccessReaders,
   applyAgentRunConfigSelection,
   runSessionOperationWithSyncedMetadata,
   assertSupportedParentDepth,
@@ -45,6 +47,7 @@ import {
   resolveOpenedBySessionRelation,
   resolveSessionCreateOwnerUserId,
   selectDefaultAgentConfigForCreate,
+  readDelegatedMachineAccess,
   resolveSessionRequester,
   resolveSessionCommandRequesterUserId,
   resolveChatArgs,
@@ -1965,5 +1968,73 @@ describe('session command helpers', () => {
     expect(shouldWaitForSessionCompletion({ json: true })).toBe(false);
     expect(shouldWaitForSessionCompletion({ jsonl: true })).toBe(false);
     expect(shouldWaitForSessionCompletion({ wait: true, json: true })).toBe(true);
+  });
+});
+
+describe('delegated machine access', () => {
+  // A synthetic model of the hosted rules: the token user reaches machines it
+  // owns or that are shared (projects too); a served requester additionally
+  // needs the target to belong to the token user.
+  const machines: Record<string, { owner: string; shared: boolean; sharedProjects?: string[] }> = {
+    'owner-private': { owner: 'owner', shared: false },
+    'owner-shared': { owner: 'owner', shared: true },
+    'peer-shared': { owner: 'peer', shared: true, sharedProjects: ['public-project'] },
+    'peer-private': { owner: 'peer', shared: false },
+  };
+  const tokenUser = 'owner';
+  const reach = (
+    userId: string,
+    machineId: string,
+    localProjectId?: string
+  ): MachineAccessCheckResult => {
+    const machine = machines[machineId];
+    if (!machine) return { allowed: false, reason: 'machine_not_registered' };
+    if (machine.owner === userId) return { allowed: true };
+    if (!machine.shared) return { allowed: false, reason: 'not_visible' };
+    if (localProjectId && !machine.sharedProjects?.includes(localProjectId))
+      return { allowed: false, reason: 'project_not_shared' };
+    return { allowed: true };
+  };
+  const readers: MachineAccessReaders = {
+    asTokenUser: async (input) => reach(tokenUser, input.machineId, input.localProjectId),
+    asServedRequester: async (input) =>
+      machines[input.machineId]?.owner === tokenUser
+        ? reach(input.requesterUserId, input.machineId, input.localProjectId)
+        : { allowed: false, reason: 'not_visible' },
+  };
+  const read = (requesterUserId: string, machineId: string, localProjectId?: string) =>
+    readDelegatedMachineAccess(
+      {
+        token: 'synthetic-token',
+        tokenUserId: tokenUser,
+        workspaceId: 'workspace',
+        machineId,
+        requesterUserId,
+        ...(localProjectId ? { localProjectId } : {}),
+      },
+      readers
+    );
+
+  it('reaches every machine and project the executing machine owner may use', async () => {
+    expect(await read('owner', 'owner-private')).toEqual({ allowed: true });
+    expect(await read('owner', 'peer-shared')).toEqual({ allowed: true });
+    expect(await read('owner', 'peer-shared', 'public-project')).toEqual({ allowed: true });
+    expect(await read('owner', 'peer-shared', 'private-project')).toEqual({
+      allowed: false,
+      reason: 'project_not_shared',
+    });
+    expect(await read('owner', 'peer-private')).toEqual({ allowed: false, reason: 'not_visible' });
+  });
+
+  it('never widens a teammate driving the owner machine beyond their own reach', async () => {
+    expect(await read('teammate', 'owner-shared')).toEqual({ allowed: true });
+    expect(await read('teammate', 'owner-private')).toEqual({
+      allowed: false,
+      reason: 'not_visible',
+    });
+    expect(await read('teammate', 'peer-private')).toEqual({
+      allowed: false,
+      reason: 'not_visible',
+    });
   });
 });

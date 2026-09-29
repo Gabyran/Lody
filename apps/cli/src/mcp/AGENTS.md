@@ -31,6 +31,11 @@ Parent instructions apply.
   the workspace catalog; no driving-Turn mention authorization is required. Resolve its target,
   Prompt prefix, revision, and concrete run config before Operation acceptance. Recovery uses
   the frozen canonical Prompt and target dispatch config and never rereads the mutable catalog.
+  A Role may target any reachable Machine, whatever the requester's context; a Local Project
+  requester defaults to a child only for a same-Machine Role. Delegated reach is the executing
+  Machine owner's (owned, or shared plus shared project), narrowed for another driving human by
+  `readDelegatedMachineAccess`
+  ([note](../../../../.agents/notes/implemented/bug-fix/2026-09-28-mcp-cross-machine-agent-role.md)).
 - Session orchestration derives its human identity from the active execution runtime populated
   by the dispatch payload, not from the daemon credential, Session owner, or observed history.
   An absent active runtime fails closed; never reconstruct invocation identity from history.
