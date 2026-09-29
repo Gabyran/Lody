@@ -1,4 +1,4 @@
-# 将主聊天 composer 的 mention 菜单固定在框体上方
+# 主聊天 composer 的 mention 菜单跟随光标并向上展开
 
 Status: implemented
 Translation: current
@@ -7,34 +7,36 @@ Translation: current
 
 ## 摘要
 
-桌面端主聊天 composer 继承了光标菜单优先向下展开的默认行为，较长的斜杠命令
-面板因此可能横跨 composer 并超出可见区域。主 composer 现在明确使用已有的
-框体锚点，并将 mention 菜单固定在框体上方。菜单受到框体宽度和上方可用高度
-的限制；对话框 composer 与行内编辑器继续跟随光标。这个 checkout 尚未完成
-浏览器验证。
+主 composer 的 mention 菜单跟随光标并向上展开。只有窗口上边缘放不下一项时
+才退到下方，不再固定于框体或被压成零高度。
 
 ## 决策
 
-`ChatComposer` 在带框体、非对话框的分支传入 `menuAnchor="composer"` 和
-`menuSide="top"`。`MentionContent` 已会测量 `[data-mention-frame]`，对该
-锚点禁用翻转，并按上方空间限制高度。菜单列表已可在限制后的区域内滚动。
-因此无需修改通用组件，也不会改变对话框或行内编辑器。
+主聊天 composer 指定 `menuSide="top"`，但保留光标锚点。固定到
+`[data-mention-frame]` 虽然使长菜单位于输入框上方，却让用户打字时补全菜单
+留在原处；浏览器测试测得光标已移至 x≈445px，而菜单仍停在框体的 x=336px。
+框体锚点仍可供其他调用方显式使用，也仍供移动端停靠面板定位，但桌面端主菜单
+不用它。
 
-较早的[光标定位决策](2026-09-29-composer-mention-follows-caret.zh.md)仍说明
-光标测量和浮动编辑器的行为；其默认值不再用于主聊天 composer。
-[固定向上决策](2026-09-26-mention-menu-pinned-above-input.zh.md)说明了为何
-这个框体上的菜单即使列表变长也保持在上方。
+浮动定位器通常会把放不下的向上菜单翻到光标下方。显式指定向上的光标菜单
+现在只要能放下一行就保持该方向，并将高度限制在光标上方的可见空间内；
+若贴近上边缘连一行也放不下，就退到下方，避免出现零高度菜单。列表在限高空间内滚动。
+短视口中如果只有一个结果分组，就隐藏重复的分组标题，让第一项可见；多个
+分组的标题和类别的返回控件仍保留。行内编辑器、对话框等默认光标菜单仍优先
+向下，并在空间不足时翻转。
 
 ## 验证
 
-所属 composer 测试会打开真实的斜杠命令菜单，并检查上方空间的高度限制、
-框体宽度变量和向上展开的位置。这个嵌套 checkout 没有依赖，因此这里无法
-运行测试或进行浏览器渲染。仓库文档检查没有发现此次修改文件中的错误；
-但这个 checkout 中其他文件仍有指向缺失子模块的链接错误。
+Playwright 测试在真实会话 composer 中使用 24 条合成命令，验证打字时菜单
+随光标水平移动、650×250 视口下仍位于光标上方且首行可见、贴近上边缘时
+退到下方并在布局移开后回到上方、Enter 选中筛选
+后的命令，以及输入框焦点保持不变。同一光标位置有修复前后截图；修复前的
+跟随断言在 x=336px 失败。浏览器场景还检查了移动端宽度、调整窗口大小和
+编辑器缩放。尚未验证打包后的 Electron 应用。
 
 ## 链接
 
 - [定位 Spec](../../../../specs/composer-mention-menu-placement.zh.md)
 - [Composer 调用方](../../../../packages/components/src/components/chat/chat-composer.tsx)
-- [Composer 测试](../../../../packages/components/tests/chat-composer-focus.test.tsx)
+- [定位测试](../../../../packages/components/tests/e2e/composer-mention-placement.spec.ts)
 - [PR #1140](https://github.com/LodyAI/Lody/pull/1140)

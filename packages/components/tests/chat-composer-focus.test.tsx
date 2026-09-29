@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { act, createElement, createRef, useState } from 'react';
+import { act, createElement, createRef } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -127,49 +127,6 @@ describe('ChatComposer focusOnContainerClick', () => {
 
     expect(document.activeElement).toBe(input);
     expect(document.activeElement).not.toBe(promptRef.current);
-  });
-
-  it('opens the command menu above the composer and caps it to the frame', async () => {
-    const originalRect = HTMLElement.prototype.getBoundingClientRect;
-    HTMLElement.prototype.getBoundingClientRect = function (this: HTMLElement) {
-      if (this.hasAttribute('data-mention-frame')) {
-        return DOMRect.fromRect({ x: 200, y: 600, width: 600, height: 100 });
-      }
-      return originalRect.call(this);
-    };
-
-    function ComposerWithCommand() {
-      const [value, setValue] = useState('');
-      return createElement(ChatComposer, {
-        promptValue: value,
-        onPromptChange: setValue,
-        availableCommands: [{ name: 'review', description: 'Review changes' }],
-      });
-    }
-
-    try {
-      await act(async () => root.render(createElement(ComposerWithCommand)));
-      const input = container.querySelector('textarea');
-      expect(input).not.toBeNull();
-      await act(async () => {
-        input!.focus();
-        Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')?.set?.call(
-          input,
-          '/'
-        );
-        input!.setSelectionRange(1, 1);
-        input!.dispatchEvent(new Event('input', { bubbles: true }));
-      });
-
-      const menu = document.querySelector<HTMLElement>('[data-slot="mention-content"]');
-      expect(menu).not.toBeNull();
-      expect(menu?.style.maxHeight).toBe('576px');
-      expect(menu?.style.getPropertyValue('--mention-input-width')).toBe('600px');
-      expect(menu?.style.getPropertyValue('--mention-rise')).toBe('-4px');
-      expect(menu?.textContent).toContain('review');
-    } finally {
-      HTMLElement.prototype.getBoundingClientRect = originalRect;
-    }
   });
 });
 

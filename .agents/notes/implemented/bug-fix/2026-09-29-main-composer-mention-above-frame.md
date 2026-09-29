@@ -1,4 +1,4 @@
-# Pin the main chat composer's mention menu above its frame
+# Keep the main composer mention menu above the caret
 
 Status: implemented
 Translation: current
@@ -7,39 +7,42 @@ Translation: current
 
 ## Abstract
 
-The main desktop chat composer inherited the caret menu's downward preference,
-so a long slash-command panel could extend across the composer and beyond the
-visible area. The main composer now explicitly uses the existing frame anchor
-and pins its mention menu above it. The menu receives the frame's width and
-available-height caps; the dialog composer and inline editor retain caret
-placement. Browser verification remains pending in this checkout.
+The main composer mention menu follows the caret above it. It falls below only
+when the top edge cannot fit one option, rather than anchoring to the frame or
+disappearing at zero height.
 
 ## Decision
 
-`ChatComposer` selects `menuAnchor="composer"` and `menuSide="top"` for its
-framed, non-dialog branch. `MentionContent` already measures
-`[data-mention-frame]`, disables flipping for that anchor, and caps height to
-the space above. The menu's list already scrolls inside that cap. This restores
-the main composer's fixed placement without changing the shared primitive or
-the dialog and inline callers.
+The main chat composer prefers `menuSide="top"` but retains the caret anchor.
+Anchoring to `[data-mention-frame]` kept a long menu above the input, but left
+completions behind as the user typed; a browser test measured the menu at the
+frame's x=336px even after the caret moved to x≈445px. The frame anchor remains
+available for other explicit callers and for the mobile dock, not this desktop
+menu.
 
-The earlier [caret-placement decision](2026-09-29-composer-mention-follows-caret.md)
-still describes the caret measurement and the floating editor's behavior; its
-default is no longer the main chat composer's choice. The earlier
-[top-pinning decision](2026-09-26-mention-menu-pinned-above-input.md) explains
-why a menu attached to this frame stays above it even when the list grows.
+The floating positioner normally flips an oversized top menu below the caret.
+For an explicit top caret menu, `MentionContent` keeps that side while one row
+fits, and caps the surface to the visible room above the caret. At the top edge
+where no row fits, it falls below rather than rendering a zero-height menu. The list scrolls within
+the cap. A short viewport with one result group hides its redundant heading so
+the first option remains visible; multi-group labels and a category's Back
+control remain available. Default caret menus, including inline edit and
+dialog surfaces, still prefer below and flip when needed.
 
 ## Verification
 
-The owning composer test opens a real slash-command menu and checks the upper
-room cap, frame-width variable, and top-side placement. Dependencies are absent
-from this nested checkout, so the test and browser rendering could not be run
-here. The repository documentation check found no errors in the changed files;
-it still reports broken links to absent submodules elsewhere in this checkout.
+Playwright tests use the real session composer with 24 synthetic commands. They
+verify that typing moves the menu horizontally with the caret, the menu stays
+above the caret at 650×250, its first row is visible, the top-edge fallback
+returns above after a layout move, Enter selects a filtered command, and
+textarea focus persists. Before/after screenshots capture the
+same caret position; the pre-fix caret-following assertion failed at x=336px.
+The browser story was also exercised at mobile width, with resize and editor
+scale. Packaged Electron behavior remains unverified.
 
 ## Links
 
 - [Placement Spec](../../../../specs/composer-mention-menu-placement.md)
 - [Composer caller](../../../../packages/components/src/components/chat/chat-composer.tsx)
-- [Composer test](../../../../packages/components/tests/chat-composer-focus.test.tsx)
+- [Placement test](../../../../packages/components/tests/e2e/composer-mention-placement.spec.ts)
 - [PR #1140](https://github.com/LodyAI/Lody/pull/1140)
