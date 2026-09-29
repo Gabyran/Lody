@@ -65,7 +65,7 @@ migrated layer. Current facades:
 | --- | --- | --- |
 | `apps/cli/src/session/session-sandbox.ts` (`SessionSandbox`) | `Session`, `TerminalManager` | the session resource layer owns process containers directly |
 | `terminateAcpProcessTree` in `apps/cli/src/agent/acp-runner.ts` | auxiliary ACP agents | auxiliary ACP agents become scoped processes |
-| `runCommandText` / `runCommandTextSync` / `startProcess` / `terminateChildTree` / `signalChildTreeNow` / `isPidAliveSync` / `probePidSync` in `@lody/shared/node/process` (CLI: via `apps/cli/src/platform/promise-facade.ts`) | every other process caller in the CLI, Electron main, the CLI supervisor and `packages/shared/src/node` | each caller's own layer migrates |
+| `runCommandText` / `runCommandTextSync` / `startProcess` / `terminateChildTree` / `signalChildTreeNow` / `isPidAliveSync` / `probePidSync` and the runners `makeProcessRunner` / `runPromiseSquashed` in `@lody/shared/node/process` (CLI: via `apps/cli/src/platform/promise-facade.ts`, whose `makePlatformRunner` adds the daemon logger; worker bundles use the shared ones directly to stay free of it) | every other process caller in the CLI, Electron main, the CLI supervisor and `packages/shared/src/node` | each caller's own layer migrates |
 | `terminatePtyProcessGroup` in `apps/cli/src/lib/terminal-pty-service.ts` | local terminal PTYs | terminal/PTY ownership becomes an Effect layer |
 
 `pnpm check:cli-process-boundary` fails when code in those packages bypasses

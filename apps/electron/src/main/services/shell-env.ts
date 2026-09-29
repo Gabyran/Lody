@@ -7,7 +7,13 @@ import { runCommandText, type CommandText } from '@lody/shared/node/process'
 // the embedded CLI as well as "Open in" path launchers — so bare command names
 // resolve the same way they do in a terminal.
 
-const SHELL_ENV_TIMEOUT_MS = 3000
+// Interactive rc files (nvm, conda, oh-my-zsh) can take several seconds on a
+// cold login. The bound only stops a shell that never returns: the timeout
+// SIGTERMs the shell's whole tree, and an interactive shell ignores SIGTERM,
+// so it is SIGKILLed shortly after.
+const SHELL_ENV_TIMEOUT_MS = 15_000
+// Verbose rc files (`set -x`) write to stderr; that must not fail the probe.
+const SHELL_ENV_MAX_OUTPUT_BYTES = 8 * 1024 * 1024
 
 let cachedShellEnvPromise: Promise<NodeJS.ProcessEnv | null> | null = null
 
@@ -59,6 +65,7 @@ async function loadUserShellEnv(): Promise<NodeJS.ProcessEnv | null> {
       args: shellCommand.args,
       env: process.env,
       timeout: SHELL_ENV_TIMEOUT_MS,
+      maxOutputBytes: SHELL_ENV_MAX_OUTPUT_BYTES,
       check: 'none'
     })
   } catch (error) {
@@ -82,11 +89,17 @@ async function loadUserShellEnv(): Promise<NodeJS.ProcessEnv | null> {
 /**
  * Resolve (and cache for the process lifetime) the user's login-shell
  * environment. Returns null on Windows, when disabled, or when the probe fails;
- * callers should fall back to `process.env` in that case.
+ * callers should fall back to `process.env` in that case. A failed probe is
+ * not cached, so a slow cold-login shell is retried on the next call instead
+ * of leaving the app with launchd's PATH until it restarts.
  */
 export async function getUserShellEnvCached(): Promise<NodeJS.ProcessEnv | null> {
   if (!cachedShellEnvPromise) {
-    cachedShellEnvPromise = loadUserShellEnv()
+    const probe = loadUserShellEnv()
+    cachedShellEnvPromise = probe
+    void probe.then((env) => {
+      if (env === null && cachedShellEnvPromise === probe) cachedShellEnvPromise = null
+    })
   }
   return await cachedShellEnvPromise
 }

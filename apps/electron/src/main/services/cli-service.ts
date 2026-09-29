@@ -4,7 +4,7 @@ import fs from 'node:fs'
 import { totalmem } from 'node:os'
 import { basename, join, resolve as resolvePath } from 'node:path'
 import { app, powerSaveBlocker, type WebContents } from 'electron'
-import { Effect, Logger, LogLevel } from 'effect'
+import { Effect, Layer, Logger, LogLevel } from 'effect'
 import {
   signalChildTreeNow,
   startProcess,
@@ -87,16 +87,20 @@ const CLI_FORCE_KILL_WAIT_MS = 5000
 const EMBEDDED_CLI_PROCESS_GROUP = false
 // Process-layer diagnostics (a tree that survived termination) go to the daily log.
 const CLI_PROCESS_OPTIONS: ProcessFacadeOptions = {
-  loggerLayer: Logger.replace(
-    Logger.defaultLogger,
-    Logger.make(({ logLevel, message }) => {
-      const text = (Array.isArray(message) ? message : [message]).map(String).join(' ')
-      if (LogLevel.greaterThanEqual(logLevel, LogLevel.Warning)) {
-        getDesktopLog().warn('cli-process', text)
-      } else {
-        getDesktopLog().debug('cli-process', text)
-      }
-    })
+  loggerLayer: Layer.merge(
+    Logger.replace(
+      Logger.defaultLogger,
+      Logger.make(({ logLevel, message }) => {
+        const text = (Array.isArray(message) ? message : [message]).map(String).join(' ')
+        if (LogLevel.greaterThanEqual(logLevel, LogLevel.Warning)) {
+          getDesktopLog().warn('cli-process', text)
+        } else {
+          getDesktopLog().debug('cli-process', text)
+        }
+      })
+    ),
+    // The desktop log applies its own level; keep the escalation diagnostics.
+    Logger.minimumLogLevel(LogLevel.Debug)
   )
 }
 const CLI_ELECTRON_BOOTSTRAP_ENV = 'LODY_ELECTRON_BOOTSTRAP'

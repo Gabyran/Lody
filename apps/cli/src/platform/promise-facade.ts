@@ -14,7 +14,7 @@ import {
   type TerminationPolicy,
 } from '@lody/shared/node/process';
 
-import type { Logger as LodyLogger } from '@/utils/logger';
+import { getLogger, type Logger as LodyLogger } from '@/utils/logger';
 
 import { lodyLoggerLayer } from './logger';
 
@@ -33,9 +33,11 @@ export interface PlatformFacadeOptions {
   readonly nodeProcess?: NodeProcessApi;
 }
 
+// Without a caller's logger the daemon's root logger still records process
+// diagnostics, such as a tree that survived termination.
 const toShared = (options: PlatformFacadeOptions): processLayer.ProcessFacadeOptions => ({
   nodeProcess: options.nodeProcess,
-  loggerLayer: options.logger ? lodyLoggerLayer(options.logger) : undefined,
+  loggerLayer: lodyLoggerLayer(options.logger ?? getLogger()),
 });
 
 export const platformLayer = (options: PlatformFacadeOptions): Layer.Layer<NodeProcess> =>

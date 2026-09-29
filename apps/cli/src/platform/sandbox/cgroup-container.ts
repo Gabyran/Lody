@@ -96,7 +96,12 @@ export const makeCgroupContainer = (options: {
       Effect.map(parsePids),
       Effect.orElseSucceed((): number[] => [])
     );
-    const tree = cgroupTree(np, cgroupDir, readPids, exists, (value) =>
+    // `populated` covers nested cgroups too, whose members cgroup.procs omits.
+    const readPopulated = Effect.map(
+      readEvents('cgroup.events'),
+      (events) => (events.populated ?? 0) > 0
+    );
+    const tree = cgroupTree(np, cgroupDir, readPids, readPopulated, exists, (value) =>
       io('write cgroup.kill', () =>
         options.fs.writeFile(path.join(cgroupDir, 'cgroup.kill'), value)
       )
@@ -107,6 +112,13 @@ export const makeCgroupContainer = (options: {
       description: 'linux-cgroup-v2',
       spawn: (spec) =>
         Effect.gen(function* () {
+          // After cleanup removed the cgroup, a spawn would run outside every limit.
+          yield* requireDir.pipe(
+            Effect.mapError(
+              (error) =>
+                new SpawnFailed({ command: spec.command, message: error.message, cause: error })
+            )
+          );
           const baseline = {
             memory: yield* readEvents('memory.events'),
             pids: yield* readEvents('pids.events'),
@@ -287,14 +299,15 @@ const initializeCgroup = (
   });
 
 /**
- * The whole cgroup as one tree: alive while `cgroup.procs` lists anyone,
- * SIGTERM to each member, SIGKILL through `cgroup.kill` when the kernel
- * offers it.
+ * The whole cgroup as one tree: alive while it or a nested cgroup has a
+ * member, SIGTERM to each direct member, SIGKILL through `cgroup.kill` (which
+ * reaches nested cgroups) when the kernel offers it.
  */
 const cgroupTree = (
   np: NodeProcessApi,
   cgroupDir: string,
   readPids: Effect.Effect<number[]>,
+  readPopulated: Effect.Effect<boolean>,
   exists: (filePath: string) => Effect.Effect<boolean>,
   writeKill: (value: string) => Effect.Effect<void, SandboxIoError>
 ): ProcessTree => {
@@ -321,11 +334,13 @@ const cgroupTree = (
     );
   return {
     description,
-    isAlive: Effect.map(readPids, (pids) => pids.length > 0),
+    isAlive: Effect.gen(function* () {
+      return (yield* readPids).length > 0 || (yield* readPopulated);
+    }),
     signal: (signal) =>
       Effect.gen(function* () {
         const pids = yield* readPids;
-        if (pids.length === 0) return 'gone' as const;
+        if (pids.length === 0 && !(yield* readPopulated)) return 'gone' as const;
         if (signal === 'SIGKILL' && (yield* exists(path.join(cgroupDir, 'cgroup.kill')))) {
           yield* writeKill('1\n').pipe(
             Effect.mapError(

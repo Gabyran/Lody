@@ -137,10 +137,42 @@ CLI 时按 Ctrl-C 不再能传到这些命令；打开 `/dev/tty` 的提示（�
 - **Electron 退出使用有上限的进程树终止。** 退出时的所有权保持不变：仍有进程残留时，退出会失败。
   在 Windows 上现在会结束整棵树，而不只是根进程。
 
+## 后续：正确性审查
+
+对这组叠加 PR 与其所替换代码的审查发现了若干回归，均已在最上层 PR 中修复；除特别说明外，每项都先写了会失败的测试：
+
+- **失败的 spawn 绝不会波及调用方自己的进程组。** 在 Node 报告 spawn 失败之前，`child.kill()` 会向
+  pid 0 发信号，也就是 daemon（或 Electron main）所在的整个进程组。现在 `childTree` 把没有 pid 的子进程视为已结束。
+  测试在一个真实且隔离的进程组中复现这个竞态。
+- **被放弃的命令先有 SIGTERM 宽限。** 超时的命令过去会被立即 SIGKILL，git 因而留下 `index.lock`，
+  阻塞之后所有写 index 的操作。`ABANDONED_COMMAND_POLICY` 现在先给 2 秒 SIGTERM。
+- **finalizer 内的等待靠时钟限时，而不是靠中断。** 被放弃命令的终止在作用域 finalizer 中运行，那里什么都
+  不可中断，所以一旦进程树挺过 SIGKILL（PID 1 daemon 下的僵尸进程、D 状态进程），`timeoutTo` 就会永远
+  等下去。`waitUntilGone` 现在对照时钟截止时间轮询；`taskkill` 的截止时间由一个独立的可中断计时 fiber
+  完成被等待的 Deferred。
+- **进程组信号返回 EPERM 时改为等待，而不是失败。** 在 macOS 上，唯一成员是已退出但尚未被回收的 leader
+  的进程组会返回 EPERM；现在交给有上限的等待来判定。真正属于其他用户的进程组在等待结束后仍以
+  `TerminationFailed` 结束。
+- **Windows 命令绝不从工作目录解析。** `cross-spawn` 会先在 cwd 中按所有 PATHEXT 扩展名查找，于是仓库里的
+  `git.cmd` 会在自动 git 刷新时被执行。现在 `nodeProcessLive` 只通过 PATH 中的绝对路径条目解析裸命令名。
+  找不到时，由 Node 自己的 spawn 报告 ENOENT。此前 cross-spawn 会用 cmd.exe 包装缺失的命令，导致
+  `git_executable_not_found` 丢失，缺失的启动器 `.exe` 也被当成已启动。仅有单元测试：未在 Windows 上实际运行。
+- **强制调用时 `Session.terminate` 会立即升级，也不等待终端。** 在温和终止进行中到来的强制调用现在立即
+  SIGKILL，并结束温和流程中的等待（终端、`session/close`）。强制拆除不再等待终端命令的温和停止，因为
+  sandbox 会直接杀掉它们。已完成的终止只有在此后没有启动新进程时才会被复用。
+- **即使有进程树残留，归档也会释放 Session。** 这个失败以 warn 级别记录；归档、空闲状态写入与本地项目移除都会继续。
+- **较小的修复。** PTY 的挂断信号就是温和信号：等待 2 秒，然后 SIGKILL。在 SIGHUP 之后立即发送 SIGTERM
+  会让 fish 来不及把挂断转发给它的作业；这一项没有测试，因为竞态依赖时序。其他修复：
+  - shell 环境探测允许 15 秒，且不缓存失败结果；
+  - `rundll32` 使用可见的显示状态；
+  - cgroup 容器在清理后拒绝 spawn，并把有成员的嵌套 cgroup 视为存活；
+  - supervisor 不再通过一个共享的永不 settle 的 promise 保留每一次运行；
+  - 调用方未传入 logger 时，进程层的警告会进入 daemon 的根 logger（或控制台）。
+
 ## 验证
 
-- 新增 `@effect/vitest` 0.26。新测试 `tests/platform-process.test.ts` 用 `TestClock` 驱动时间，
-  跑在内存进程表 `tests/fake-process-table.ts` 上（模拟进程组、被忽略的信号与 `taskkill`），覆盖：
+- 新增 `@effect/vitest` 0.26。新测试（现为 `packages/shared/tests/process.test.ts`） 用 `TestClock` 驱动时间，
+  跑在内存进程表 `packages/shared/src/node/process-testing.ts` 上（模拟进程组、被忽略的信号与 `taskkill`），覆盖：
   比 leader 活得久的后代、恰好在宽限期结束时升级、SIGKILL 被忽略时失败、强制终止、已空的树、
   温和终止进行中到来的强制终止立即升级、不等宽限期、作用域释放、温和 `taskkill` 被拒、`taskkill` 卡住、残留组先被跟踪后被
   移除，以及一棵真实的 POSIX 进程树。

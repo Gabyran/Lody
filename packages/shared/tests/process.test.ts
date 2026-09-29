@@ -1,6 +1,7 @@
 import { describe, expect, it } from '@effect/vitest';
 import { Cause, Effect, Exit, Fiber, Option, TestClock } from 'effect';
 import type { Readable } from 'node:stream';
+import { fileURLToPath } from 'node:url';
 
 import {
   CommandFailed,
@@ -13,7 +14,7 @@ import {
 import { signalChildTreeNow, SpawnFailed, TerminationFailed } from '../src/node/process';
 import { spawnProcess, spawnScoped, type SpawnSpec } from '../src/node/process';
 import { NodeProcess, NodeProcessLive } from '../src/node/process';
-import { TREE_POLL_INTERVAL } from '../src/node/process';
+import { resolveWindowsCommand, TREE_POLL_INTERVAL } from '../src/node/process';
 import { FakeProcessTable } from '../src/node/process-testing';
 
 const GRACEFUL = { graceMs: 5_000, killWaitMs: 5_000 };
@@ -119,6 +120,25 @@ describe('process tree termination (POSIX groups)', () => {
       // The graceful call sees the tree gone at its next poll.
       yield* TestClock.adjust(TREE_POLL_INTERVAL);
       yield* Fiber.join(graceful);
+    }).pipe(Effect.provideService(NodeProcess, table.api));
+  });
+
+  // macOS: kill(-pgid) fails with EPERM while the group's only member is an
+  // exited leader Node has not reaped yet; the reap happens during the wait.
+  it.effect('waits for an exited, unreaped leader instead of failing on EPERM', () => {
+    const table = new FakeProcessTable('darwin');
+    return Effect.gen(function* () {
+      const managed = yield* spawnProcess(agentSpec);
+      const leader = managed.child.pid ?? -1;
+      table.exitUnreaped(leader);
+      const termination = yield* Effect.fork(managed.terminate(GRACEFUL));
+      while (table.refused.length === 0) yield* Effect.yieldNow();
+      expect(table.refused).toEqual([{ target: -leader, signal: 'SIGTERM' }]);
+
+      table.reap(leader);
+      yield* TestClock.adjust(TREE_POLL_INTERVAL);
+
+      expect(Exit.isSuccess(yield* Fiber.await(termination))).toBe(true);
     }).pipe(Effect.provideService(NodeProcess, table.api));
   });
 
@@ -247,6 +267,27 @@ describe('process tree termination (real processes)', () => {
         expect(isRunning(grandchild)).toBe(false);
       }).pipe(Effect.provide(NodeProcessLive))
   );
+
+  // Until Node reports a failed spawn, `child.kill()` reaches pid 0: the
+  // caller's own process group (the daemon, or Electron main with it).
+  it.live.skipIf(process.platform === 'win32')(
+    'never signals its own process group when terminating a child that failed to spawn',
+    () =>
+      Effect.gen(function* () {
+        const output = yield* runCommand({
+          command: process.execPath,
+          args: [
+            '--experimental-strip-types',
+            '--no-warnings',
+            fileURLToPath(new URL('./fixtures/terminate-failed-spawn.mjs', import.meta.url)),
+            fileURLToPath(new URL('../src/node/process.ts', import.meta.url)),
+          ],
+          timeout: '20 seconds',
+        });
+        expect(output.stdout.toString('utf8').trim()).toBe('survived');
+        expect(output.code).toBe(0);
+      }).pipe(Effect.provide(NodeProcessLive))
+  );
 });
 
 describe('runCommand', () => {
@@ -308,7 +349,26 @@ describe('runCommand', () => {
       expect(failure).toBeInstanceOf(CommandTimedOut);
       const pid = table.spawned.length === 1 ? 1000 : -1;
       expect(table.isAlive(pid)).toBe(false);
-      expect(table.delivered).toEqual([{ target: -pid, signal: 'SIGKILL' }]);
+      // SIGTERM first: a git killed outright leaves its index.lock behind.
+      expect(table.delivered).toEqual([{ target: -pid, signal: 'SIGTERM' }]);
+    }).pipe(Effect.provideService(NodeProcess, table.api));
+  });
+
+  // The abandoned tree is ended in a scope finalizer, where nothing can be
+  // interrupted: the waits there must be bounded without interruption.
+  it.effect('still settles when the abandoned tree survives SIGKILL', () => {
+    const table = new FakeProcessTable('linux');
+    table.queueSpawn({ ignores: ['SIGTERM', 'SIGKILL'] });
+    return Effect.gen(function* () {
+      const command = yield* Effect.fork(
+        runCommand({ command: 'git', args: ['fetch'], timeout: '1 second' })
+      );
+      yield* TestClock.adjust('1 second');
+      yield* TestClock.adjust('5 seconds');
+      const failure = failureOf(yield* Fiber.await(command));
+
+      expect(failure).toBeInstanceOf(CommandTimedOut);
+      expect(table.delivered.map((delivery) => delivery.signal)).toEqual(['SIGTERM', 'SIGKILL']);
     }).pipe(Effect.provideService(NodeProcess, table.api));
   });
 });
@@ -360,5 +420,50 @@ describe('signalChildTreeNow', () => {
 
     expect(table.delivered).toEqual([{ target: -leader, signal: 'SIGTERM' }]);
     expect(table.isAlive(descendant)).toBe(false);
+  });
+});
+
+describe('resolveWindowsCommand', () => {
+  const files = new Set([
+    'C:\\repo\\git.cmd',
+    'C:\\repo\\tools\\build.cmd',
+    'C:\\Program Files\\Git\\cmd\\git.exe',
+    'C:\\Users\\me\\AppData\\Roaming\\npm\\claude.cmd',
+  ]);
+  // Windows file names are case-insensitive; PATHEXT entries are upper case.
+  const isFile = (filePath: string) =>
+    Array.from(files).some((file) => file.toLowerCase() === filePath.toLowerCase());
+  const env = {
+    Path: 'C:\\Program Files\\Git\\cmd;.;"C:\\Users\\me\\AppData\\Roaming\\npm"',
+    PATHEXT: '.COM;.EXE;.BAT;.CMD',
+  };
+
+  // A repository cannot make Lody run its own `git.cmd`.
+  it('resolves a bare name from absolute PATH entries only, never the working directory', () => {
+    expect(resolveWindowsCommand('git', { cwd: 'C:\\repo', env }, isFile)).toBe(
+      'C:\\Program Files\\Git\\cmd\\git.EXE'
+    );
+    expect(resolveWindowsCommand('claude', { cwd: 'C:\\repo', env }, isFile)).toBe(
+      'C:\\Users\\me\\AppData\\Roaming\\npm\\claude.CMD'
+    );
+  });
+
+  it('reports nothing for a command found only in the working directory', () => {
+    expect(
+      resolveWindowsCommand('git', { cwd: 'C:\\repo', env: { PATHEXT: env.PATHEXT } }, isFile)
+    ).toBeNull();
+  });
+
+  it('resolves an explicit path against the working directory, and a missing one to nothing', () => {
+    expect(resolveWindowsCommand('tools\\build', { cwd: 'C:\\repo', env }, isFile)).toBe(
+      'C:\\repo\\tools\\build.CMD'
+    );
+    expect(
+      resolveWindowsCommand(
+        'C:\\Program Files\\Microsoft VS Code\\Code.exe',
+        { cwd: 'C:\\repo', env },
+        isFile
+      )
+    ).toBeNull();
   });
 });

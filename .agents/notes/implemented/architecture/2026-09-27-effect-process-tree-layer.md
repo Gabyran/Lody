@@ -222,11 +222,61 @@ Decisions:
   a survivor still fails quit. On Windows it now ends the whole tree instead of
   only the root.
 
+## Follow-up: correctness review
+
+A review of the stacked PRs against the code they replaced found regressions,
+all fixed on the top PR with a failing-first test each unless noted:
+
+- **A failed spawn never reaches the caller's own group.** Until Node reports
+  a failed spawn, `child.kill()` signals pid 0: the daemon's (or Electron
+  main's) whole process group. `childTree` treats a child without a pid as
+  gone. The test runs the race in a real, isolated process group.
+- **Abandoned commands get a SIGTERM grace.** A timed-out command was
+  SIGKILLed at once, so git left `index.lock` behind and blocked every later
+  index write. `ABANDONED_COMMAND_POLICY` now gives 2 s of SIGTERM first.
+- **Waits inside finalizers are bounded by the clock, not by interruption.**
+  The abandoned-command termination runs in a scope finalizer, where nothing
+  is interruptible, so a `timeoutTo` there waited forever for a tree that
+  survived SIGKILL (a zombie under a PID-1 daemon, a D-state process).
+  `waitUntilGone` polls against a clock deadline, and the `taskkill` deadline
+  completes the awaited Deferred from a separate interruptible timer fiber.
+- **EPERM from a group signal waits instead of failing.** On macOS a group
+  whose only member is an exited, not yet reaped leader answers EPERM; the
+  layer now lets the bounded wait decide. A group that truly belongs to
+  another user still ends in `TerminationFailed` after the wait.
+- **Windows commands never resolve from the working directory.** `cross-spawn`
+  searched cwd first with every PATHEXT extension, so a repository's
+  `git.cmd` would run during an automatic git refresh. `nodeProcessLive`
+  resolves bare names through absolute PATH entries only. When nothing
+  matches, Node's own spawn reports ENOENT. Before, cross-spawn wrapped the
+  missing command in cmd.exe, which lost `git_executable_not_found` and made
+  a missing launcher `.exe` look launched. Unit tested only: no Windows run.
+- **`Session.terminate` escalates and does not wait on terminals when forced.**
+  A forced call joining a graceful one now SIGKILLs at once and ends the
+  graceful waits (terminals, `session/close`). A forced teardown no longer
+  waits for terminal commands' graceful stop, since the sandbox kills them.
+  A finished termination is reused only while no process was started since.
+- **Archive releases a Session even when a tree survives.** The failure is
+  logged at warn; the archive, its idle status and local-project removal
+  continue.
+- **Smaller fixes.** The PTY hangup is the polite signal: a 2 s wait, then
+  SIGKILL. SIGTERM right after SIGHUP made fish skip forwarding the hangup to
+  its jobs; this one has no test because the race is timing-dependent. Other
+  fixes:
+  - the shell-env probe allows 15 s and does not cache a failure;
+  - `rundll32` gets a visible show state;
+  - the cgroup container refuses spawns after cleanup and treats a populated
+    nested cgroup as alive;
+  - the supervisor no longer retains every run through a shared
+    never-settling promise;
+  - process-layer warnings reach the daemon's root logger (or the console)
+    when a caller passes no logger.
+
 ## Verification
 
-- `@effect/vitest` 0.26 was added. The new tests in `tests/platform-process.test.ts`
+- `@effect/vitest` 0.26 was added. The new tests (now `packages/shared/tests/process.test.ts`)
   drive time with `TestClock` over an in-memory process table,
-  `tests/fake-process-table.ts`, that models groups, ignored signals and
+  `packages/shared/src/node/process-testing.ts`, that models groups, ignored signals and
   `taskkill`. They cover:
   - a descendant that outlives its leader;
   - escalation exactly at the end of the grace period;

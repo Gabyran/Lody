@@ -25,6 +25,10 @@ record: [process tree layer](../../../../.agents/notes/implemented/architecture/
   SIGTERM→wait→SIGKILL loop. Every wait is bounded, and a tree that cannot be
   proven gone fails with `TerminationFailed`, never success. A caller that
   cannot act on it logs it at `warn`, naming the tree.
+- Termination often runs in a finalizer, where nothing is interruptible: bound
+  its waits by the clock (`waitUntilGone`), never by `timeout*` or a race.
+- Never signal a child without a pid (pid 0 is the caller's own group), and
+  never resolve a Windows command from the working directory.
 - Liveness covers the whole tree (process group, cgroup), not just the root.
 - A command that exits on its own keeps what it deliberately left running; only
   a caller that stops waiting (timeout, interruption, output limit) ends the tree.

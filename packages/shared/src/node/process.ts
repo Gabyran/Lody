@@ -6,16 +6,22 @@
  * (`node --test --experimental-strip-types` in apps/electron) can load it.
  * Rules: apps/cli/src/platform/AGENTS.md; guard: scripts/check-cli-process-boundary.mjs.
  */
-import type {
-  ChildProcess,
-  SpawnOptions,
-  SpawnSyncOptions,
-  SpawnSyncReturns,
+import {
+  spawn as nodeSpawn,
+  spawnSync as nodeSpawnSync,
+  type ChildProcess,
+  type SpawnOptions,
+  type SpawnSyncOptions,
+  type SpawnSyncReturns,
 } from 'node:child_process';
+import { statSync } from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 import spawn from 'cross-spawn';
 import {
   Cause,
+  Clock,
   Context,
   Data,
   Deferred,
@@ -23,8 +29,11 @@ import {
   Effect,
   Either,
   Exit,
+  Fiber,
   Layer,
   Logger,
+  LogLevel,
+  Option,
   type Scope,
 } from 'effect';
 
@@ -59,11 +68,86 @@ export interface NodeProcessApi {
 
 export class NodeProcess extends Context.Tag('lody/NodeProcess')<NodeProcess, NodeProcessApi>() {}
 
+const WINDOWS_DEFAULT_PATHEXT = '.COM;.EXE;.BAT;.CMD';
+
+/** Windows environment keys are case-insensitive; a plain `env` object is not. */
+const windowsEnvValue = (env: NodeJS.ProcessEnv, key: string): string | undefined =>
+  Object.entries(env).find(([name]) => name.toUpperCase() === key)?.[1];
+
+/**
+ * Where Windows would run `command` from, never from the working directory.
+ *
+ * `cross-spawn` alone searches the working directory first and accepts every
+ * PATHEXT extension there, so a git call inside a cloned repository would run
+ * a `git.cmd` committed to it. A bare name resolves through the absolute PATH
+ * entries only; a path resolves against `cwd`. `null`: nothing matched.
+ */
+export const resolveWindowsCommand = (
+  command: string,
+  options: { readonly cwd?: string; readonly env: NodeJS.ProcessEnv },
+  isFile: (filePath: string) => boolean
+): string | null => {
+  const extensions = (windowsEnvValue(options.env, 'PATHEXT') ?? WINDOWS_DEFAULT_PATHEXT)
+    .split(';')
+    .filter(Boolean);
+  const candidates = (base: string) => [
+    // Only a name that already carries an extension may match as written.
+    ...(path.win32.extname(base) === '' ? [] : [base]),
+    ...extensions.map((extension) => `${base}${extension}`),
+  ];
+  if (/[\\/]/u.test(command)) {
+    const base = path.win32.resolve(options.cwd ?? process.cwd(), command);
+    return candidates(base).find(isFile) ?? null;
+  }
+  for (const entry of (windowsEnvValue(options.env, 'PATH') ?? '').split(';')) {
+    const directory = entry.trim().replace(/^"(.*)"$/u, '$1');
+    if (!path.win32.isAbsolute(directory)) continue;
+    const found = candidates(path.win32.join(directory, command)).find(isFile);
+    if (found) return found;
+  }
+  return null;
+};
+
+const isFile = (filePath: string): boolean => {
+  try {
+    return statSync(filePath).isFile();
+  } catch {
+    return false;
+  }
+};
+
+/**
+ * The command `cross-spawn` should run on Windows, or `null` when Node's own
+ * spawn should report it missing. A shell spawn is a command line, not a path.
+ */
+const windowsSpawnTarget = (
+  command: string,
+  options: { readonly cwd?: string | URL; readonly env?: NodeJS.ProcessEnv; readonly shell?: unknown }
+): string | null => {
+  if (options.shell) return command;
+  const cwd = options.cwd instanceof URL ? fileURLToPath(options.cwd) : options.cwd;
+  return resolveWindowsCommand(command, { cwd, env: options.env ?? process.env }, isFile);
+};
+
 export const nodeProcessLive: NodeProcessApi = {
   platform: process.platform,
-  spawn: (command, args, options) => spawn(command, [...args], options),
-  spawnSync: (command, args, options) =>
-    spawn.sync(command, [...args], { ...options, encoding: 'buffer' }),
+  spawn: (command, args, options) => {
+    if (process.platform !== 'win32') return spawn(command, [...args], options);
+    const target = windowsSpawnTarget(command, options);
+    // Unresolvable: Node reports ENOENT, which callers classify; cross-spawn
+    // would start cmd.exe for it and report a plain exit 1 instead.
+    return target === null
+      ? nodeSpawn(command, [...args], options)
+      : spawn(target, [...args], options);
+  },
+  spawnSync: (command, args, options) => {
+    const syncOptions = { ...options, encoding: 'buffer' as const };
+    if (process.platform !== 'win32') return spawn.sync(command, [...args], syncOptions);
+    const target = windowsSpawnTarget(command, options);
+    return target === null
+      ? nodeSpawnSync(command, [...args], syncOptions)
+      : spawn.sync(target, [...args], syncOptions);
+  },
   kill: (pid, signal) => {
     process.kill(pid, signal);
   },
@@ -135,6 +219,7 @@ export interface TerminationPolicy {
 
 export const TREE_POLL_INTERVAL = Duration.millis(20);
 export const TASKKILL_DEADLINE = Duration.seconds(10);
+const TREE_POLL_INTERVAL_MS = Duration.toMillis(TREE_POLL_INTERVAL);
 /** taskkill exit status when no process matched the pid. */
 const TASKKILL_NOT_FOUND = 128;
 
@@ -179,28 +264,33 @@ export const posixGroupTree = (np: NodeProcessApi, pgid: number): ProcessTree =>
     signal: (signal) =>
       kill(signal).pipe(
         Effect.as<SignalOutcome>('delivered'),
-        Effect.catchAll((cause) =>
-          errnoCode(cause) === 'ESRCH'
-            ? Effect.succeed<SignalOutcome>('gone')
-            : Effect.fail(signalFailed(description, signal, cause))
-        )
+        Effect.catchAll((cause) => {
+          const code = errnoCode(cause);
+          if (code === 'ESRCH') return Effect.succeed<SignalOutcome>('gone');
+          // EPERM: nothing in the group accepted the signal. On macOS that is
+          // also a group whose only member is an exited leader Node has not
+          // reaped yet, so let the bounded wait decide instead of failing now.
+          if (code === 'EPERM') return Effect.succeed<SignalOutcome>('delivered');
+          return Effect.fail(signalFailed(description, signal, cause));
+        })
       ),
   };
 };
 
 /**
  * A process with no group of its own; only the root can be reached. A child
- * that never started reads as alive until signalled, where `kill()` reporting
- * no delivery settles it as gone.
+ * without a pid never started, so there is nothing to signal: until Node
+ * reports that failure, `child.kill()` would reach pid 0, which is the
+ * caller's own process group.
  */
 export const childTree = (child: ChildProcess): ProcessTree => {
   const description = `process ${child.pid ?? '(not started)'}`;
   return {
     description,
-    isAlive: Effect.sync(() => !hasExited(child)),
+    isAlive: Effect.sync(() => hasPid(child) && !hasExited(child)),
     signal: (signal) =>
       Effect.try({
-        try: () => child.kill(signal),
+        try: () => hasPid(child) && child.kill(signal),
         catch: (cause) => cause,
       }).pipe(
         Effect.map((delivered): SignalOutcome => (delivered ? 'delivered' : 'gone')),
@@ -214,28 +304,75 @@ export const childTree = (child: ChildProcess): ProcessTree => {
 };
 
 /**
- * Spawn taskkill and subscribe in the same synchronous step: attaching after
- * a fiber yield could miss the `close` of a taskkill that finished first.
- * Interruption (the deadline) kills a taskkill that is still running.
+ * Poll `check` until it yields a value or `within` has passed on the clock.
+ *
+ * Bounded by the clock rather than by interrupting a wait: termination usually
+ * runs in a scope finalizer, where interruption is disabled, and a timeout
+ * there would wait for the interrupted poll forever.
+ */
+const pollWithin = <A, E>(
+  check: Effect.Effect<Option.Option<A>, E>,
+  within: Duration.DurationInput
+): Effect.Effect<Option.Option<A>, E> =>
+  Effect.flatMap(Clock.currentTimeMillis, (start) => {
+    const deadline = start + Duration.toMillis(Duration.decode(within));
+    const poll: Effect.Effect<Option.Option<A>, E> = Effect.flatMap(check, (result) =>
+      Option.isSome(result)
+        ? Effect.succeed(result)
+        : Effect.flatMap(Clock.currentTimeMillis, (now) =>
+            now >= deadline
+              ? Effect.succeed(Option.none())
+              : Effect.zipRight(
+                  Effect.sleep(Duration.millis(Math.min(TREE_POLL_INTERVAL_MS, deadline - now))),
+                  Effect.suspend(() => poll)
+                )
+          )
+    );
+    return poll;
+  });
+
+/**
+ * Run taskkill to completion within TASKKILL_DEADLINE. It is spawned and
+ * subscribed in one synchronous step: attaching after a fiber yield could miss
+ * the `close` of a taskkill that finished first. The deadline completes the
+ * same Deferred instead of interrupting the wait, so it also holds inside a
+ * finalizer; a taskkill still running afterwards is killed.
  */
 const runTaskkill = (np: NodeProcessApi, args: readonly string[]) =>
-  Effect.async<number | null, unknown>((resume) => {
-    let taskkill: ChildProcess;
-    try {
-      taskkill = np.spawn('taskkill', args, { stdio: 'ignore', windowsHide: true });
-    } catch (cause) {
-      resume(Effect.fail(cause));
-      return Effect.void;
-    }
-    const onClose = (code: number | null) => resume(Effect.succeed(code));
-    const onError = (error: Error) => resume(Effect.fail(error));
-    taskkill.once('close', onClose);
-    taskkill.once('error', onError);
-    return Effect.sync(() => {
-      taskkill.off('close', onClose);
-      taskkill.off('error', onError);
-      if (!hasExited(taskkill)) taskkill.kill();
+  Effect.gen(function* () {
+    const done = yield* Deferred.make<number | null, unknown>();
+    const taskkill = yield* Effect.try({
+      try: () => {
+        const spawned = np.spawn('taskkill', args, { stdio: 'ignore', windowsHide: true });
+        spawned.once('close', (code: number | null) =>
+          Deferred.unsafeDone(done, Effect.succeed(code))
+        );
+        spawned.once('error', (error: Error) => Deferred.unsafeDone(done, Effect.fail(error)));
+        return spawned;
+      },
+      catch: (cause) => cause,
     });
+    const deadline = yield* Effect.forkDaemon(
+      Effect.interruptible(
+        Effect.zipRight(
+          Effect.sleep(TASKKILL_DEADLINE),
+          Deferred.fail(
+            done,
+            new Error(`taskkill did not finish within ${Duration.format(TASKKILL_DEADLINE)}`)
+          )
+        )
+      )
+    );
+    return yield* Deferred.await(done).pipe(
+      Effect.ensuring(
+        Effect.zipRight(
+          Fiber.interrupt(deadline),
+          Effect.sync(() => {
+            if (!hasExited(taskkill)) taskkill.kill();
+          })
+        )
+      )
+    );
   });
 
 /**
@@ -259,18 +396,7 @@ export const windowsTree = (
           String(root.pid),
           '/T',
           ...(force ? ['/F'] : []),
-        ]).pipe(
-          Effect.mapError((cause) => signalFailed(description, signal, cause)),
-          Effect.timeoutFail({
-            duration: TASKKILL_DEADLINE,
-            onTimeout: () =>
-              signalFailed(
-                description,
-                signal,
-                new Error(`taskkill did not finish within ${Duration.format(TASKKILL_DEADLINE)}`)
-              ),
-          })
-        );
+        ]).pipe(Effect.mapError((cause) => signalFailed(description, signal, cause)));
         if (code === 0) return 'delivered' as const;
         if (code === TASKKILL_NOT_FOUND) return 'gone' as const;
         return yield* Effect.fail(
@@ -294,25 +420,18 @@ export const childProcessTree = (
     return options.processGroup ? posixGroupTree(np, child.pid) : childTree(child);
   });
 
-/** Poll until the whole tree is gone. `false` means it outlived `within`. */
+/**
+ * Poll until the whole tree is gone. `false` means it outlived `within`. Safe
+ * inside a finalizer: the bound holds without interruption.
+ */
 export const waitUntilGone = (
   tree: ProcessTree,
   within: Duration.DurationInput
-): Effect.Effect<boolean, TerminationFailed> => {
-  const poll: Effect.Effect<boolean, TerminationFailed> = Effect.flatMap(tree.isAlive, (alive) =>
-    alive
-      ? Effect.zipRight(
-          Effect.sleep(TREE_POLL_INTERVAL),
-          Effect.suspend(() => poll)
-        )
-      : Effect.succeed(true)
-  );
-  return Effect.timeoutTo(poll, {
-    duration: within,
-    onSuccess: (gone) => gone,
-    onTimeout: () => false,
-  });
-};
+): Effect.Effect<boolean, TerminationFailed> =>
+  pollWithin(
+    Effect.map(tree.isAlive, (alive) => (alive ? Option.none() : Option.some(true))),
+    within
+  ).pipe(Effect.map(Option.isSome));
 
 /**
  * SIGTERM, bounded grace, SIGKILL, bounded wait. Succeeds only once the whole
@@ -495,8 +614,12 @@ export const spawnScoped = (
 /** Node's `execFile` default, so migrated callers keep their output ceiling. */
 export const DEFAULT_MAX_OUTPUT_BYTES = 1024 * 1024;
 
-/** How a command is ended when its caller stops waiting (timeout, interrupt, output limit). */
-const ABANDONED_COMMAND_POLICY: TerminationPolicy = { graceMs: 0, killWaitMs: 2_000 };
+/**
+ * How a command is ended when its caller stops waiting (timeout, interrupt,
+ * output limit). The SIGTERM grace is what lets git remove its `index.lock`
+ * (and hooks clean up) instead of leaving the repository locked.
+ */
+const ABANDONED_COMMAND_POLICY: TerminationPolicy = { graceMs: 2_000, killWaitMs: 2_000 };
 
 export interface CommandSpec {
   readonly command: string;
@@ -750,7 +873,10 @@ export const isPidAlive = (pid: number): Effect.Effect<boolean, never, NodeProce
  */
 
 export interface ProcessFacadeOptions {
-  /** Where `Effect.log*` from the process layer goes; silent when omitted. */
+  /**
+   * Where `Effect.log*` from the process layer goes. When omitted, warnings
+   * (a tree that could not be terminated) go to the console, never nowhere.
+   */
   readonly loggerLayer?: Layer.Layer<never>;
   readonly nodeProcess?: NodeProcessApi;
 }
@@ -760,7 +886,7 @@ export type ProcessRunner = <A, E>(effect: Effect.Effect<A, E, NodeProcess>) => 
 export const processLayer = (options: ProcessFacadeOptions): Layer.Layer<NodeProcess> =>
   Layer.merge(
     Layer.succeed(NodeProcess, options.nodeProcess ?? nodeProcessLive),
-    options.loggerLayer ?? Logger.replace(Logger.defaultLogger, Logger.none)
+    options.loggerLayer ?? Logger.minimumLogLevel(LogLevel.Warning)
   );
 
 export const runPromiseSquashed = <A, E>(effect: Effect.Effect<A, E>): Promise<A> =>

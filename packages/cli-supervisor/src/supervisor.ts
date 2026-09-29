@@ -49,8 +49,6 @@ function isChildProcessRunning(child: ChildProcess | null): boolean {
   return child !== null && !hasExited(child);
 }
 
-/** A promise that never settles: a race participant that must never win. */
-const never = new Promise<never>(() => {});
 
 function runtimeMatchesHost(runtime: CliRuntimeState, host: SupervisorHostIdentity): boolean {
   if (host.mode === 'foreground') {
@@ -607,9 +605,9 @@ export class CliSupervisor {
     this.clearHealthyRunTimer();
     this.lastStateMessage = reason;
     this.publishState();
-    const graceUnavailable = this.requestGracefulShutdown(run);
+    const graceDelivered = this.requestGracefulShutdown(run);
 
-    let result = await this.waitForRun(run, graceMs, graceUnavailable);
+    let result = await this.waitForRun(run, graceMs, graceDelivered);
     let killFailure: string | null = null;
     if (!result) {
       this.lastStateMessage = `${reason}; forcing CLI process to exit`;
@@ -639,26 +637,24 @@ export class CliSupervisor {
 
   /**
    * Ask the child to drain: the cross-platform shutdown channel first, SIGTERM
-   * to its tree when there is none or it fails. Resolves only when no graceful
+   * to its tree when there is none or it fails. Resolves false when no graceful
    * request could be delivered at all, so the caller escalates at once instead
    * of waiting out a grace period nothing is using.
    */
-  private requestGracefulShutdown(run: ActiveRun): Promise<void> {
+  private async requestGracefulShutdown(run: ActiveRun): Promise<boolean> {
     const { requestShutdown } = run.handle;
     if (requestShutdown) {
       try {
-        return Promise.resolve(requestShutdown()).then(
-          () => never,
-          async () => await this.signalTerminate(run)
-        );
+        await requestShutdown();
+        return true;
       } catch {
         // Fall through to the OS signal fallback.
       }
     }
-    return this.signalTerminate(run);
+    return await this.signalTerminate(run);
   }
 
-  private async signalTerminate(run: ActiveRun): Promise<void> {
+  private async signalTerminate(run: ActiveRun): Promise<boolean> {
     try {
       await this.runProcess(
         Effect.flatMap(
@@ -666,11 +662,11 @@ export class CliSupervisor {
           (tree) => tree.signal('SIGTERM')
         )
       );
+      return true;
     } catch {
       // Undeliverable SIGTERM: end the grace period; force-kill reports failure.
-      return;
+      return false;
     }
-    return await never;
   }
 
   /**
@@ -691,19 +687,27 @@ export class CliSupervisor {
     }
   }
 
+  /**
+   * The run's result within `timeoutMs`, or null. A `graceDelivered` that
+   * resolves false ends the wait early. Every promise raced here settles, so
+   * no reaction outlives the call (a shared never-settling promise would keep
+   * each run's result alive for the life of the process).
+   */
   private async waitForRun(
     run: ActiveRun,
     timeoutMs: number,
-    cutShort: Promise<void> = never
+    graceDelivered?: Promise<boolean>
   ): Promise<CliRunResult | null> {
     let timeout: ReturnType<typeof setTimeout> | undefined;
     try {
       return await Promise.race([
         run.settled,
-        cutShort.then(() => null),
         new Promise<null>((resolve) => {
           timeout = setTimeout(() => resolve(null), timeoutMs);
           timeout.unref?.();
+          void graceDelivered?.then((delivered) => {
+            if (!delivered) resolve(null);
+          });
         }),
       ]);
     } finally {
