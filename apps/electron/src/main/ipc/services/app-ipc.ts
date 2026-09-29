@@ -1,8 +1,3 @@
-import {
-  registerRendererSendLifecycle,
-  resolveRendererSendLifecycle,
-  prepareRendererSendsForExit
-} from '../../services/renderer-send-lifecycle'
 import { assertProductWindowSender } from '../assert-sender'
 import { parseAppIconName } from '../../services/app-icon-core'
 import { productWindows } from '../../window-state'
@@ -117,21 +112,6 @@ export class AppIpc extends IpcService {
   static override readonly groupName = 'app'
 
   @IpcMethod()
-  async registerSendLifecycle() {
-    const { event } = getIpcContext()
-    assertProductWindowSender(event)
-    const window = BrowserWindow.fromWebContents(event.sender)
-    if (window) registerRendererSendLifecycle(window)
-  }
-
-  @IpcMethod()
-  async replySendLifecycle(input: unknown) {
-    const { event } = getIpcContext()
-    assertProductWindowSender(event)
-    resolveRendererSendLifecycle(event.sender.id, input)
-  }
-
-  @IpcMethod()
   async getAppIconState() {
     assertProductWindowSender(getIpcContext().event)
     return getIpcServiceDeps().appIconService.getState()
@@ -175,11 +155,7 @@ export class AppIpc extends IpcService {
     const { event } = getIpcContext()
     assertProductWindowSender(event)
     for (const window of productWindows) {
-      if (window.webContents !== event.sender) {
-        if (!(await prepareRendererSendsForExit('close', window)))
-          throw new Error('Cache clearing was cancelled')
-        window.destroy()
-      }
+      if (window.webContents !== event.sender) window.destroy()
     }
   }
 
@@ -577,6 +553,6 @@ export class AppIpc extends IpcService {
   async requestRendererReload() {
     const { event } = getIpcContext()
     const window = findWindow(event.sender)
-    if (window) await requestRendererReload(window)
+    if (window) requestRendererReload(window)
   }
 }

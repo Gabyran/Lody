@@ -13,7 +13,7 @@ import type { SessionHistory, SessionId, WorkspaceId } from '@lody/shared';
 
 import { PendingMessageRow } from '../src/components/chat/session-pending-messages';
 import type { SessionAttachmentDraft } from '../src/lib/session-attachment-draft';
-import type { SessionSendRecord } from '../src/lib/session-send-journal';
+import type { PendingSessionSend } from '../src/lib/session-pending-sends';
 import { initI18n } from '../src/i18n';
 
 (
@@ -56,15 +56,13 @@ const failedFile: SessionAttachmentDraft = {
   progress: 0,
 };
 
-const record = (overrides: Partial<SessionSendRecord> = {}): SessionSendRecord =>
+const record = (overrides: Partial<PendingSessionSend> = {}): PendingSessionSend =>
   ({
-    version: 2,
     id: 'pending-turn',
     sessionId,
-    accountId: 'tester',
     workspaceId: 'pending-row-workspace' as WorkspaceId,
-    sourceReplica: 'replica',
     sequence: 1,
+    attachments: [],
     entry: {
       id: 'pending-turn',
       role: 'user',
@@ -77,9 +75,8 @@ const record = (overrides: Partial<SessionSendRecord> = {}): SessionSendRecord =
       fileDiff: [],
     } as unknown as SessionHistory,
     delivery: { kind: 'dispatch' },
-    stage: 'saved',
     ...overrides,
-  }) as SessionSendRecord;
+  }) as PendingSessionSend;
 
 describe('PendingMessageRow failure presentation', () => {
   let root: Root | undefined;
@@ -110,7 +107,7 @@ describe('PendingMessageRow failure presentation', () => {
     container = undefined;
   });
 
-  const render = async (value: SessionSendRecord) => {
+  const render = async (value: PendingSessionSend) => {
     await act(async () => {
       root?.render(createElement(PendingMessageRow, { record: value, onRetry, onCancel }));
     });
@@ -180,9 +177,9 @@ describe('PendingMessageRow failure presentation', () => {
    * fills it. Dropping the reservation is what let cards resize mid-transfer.
    */
   it('reserves the progress row on every card and fills only the transferring one', async () => {
+    // Still sending: one attachment transfers while another already failed.
     const host = await render(
       record({
-        error: REASON,
         attachments: [
           { ...failedFile, id: 'uploading-file', name: 'a.log', error: undefined, progress: 40 },
           readyFile,
