@@ -100,7 +100,9 @@ const mentionStressCommands = Array.from({ length: 24 }, (_, index) => ({
   name: `command-${String(index + 1).padStart(2, '0')}`,
   description:
     index % 3 === 0
-      ? 'Review the current changes, include relevant context, and explain the next action'
+      ? 'Review the current changes, include relevant context, and explain the next action. '.repeat(
+          12
+        )
       : `Synthetic command ${index + 1}`,
 }));
 
@@ -417,6 +419,23 @@ export const SessionMentionStress: Story = {
     <div className="flex min-h-screen flex-col justify-end bg-background px-4 pb-6">
       <div className="mx-auto w-full max-w-3xl">
         <DemoComposer tone="light" variant="session" initialPrompt="" showMentionCommands />
+      </div>
+    </div>
+  ),
+};
+
+/** The wide bottom-docked composer seen in a full-size desktop window. */
+export const SessionMentionWideDark: Story = {
+  render: () => (
+    <div className="flex min-h-screen flex-col justify-end bg-[#111315] px-[9vw] pb-6 text-white">
+      <div className="w-full max-w-[90rem]">
+        <DemoComposer
+          tone="dark"
+          variant="session"
+          initialPrompt=""
+          promptRows={4}
+          showMentionCommands
+        />
       </div>
     </div>
   ),

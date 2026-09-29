@@ -274,9 +274,6 @@ const styles = stylex.create({
     fontWeight: 500,
     userSelect: 'none',
   },
-  singleGroupInShortViewport: {
-    display: { default: 'flex', '@media (max-height: 320px)': 'none' },
-  },
   /** A second level's heading: the way back, and the category's own options. */
   header: {
     display: 'flex',
@@ -288,7 +285,6 @@ const styles = stylex.create({
     paddingBottom: space[1],
     userSelect: 'none',
   },
-  headerInShortViewport: { display: { default: 'flex', '@media (max-height: 320px)': 'none' } },
   headerLabel: {
     paddingInline: space[2],
     color: colors.secondaryLabel,
@@ -742,18 +738,8 @@ function CandidateDetailPane({ detail }: { detail: MentionCandidateDetail }) {
   );
 }
 
-function GroupLabel({
-  children,
-  compact = false,
-}: {
-  children: React.ReactNode;
-  compact?: boolean;
-}) {
-  return (
-    <div {...stylex.props(styles.groupLabel, compact && styles.singleGroupInShortViewport)}>
-      {children}
-    </div>
-  );
+function GroupLabel({ children }: { children: React.ReactNode }) {
+  return <div {...stylex.props(styles.groupLabel)}>{children}</div>;
 }
 
 function Message({ children, tone }: { children: React.ReactNode; tone?: 'error' | 'loading' }) {
@@ -822,12 +808,7 @@ function CategoryHeader({
 }) {
   const { t } = useTranslation();
   return (
-    <div
-      {...stylex.props(
-        styles.header,
-        !showBack && !category.header && styles.headerInShortViewport
-      )}
-    >
+    <div {...stylex.props(styles.header)}>
       {showBack ? (
         <Button
           variant="ghost"
@@ -987,7 +968,7 @@ export function MentionTwoLevelMenuBody({
           ))}
           {view.groups.map((group) => (
             <React.Fragment key={group.category.id}>
-              <GroupLabel compact={view.groups.length === 1}>{group.category.label}</GroupLabel>
+              <GroupLabel>{group.category.label}</GroupLabel>
               {group.candidates.length === 0 ? (
                 group.category.message ? (
                   <Message tone={group.category.status === 'error' ? 'error' : undefined}>
@@ -1064,7 +1045,7 @@ export function MentionTwoLevelMenuBody({
 const width = stylex.create({
   menu: {
     width: 'max-content',
-    maxWidth: 'min(var(--mention-input-width), calc(100vw - 2rem))',
+    maxWidth: 'min(var(--mention-input-width), calc(100vw - 2rem)) !important',
   },
   /** About 220px of names beside the 300px detail; below 480px the detail steps aside. */
   menuWithDetail: { width: 'min(536px, var(--mention-input-width), calc(100vw - 2rem))' },
@@ -1084,7 +1065,7 @@ export function MentionTwoLevelMenu({
 }: {
   categories: MentionCategory[];
   surface?: MentionSurface;
-  /** `top` caps above the caret, falling below only if no row fits; `bottom` may flip. */
+  /** The preferred side of the caret; the positioner flips when it cannot fit. */
   menuSide?: 'top' | 'bottom';
   /** `caret` follows the insertion point; `composer` anchors to the nearest
    *  `[data-mention-frame]` for surfaces that explicitly want a fixed menu. */

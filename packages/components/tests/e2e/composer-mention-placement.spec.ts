@@ -31,11 +31,9 @@ test('session command menu follows the caret while opening above it', async ({ p
   expect(moved!.y + moved!.height).toBeLessThan(inputBox!.y + 40);
 });
 
-test('a short desktop viewport keeps the first command reachable above the caret', async ({
-  page,
-}) => {
-  await page.setViewportSize({ width: 650, height: 250 });
-  await page.goto('/iframe.html?id=chat-chatcomposer--session-mention-stress&viewMode=story');
+test('a wide desktop composer keeps a long menu inside its own width', async ({ page }) => {
+  await page.setViewportSize({ width: 2048, height: 1098 });
+  await page.goto('/iframe.html?id=chat-chatcomposer--session-mention-wide-dark&viewMode=story');
   const input = page.getByRole('combobox', { name: 'Message' });
   await input.click();
   await page.keyboard.type('/');
@@ -43,23 +41,28 @@ test('a short desktop viewport keeps the first command reachable above the caret
   const menu = page.getByRole('listbox');
   const first = page.getByRole('option').first();
   await expect(first).toBeVisible();
-  await expect.poll(async () => (await menu.boundingBox())?.y).toBeGreaterThanOrEqual(16);
+  await expect(page.getByRole('option')).toHaveCount(24);
   const menuBox = await menu.boundingBox();
   const firstBox = await first.boundingBox();
   const inputBox = await input.boundingBox();
+  const frameBox = await page.locator('[data-mention-frame]').boundingBox();
   expect(menuBox).not.toBeNull();
   expect(firstBox).not.toBeNull();
   expect(inputBox).not.toBeNull();
-  expect(menuBox!.y).toBeGreaterThanOrEqual(16);
-  expect(menuBox!.y + menuBox!.height).toBeLessThan(inputBox!.y);
-  expect(firstBox!.y + firstBox!.height).toBeLessThanOrEqual(menuBox!.y + menuBox!.height);
+  expect(frameBox).not.toBeNull();
 
   if (process.env.MENTION_SCREENSHOT_PHASE) {
     await page.screenshot({
-      path: `${process.env.MENTION_SCREENSHOT_PHASE}-short-viewport.png`,
+      path: `${process.env.MENTION_SCREENSHOT_PHASE}-wide-desktop.png`,
       animations: 'disabled',
     });
   }
+
+  expect(menuBox!.width).toBeLessThanOrEqual(inputBox!.width + 1);
+  expect(menuBox!.x + menuBox!.width).toBeLessThanOrEqual(frameBox!.x + frameBox!.width + 1);
+  expect(menuBox!.y).toBeGreaterThanOrEqual(16);
+  expect(menuBox!.y + menuBox!.height).toBeLessThan(inputBox!.y + 40);
+  expect(firstBox!.y + firstBox!.height).toBeLessThanOrEqual(menuBox!.y + menuBox!.height);
 
   for (let index = 0; index < 18; index += 1) await page.keyboard.press('ArrowDown');
   await expect
@@ -103,7 +106,7 @@ test('the open session menu tracks editor scale and window resize', async ({ pag
   await page.locator('[data-mention-frame]').evaluate((frame: HTMLElement) => {
     frame.style.zoom = '';
   });
-  await page.setViewportSize({ width: 650, height: 500 });
+  await page.setViewportSize({ width: 650, height: 600 });
   await expect(menu).toBeVisible();
   const resized = await menu.boundingBox();
   expect(resized).not.toBeNull();

@@ -26,8 +26,6 @@ const MENTION_VIEWPORT_PADDING_PX = 16;
  * above; only a composer pressed against the top of its layer opens it below.
  */
 const COMPOSER_MENU_ROOM_PX = 360;
-/** One 28px option plus the popup's 8px vertical inset. */
-const MIN_TOP_CARET_ROOM_PX = 36;
 /** A composer marks the box a menu belongs to: its chip row and its input. */
 const MENTION_FRAME_SELECTOR = '[data-mention-frame]';
 
@@ -317,26 +315,7 @@ const MentionContent = React.forwardRef<ContentElement, MentionContentProps>(
     const anchorRef = composerAnchor
       ? (frameAnchor ?? context.virtualAnchor)
       : context.virtualAnchor;
-    // An upward caret menu needs room for at least one 28px row and the
-    // surface inset. At the top edge that is impossible, so use the other
-    // side rather than rendering an inaccessible zero-height popup.
-    const topCaretMaxHeight =
-      !composerAnchor && requestedSide === 'top' && inputBoundary && context.virtualAnchor
-        ? Math.max(
-            0,
-            context.virtualAnchor.getBoundingClientRect().top -
-              inputBoundary.y -
-              MENTION_VIEWPORT_PADDING_PX -
-              sideOffset
-          )
-        : undefined;
-    const topCaretFitsRow =
-      topCaretMaxHeight === undefined || topCaretMaxHeight >= MIN_TOP_CARET_ROOM_PX;
-    const placedSide: Side = composerAnchor
-      ? (requestedSide ?? lockedSide ?? 'top')
-      : requestedSide === 'top' && !topCaretFitsRow
-        ? 'bottom'
-        : side;
+    const placedSide: Side = composerAnchor ? (requestedSide ?? lockedSide ?? 'top') : side;
 
     const positionerContext = useAnchorPositioner({
       open: context.open,
@@ -357,13 +336,10 @@ const MentionContent = React.forwardRef<ContentElement, MentionContentProps>(
       collisionPadding,
       sticky,
       strategy,
-      // A composer anchor and an explicit top caret menu keep their chosen side.
-      avoidCollisions: composerAnchor || requestedSide === 'top' ? false : avoidCollisions,
+      // A composer menu never flips: its side is locked and its height capped.
+      avoidCollisions: composerAnchor ? false : avoidCollisions,
       disableArrow: true,
-      // The explicit top caret cap below supplies the viewport fit without
-      // shifting the popup across the top inset. The bottom edge fallback
-      // still uses the positioner's viewport cap.
-      fitViewport: requestedSide === 'top' && placedSide === 'top' ? false : fitViewport,
+      fitViewport,
       hideWhenDetached,
       trackAnchor,
     });
@@ -386,17 +362,12 @@ const MentionContent = React.forwardRef<ContentElement, MentionContentProps>(
         ...(composerMaxHeight !== undefined ? { maxHeight: `${composerMaxHeight}px` } : {}),
         ...style,
         ...positionerContext.floatingStyles,
-        ...(topCaretMaxHeight !== undefined && placedSide === 'top'
-          ? { maxHeight: `${topCaretMaxHeight}px` }
-          : {}),
         ...(!context.open && forceMount ? { visibility: 'hidden' } : {}),
       };
     }, [
       inputWidthStyle,
       resolvedSide,
       composerMaxHeight,
-      topCaretMaxHeight,
-      placedSide,
       style,
       positionerContext.floatingStyles,
       forceMount,

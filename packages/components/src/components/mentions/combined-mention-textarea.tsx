@@ -694,7 +694,7 @@ export interface CombinedMentionTextareaProps extends Omit<
   skillAgent?: SkillMentionAgent;
   /** Entry point for mention analytics (spec §8e). Defaults to 'unknown'. */
   mentionSurface?: MentionSurface;
-  /** `top` stays above unless no row fits there; default `bottom` may flip. */
+  /** Preferred side of the menu; caret menus flip to fit. Defaults to `bottom`. */
   menuSide?: 'top' | 'bottom';
   /** `caret` follows the insertion point; `composer` fixes the menu to the
    *  nearest `[data-mention-frame]`. Defaults to `caret`. */

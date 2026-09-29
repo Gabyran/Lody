@@ -6,12 +6,11 @@ Translation: current
 [中文](composer-mention-menu-placement.zh.md)
 
 When a user opens an `@`, `$`, `/`, or `、` menu in the main desktop chat
-composer, the menu follows the current caret and opens above it. Typing,
-wrapping, scrolling, resizing, and scaling must update that position. It moves
-below only when the top edge cannot fit one row. The menu remains within the input's usable
-width. If the space above cannot fit its full height, it is capped to that
-space and its rows remain reachable by scrolling; on a short viewport, a
-single group's redundant heading gives way to the first row.
+composer, the menu follows the current caret and prefers to open above it.
+Typing, wrapping, scrolling, resizing, and scaling must update that position.
+The menu remains within the input's usable width even when command descriptions
+are long, and its rows remain reachable by scrolling when its full height does
+not fit. If the caret is near the top edge, the menu may flip below it.
 
 The inline edit-and-resend menu and dialog composer also follow the current
 caret. They prefer the space below it and flip above when needed. Soft wrapping,
