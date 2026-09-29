@@ -52,6 +52,8 @@ export async function closeProductWindowsForQuit(): Promise<boolean> {
   setAppQuitting(true)
   for (const window of windows) {
     if (window.isDestroyed()) continue
+    // A destroyed BrowserWindow throws on `webContents`; read it while it is live.
+    const contents = window.webContents
     const closed = await new Promise<boolean>((resolve) => {
       const onClosed = (): void => settle(true)
       // A hung or dead renderer never answers `beforeunload`; without this the
@@ -63,13 +65,12 @@ export async function closeProductWindowsForQuit(): Promise<boolean> {
         quitCloses.delete(window)
         window.removeListener('closed', onClosed)
         window.removeListener('unresponsive', onStuck)
-        if (!window.webContents.isDestroyed())
-          window.webContents.removeListener('render-process-gone', onStuck)
+        contents.removeListener('render-process-gone', onStuck)
         resolve(value)
       }
       window.once('closed', onClosed)
       window.once('unresponsive', onStuck)
-      window.webContents.once('render-process-gone', onStuck)
+      contents.once('render-process-gone', onStuck)
       quitCloses.set(window, settle)
       window.close()
     })

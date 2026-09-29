@@ -66,7 +66,7 @@ class NativeWindow extends EventEmitter {
   loaded: { filePath: string; hash?: string } | string | null = null;
   target: unknown = null;
   throttling = true;
-  webContents = Object.assign(new EventEmitter(), {
+  readonly contents = Object.assign(new EventEmitter(), {
     getBackgroundThrottling: () => this.throttling,
     setBackgroundThrottling: (value: boolean) => {
       this.throttling = value;
@@ -79,6 +79,11 @@ class NativeWindow extends EventEmitter {
       this.target = target;
     },
   });
+  /** Like Electron, a destroyed window throws when its `webContents` is read. */
+  get webContents() {
+    if (this.destroyed) throw new TypeError('Object has been destroyed');
+    return this.contents;
+  }
   get native() {
     return this as unknown as BrowserWindow;
   }
@@ -124,7 +129,7 @@ class NativeWindow extends EventEmitter {
   destroy() {
     if (this.destroyed) return;
     this.destroyed = true;
-    this.webContents.emit('destroyed');
+    this.contents.emit('destroyed');
     this.emit('closed');
     nativeState.windows.delete(this.id);
   }
@@ -224,7 +229,7 @@ describe('claimed warm window lifecycle', () => {
     expect(claimed.destroyed).toBe(false);
     expect(claimed.visible).toBe(false);
     expect(claimed.throttling).toBe(false);
-    handleWindowContentReady(original.webContents.id, target);
+    handleWindowContentReady(original.contents.id, target);
     handleWindowContentReady(claimed.webContents.id, { ...target, sessionId: 'other' });
     expect(claimed.visible).toBe(false);
     handleWindowContentReady(claimed.webContents.id, target);
@@ -253,7 +258,7 @@ describe('claimed warm window lifecycle', () => {
     presentWindowTarget(closed.native, target, { type: 'url', url: 'https://synthetic.test' });
     closed.destroy();
     vi.advanceTimersByTime(5000);
-    handleWindowContentReady(closed.webContents.id, target);
+    handleWindowContentReady(closed.contents.id, target);
     expect(closed.visible).toBe(false);
   });
 
