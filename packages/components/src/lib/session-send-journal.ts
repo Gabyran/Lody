@@ -167,7 +167,7 @@ export function createSessionSendJournal(ports: SessionSendJournalPorts) {
     );
     if (closed || generation !== refreshGeneration) return;
     for (const [id, preparation] of preparations) {
-      const record = views.find((record) => record.id === id);
+      const record = views.find((item) => item.id === id);
       if (!record || record.paused) preparation.abort();
     }
     for (const [id, controllers] of deliveries) {
@@ -519,10 +519,8 @@ export function createSessionSendJournal(ports: SessionSendJournalPorts) {
           sessions.map(async (sessionId) => {
             await workSession(sessionId);
             for (const record of (await ports.storage.list()).filter(
-              (record) =>
-                record.sessionId === sessionId &&
-                record.stage === 'committed' &&
-                record.version !== 4
+              (item) =>
+                item.sessionId === sessionId && item.stage === 'committed' && item.version !== 4
             ))
               await deliver(record);
           })
