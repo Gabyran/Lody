@@ -3,6 +3,8 @@
 Status: implemented
 Translation: current
 
+PR: https://github.com/LodyAI/Lody/pull/1103
+
 [English](2026-09-29-claude-acp-sparse-updates.md)
 
 ## 摘要
