@@ -4213,12 +4213,9 @@ export const SessionChatInterface = memo(
           agentRole: options?.agentRole,
           attachments: options?.attachments,
         });
-        if (
-          accepted &&
-          runtime?.sendJournal
-            ?.getSnapshot()
-            .some((record) => record.sessionId === session.id && record.stage === 'saved')
-        ) {
+        // A held send (attachments still preparing) dispatches itself later;
+        // the composer is free again now.
+        if (accepted && runtime?.pendingSends?.hasSession(session.id)) {
           directDispatchInFlightRef.current = false;
           setInputActionState('ready');
         }
@@ -4234,7 +4231,7 @@ export const SessionChatInterface = memo(
         return accepted;
       },
       [
-        runtime?.sendJournal,
+        runtime?.pendingSends,
         session.id,
         captureSessionEvent,
         configOptionValues,
@@ -4320,11 +4317,6 @@ export const SessionChatInterface = memo(
     // NEW message — the old turn is never revived.
     const handleResendUndelivered = useCallback(
       async (userTurnId: string, inputBlocks: SessionInputBlock[]): Promise<boolean> => {
-        const pending = await runtime?.sendJournal?.read(userTurnId);
-        if (pending && pending.stage !== 'delivered') {
-          await runtime!.sendJournal!.retry(session.id);
-          return true;
-        }
         // This is a new Turn with the old content, not a replay of the old run:
         // freeze the currently committed composer Role beside the current run
         // config. Copying only the original Role would pair it with unrelated
@@ -4357,8 +4349,6 @@ export const SessionChatInterface = memo(
         return accepted;
       },
       [
-        runtime,
-        session.id,
         handleSendMessage,
         sessionConversationConfig.agentRoleId,
         sessionConversationConfig.agentRoleRevision,
@@ -5416,22 +5406,11 @@ export const SessionChatInterface = memo(
             throw new Error('Queued message is empty');
           }
           const queuedUserTurnId = item.userTurnId?.trim() || `queued-${item.$cid}`;
-          // Queue admission owns this ID, but its delivered operation only
-          // inserted the queue row. Promote that record back to saved work so
-          // the journal appends the matching history turn before queue removal.
-          const promoted = await runtime?.sendJournal?.promoteQueuedTurn(
-            queuedUserTurnId,
+          // History first, then the queue row: the input is never absent from both.
+          const { entry: historyEntry } = await addSessionHistory(
             { ...pendingHistoryEntry, id: queuedUserTurnId },
-            { kind: 'guide', expectedTurnId: activeAssistantTurnId }
+            { guideExpectedTurnId: activeAssistantTurnId }
           );
-          const historyEntry =
-            promoted?.entry ??
-            (
-              await addSessionHistory({
-                ...pendingHistoryEntry,
-                id: queuedUserTurnId,
-              })
-            ).entry;
           await removeMessageQueueItem(item.$cid);
           trackMessageSend(historyEntry.id);
           touchSessionActivity(session.id).catch((error: unknown) => {
@@ -5465,7 +5444,6 @@ export const SessionChatInterface = memo(
         guideHistoryEntry,
         isExternalHistoryRefreshing,
         removeMessageQueueItem,
-        runtime,
         session.id,
         t,
         touchSessionActivity,

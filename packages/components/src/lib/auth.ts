@@ -1,4 +1,3 @@
-import { requestSessionSendExit } from './session-send-exit';
 import { createAuthClient } from 'better-auth/react';
 import { organizationClient } from 'better-auth/client/plugins';
 import { convexClient, crossDomainClient } from '@convex-dev/better-auth/client/plugins';
@@ -74,18 +73,11 @@ export const persistAuthToken = (token: string) => {
  * transport failures by throwing and API failures in `response.error`; both
  * arrive here as `ok: false`.
  */
-export type SignOutOutcome =
-  | { ok: true }
-  | { ok: false; error: AuthResponseError; cancelled?: false }
-  | { ok: false; error: null; cancelled: true };
+export type SignOutOutcome = { ok: true } | { ok: false; error: AuthResponseError };
 
 export const signOutWithoutRedirect = async (
-  authClient: LodyAuthClient,
-  options?: { sessionExpired?: boolean }
+  authClient: LodyAuthClient
 ): Promise<SignOutOutcome> => {
-  if (!options?.sessionExpired && !(await requestSessionSendExit('logout'))) {
-    return { ok: false, error: null, cancelled: true };
-  }
   // Fence token requests at logout intent, before Better Auth's async sign-out
   // updates useSession(). Otherwise a token request that completes in that
   // network window can still authenticate Convex as the previous user.
@@ -110,6 +102,6 @@ export const signOutWithoutRedirect = async (
 };
 
 export const signOutWithAuthClient = async (authClient: LodyAuthClient) => {
-  if (!(await signOutWithoutRedirect(authClient)).ok) return;
+  await signOutWithoutRedirect(authClient);
   replaceAppWindowLocation(`${import.meta.env.BASE_URL}login`);
 };

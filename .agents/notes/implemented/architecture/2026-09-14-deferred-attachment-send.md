@@ -1,9 +1,11 @@
 # Attachment draft lifetimes and PR boundaries
 
-Status: proposed
+Status: implemented
 Translation: current
 
 [中文](2026-09-14-deferred-attachment-send.zh.md)
+
+Verdict (2026-09-29): implemented. The four-layer stack shipped through #705, #707, #709 and #719, so this note moved from `proposed/`. Partially superseded by [removing the session send journal](../simplification/2026-09-29-remove-session-send-journal.md): the durable journal, cross-window recovery, recovery-record compatibility and exit/logout/cache-clear gating were removed, and sends waiting for attachments are now held in memory only. Send-time attachment preparation, the workspace Effect resource owner and the submission boundary remain. The body below is the historical record.
 
 ## Abstract
 
@@ -50,7 +52,7 @@ Use one ManagedRuntime with storage, transport, and submission dependency bounda
 
 ## Staged adoption and rollback
 
-[Spec section 11.6](../../../../specs/session-files.md#116-staged-adoption-and-acceptance) proposes three prerequisite PRs followed by one complete draft feature PR, each merged after its responsibility is complete:
+[Spec section 11.6](../../../../specs/session-files.md#114-staged-adoption) proposes three prerequisite PRs followed by one complete draft feature PR, each merged after its responsibility is complete:
 
 1. Extract ordinary submission interfaces while preserving behavior. Baseline cases exercise actual input/configuration/routing; retain existing defects as counterexamples with an owning later fix.
 2. Use Effect inside the service to fully own migrated uploads, cancellation, retries, borrows, and release. Components keep ordinary interfaces and transfer still starts on addition; exit cleanup ships with its resources.

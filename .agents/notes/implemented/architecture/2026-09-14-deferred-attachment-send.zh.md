@@ -1,9 +1,11 @@
 # 附件 draft 的生命周期与 PR 边界
 
-Status: proposed
+Status: implemented
 Translation: current
 
 [English](2026-09-14-deferred-attachment-send.md)
+
+结论（2026-09-29）：已实现。四层改动已通过 #705、#707、#709 与 #719 合并，因此本记录从 `proposed/` 移出。已被[移除会话发送日志](../simplification/2026-09-29-remove-session-send-journal.zh.md)部分替代：持久发送日志、跨窗口恢复、恢复记录兼容以及退出/登出/清缓存拦截均已删除，等待附件的发送现在只保存在内存中。发送时准备附件、workspace 的 Effect 资源所有者以及提交边界仍然保留。下文为历史记录。
 
 ## 摘要
 
@@ -50,7 +52,7 @@ Translation: current
 
 ## 渐进接入与回退
 
-[Spec 第 11.6 节](../../../../specs/session-files.zh.md#116-分阶段接入与验收)建议三个前置 PR 加一个完整 draft 功能 PR，按职责完成后再合并：
+[Spec 第 11.6 节](../../../../specs/session-files.zh.md#114-分阶段接入)建议三个前置 PR 加一个完整 draft 功能 PR，按职责完成后再合并：
 
 1. 抽取普通提交接口，保持当前行为；基线用例覆盖真实输入/配置/路由，已有缺陷保留为反例及后续修复项。
 2. 在服务内部用 Effect 完整管理迁入的上传、取消、重试、借用与释放；组件仍用普通接口，添加即传时机不变，退出收尾随资源一起交付。

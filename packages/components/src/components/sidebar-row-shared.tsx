@@ -240,7 +240,7 @@ export function SessionRowStatusIndicator({
   isWaitingPermission?: boolean;
   isWorking?: boolean;
   hasUnreadMessages?: boolean;
-  /** Renderer-local send journal state for this session. */
+  /** Renderer-local state of this session's held (in-memory) sends. */
   sendState?: SessionSendState | null;
   /** 0–100; omitted when the upload has no measurable size. */
   sendProgress?: number;
