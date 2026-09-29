@@ -530,6 +530,7 @@ const CHAT_LANDING_MACHINE_FLOCK_FAMILIES = [
   'localProject',
   'deleteLocalProjectCommand',
   'acpCapability',
+  'acpModelCapability',
   'rateLimit',
   'agentConfig',
   'providerSetup',

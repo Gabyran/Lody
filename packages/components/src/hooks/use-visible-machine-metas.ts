@@ -36,6 +36,7 @@ const DEFAULT_MACHINE_FLOCK_FAMILIES = [
   'localProject',
   'deleteLocalProjectCommand',
   'acpCapability',
+  'acpModelCapability',
   'rateLimit',
 ] as const satisfies readonly MachineFlockRowFamily[];
 

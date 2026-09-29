@@ -146,7 +146,9 @@ async function mergeMachineFlockJsonState(
 ): Promise<MachineListEntry> {
   const handle = await repo.openFlockDoc(getMachineFlockDocId(workspaceId, machine.id));
   const rows = readMachineFlockRowsFromFlock(handle.flock, {
-    families: includeAcpCapabilities ? ['acpCapability', 'rateLimit'] : ['rateLimit'],
+    families: includeAcpCapabilities
+      ? ['acpCapability', 'acpModelCapability', 'rateLimit']
+      : ['rateLimit'],
   });
   const acpCapabilities = includeAcpCapabilities ? getMachineFlockAcpCapabilities(rows) : {};
   const rateLimits = getMachineFlockRateLimits(rows);

@@ -1,4 +1,8 @@
-import { machineSupportsPreparedSessionInputProtocol } from '@lody/shared';
+import {
+  getDeclaredModelControls,
+  getModelReasoningEffortValues,
+  machineSupportsPreparedSessionInputProtocol,
+} from '@lody/shared';
 import {
   materializePreparedSessionInput,
   commitPreparedSessionDispatch,
@@ -1577,7 +1581,7 @@ function validateModelDependentTurnConfigOptionValues(
     const option = optionsById.get(id);
     const isEffort = isAcpThoughtLevelConfigOption(option ?? { id }) || id === 'effort';
     if (isEffort) {
-      const efforts = capability.modelReasoningEfforts?.[targetModelId];
+      const efforts = getModelReasoningEffortValues(capability, targetModelId);
       if (efforts !== undefined) {
         if (typeof value !== 'string' || !efforts.includes(value)) {
           throw new Error(
@@ -1588,7 +1592,13 @@ function validateModelDependentTurnConfigOptionValues(
       } else if (targetModelId !== probedModelId) {
         validatedIds.add(id);
       }
-    } else if (isAcpFastModeConfigId(id) && targetModelId !== probedModelId) {
+    } else if (
+      isAcpFastModeConfigId(id) &&
+      (targetModelId !== probedModelId ||
+        getDeclaredModelControls(capability, targetModelId)?.fastMode !== undefined)
+    ) {
+      // The probe's snapshot says nothing about the target model's Fast, and a
+      // declared Fast is not a reason to reject: the agent decides at dispatch.
       validatedIds.add(id);
     }
   }
@@ -1615,12 +1625,15 @@ export function filterCompatibleTurnConfigOptionValues(
       if (targetModelId) {
         const isEffort = isAcpThoughtLevelConfigOption(option ?? { id }) || id === 'effort';
         if (isEffort) {
-          const efforts = capability.modelReasoningEfforts?.[targetModelId];
+          const efforts = getModelReasoningEffortValues(capability, targetModelId);
           if (efforts !== undefined) return typeof value === 'string' && efforts.includes(value);
         }
         // A different (or unknown) probe model cannot invalidate the target's
         // recorded controls. Without per-model data, preserve them for runtime.
-        if (targetModelId !== probedModelId) {
+        if (
+          targetModelId !== probedModelId ||
+          getDeclaredModelControls(capability, targetModelId) !== undefined
+        ) {
           if (isEffort) return typeof value === 'string';
           if (isAcpFastModeConfigId(id))
             return typeof value === 'boolean' || value === 'on' || value === 'off';
@@ -1707,7 +1720,9 @@ export async function readAgentAcpCapability(args: {
     getMachineFlockDocId(args.workspaceId, args.machineId)
   );
   const capabilities = getMachineFlockAcpCapabilities(
-    readMachineFlockRowsFromFlock(handle.flock, { families: ['acpCapability'] })
+    readMachineFlockRowsFromFlock(handle.flock, {
+      families: ['acpCapability', 'acpModelCapability'],
+    })
   );
   return capabilities[getAcpCapabilityCacheKey(args.agentConfigId)];
 }

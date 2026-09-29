@@ -2231,6 +2231,7 @@ export const SessionChatInterface = memo(
       modeOptions,
       modelOptions,
       modelReasoningEfforts,
+      declaredModelControls,
       sessionMachine,
     } = useSessionAcpSelectorContext({
       machineId: session.machineId,
@@ -2257,6 +2258,7 @@ export const SessionChatInterface = memo(
         modeOptions,
         modelOptions,
         modelReasoningEfforts,
+        declaredModelControls,
       }),
       [
         capabilityAuthority,
@@ -2266,6 +2268,7 @@ export const SessionChatInterface = memo(
         modeOptions,
         modelOptions,
         modelReasoningEfforts,
+        declaredModelControls,
       ]
     );
     const { selectedModeId, selectedModelId, configOptionValues } =

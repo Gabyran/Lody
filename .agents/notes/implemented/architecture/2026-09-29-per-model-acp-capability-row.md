@@ -1,0 +1,81 @@
+# Store each model's effort and Fast support in its own row
+
+Status: implemented
+Translation: current
+Language: [中文](2026-09-29-per-model-acp-capability-row.zh.md)
+
+## Abstract
+
+Lody kept one capability entry per agent config, copied from a single `session/new`
+response. ACP agents rebuild the reasoning-effort list and the Fast toggle on every
+model switch, so that entry described only the model the agent happened to start on.
+Other models showed its effort levels and its Fast toggle. A user whose Codex default
+was `grok-4.6` lost both controls for every model. The Claude and Codex adapters
+already publish every model's controls under `_meta.lody.modelCapabilities`, but the
+host never read it. Lody now stores that declaration per model in a separate
+`acpModelCapability` machine Flock row, and every reader resolves effort and Fast for
+the selected model.
+
+## Problem
+
+- **Stored snapshot**: the `['acpCapability', configId]` row stores `configOptions`
+  from one `session/new`, rewritten by each probe and created session. Its effort list
+  and Fast option belong to that response's current model.
+- **Per-model data today**: `modelReasoningEfforts` came only from Codex's legacy
+  `model[effort]` ids and Grok's `_meta.lody.modelReasoningEfforts`. Nothing described
+  Fast per model.
+- **Workarounds**: the UI, CLI validation and MCP run-config resolution each worked
+  around the snapshot separately, for example with a hand-maintained Codex tier table.
+
+## Decision
+
+- **Read**: `readAcpModelCapabilitiesMeta` parses the v1 declaration
+  (`{ version: 1, models: { [modelId]: { effortValues?, fastMode? } } }`). An unknown
+  version or any malformed model entry discards the whole declaration, so a missing
+  model never reads as "unsupported".
+- **Store**: `['acpModelCapability', configId]` holds
+  `{ version: 1, sourceVersion, models }`.
+  - Both writers pass the declaration through `updateAcpCapabilities`: the refresh
+    probe and the created-session writeback.
+  - The value has no timestamp, so an unchanged declaration costs no write or sync.
+  - A response without a declaration leaves the row alone.
+  - The capability row and its dedupe comparison are unchanged.
+- **Merge on read**: `getMachineFlockAcpCapabilities` attaches the row's models as
+  `declaredModelControls` when its `sourceVersion` matches the capability row. It is
+  never stored in the capability row. Readers include the family in their Flock reads.
+  `MachineDocument` keeps reading the capability row alone: its dedupe compares what
+  was written, and it answers the strict `machine/acp-capabilities-refresh_response`
+  schema.
+- **Use**:
+  - UI selectors take the selected model's declared effort list. This also covers
+    Codex, where the declaration replaces the hand tiers.
+  - UI selectors hide Fast for a model declared without it, and add the built-in Fast
+    toggle for a model declared with it that the probe did not show.
+  - CLI validation and MCP resolution read effort through
+    `getModelReasoningEffortValues` (declaration first).
+  - A declared Fast is never a reason to reject a request.
+  - Undeclared models keep today's behavior.
+
+## Limits
+
+- **Stale display**: an account or entitlement change outside Lody is not tracked
+  until the next probe or created session brings a new declaration.
+- **Concurrent writes**: no write-sequence guard yet, so two concurrent probes of one
+  config may land out of order. This affects display only.
+- **Old clients**: they ignore the new row family and behave as before.
+
+## Verification
+
+- Shared tests cover:
+  - parsing the declaration and rejecting it whole when invalid;
+  - declaration-first effort resolution;
+  - the source-version gate on the merge.
+- `machine-document-capabilities.test.ts` checks the write behavior:
+  - one write per declaration change;
+  - no write when the declaration is unchanged;
+  - a missing declaration keeps the stored row.
+- `acp-selector-options.test.ts` checks that the selected model's own effort list and
+  Fast toggle are shown, and that undeclared models are unchanged.
+- Removing each of the three mechanisms (declared effort, Fast normalization, the
+  read-time merge) fails its test.
+- Not verified: real adapters end to end.

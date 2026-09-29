@@ -1,3 +1,4 @@
+import { getModelReasoningEffortValues } from './acp-model-capabilities';
 /**
  * Semantic run-config selection (model / reasoning effort / fast mode / plan mode)
  * resolved against an agent's ACP capabilities.
@@ -102,7 +103,7 @@ export type AgentRunConfigResolution = {
 
 type RunConfigCapabilitySource = Pick<
   AcpCapabilityCacheEntry,
-  'modes' | 'models' | 'configOptions' | 'modelReasoningEfforts'
+  'modes' | 'models' | 'configOptions' | 'modelReasoningEfforts' | 'declaredModelControls'
 >;
 
 /**
@@ -257,11 +258,10 @@ const listModels = (
 export const summarizeAgentRunConfigCapabilities = (
   capability: RunConfigCapabilitySource | undefined
 ): AgentRunConfigCapabilities => {
-  const perModelEfforts = capability?.modelReasoningEfforts;
   const measuredForModelId = findCurrentModelId(capability);
   return {
     models: listModels(capability).map((model) => {
-      const efforts = perModelEfforts?.[model.id];
+      const efforts = getModelReasoningEffortValues(capability, model.id);
       return { ...model, ...(efforts ? { reasoningEffortValues: efforts } : {}) };
     }),
     reasoningEffortValues: (findReasoningEffortOption(capability)?.options ?? []).map(
@@ -314,9 +314,7 @@ export const resolveAgentRunConfigSelection = (
 
   if (selection.reasoningEffort !== undefined) {
     const option = findReasoningEffortOption(capability);
-    const targetModelEfforts = targetModelId
-      ? capability.modelReasoningEfforts?.[targetModelId]
-      : undefined;
+    const targetModelEfforts = getModelReasoningEffortValues(capability, targetModelId);
     if (!option && !targetModelEfforts) {
       throw new Error('The selected agent does not offer a reasoning effort option.');
     }

@@ -12,6 +12,10 @@ import {
   isAcpCapabilityCacheEntryCurrent,
   type AcpCapabilityCacheEntry,
 } from '../src/ai';
+import {
+  getModelReasoningEffortValues,
+  readAcpModelCapabilitiesMeta,
+} from '../src/acp-model-capabilities';
 
 const entry = (cacheVersion?: number): AcpCapabilityCacheEntry => ({
   cliType: 'builtin',
@@ -216,5 +220,34 @@ describe('ACP capability fetch-time renewal', () => {
     expect(
       shouldRenewAcpCapabilityFetchTime({ fetchedAt: 0 }, ACP_CAPABILITY_FETCH_TIME_RENEW_AFTER_MS)
     ).toBe(true);
+  });
+});
+
+describe('declared per-model controls', () => {
+  const response = (modelCapabilities: unknown) => ({ _meta: { lody: { modelCapabilities } } });
+
+  it('reads a v1 declaration and ignores unknown or malformed ones whole', () => {
+    const models = {
+      opus: { effortValues: ['low', 'high'], fastMode: true },
+      haiku: { fastMode: false },
+    };
+    expect(readAcpModelCapabilitiesMeta(response({ version: 1, models }))).toEqual(models);
+    expect(readAcpModelCapabilitiesMeta(response({ version: 2, models }))).toBeUndefined();
+    expect(
+      readAcpModelCapabilitiesMeta(
+        response({ version: 1, models: { ...models, bad: { fastMode: 'yes' } } })
+      )
+    ).toBeUndefined();
+    expect(readAcpModelCapabilitiesMeta({})).toBeUndefined();
+  });
+
+  it('prefers a model declaration over the legacy per-model map', () => {
+    const capability = {
+      declaredModelControls: { 'gpt-6': { effortValues: ['low', 'ultra'] } },
+      modelReasoningEfforts: { 'gpt-6': ['low'], 'gpt-5': ['medium'] },
+    };
+    expect(getModelReasoningEffortValues(capability, 'gpt-6')).toEqual(['low', 'ultra']);
+    expect(getModelReasoningEffortValues(capability, 'gpt-5')).toEqual(['medium']);
+    expect(getModelReasoningEffortValues(capability, 'other')).toBeUndefined();
   });
 });

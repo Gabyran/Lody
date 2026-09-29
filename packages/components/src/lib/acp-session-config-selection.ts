@@ -1,7 +1,8 @@
-import type { AcpCapabilityAuthority, AcpConfigOptionValue } from '@lody/shared';
+import type { AcpCapabilityAuthority, AcpConfigOptionValue, AcpModelControls } from '@lody/shared';
 import {
   isConfigOptionValueValid,
   isThoughtLevelSelector,
+  normalizeFastModeSelectors,
   normalizeReasoningEffortSelectors,
   type AcpConfigOptionSelector,
   type AcpSelectorTarget,
@@ -168,6 +169,8 @@ export type AcpSessionSelectorOptionsInput = {
   configOptionSelectors: AcpConfigOptionSelector[];
   /** Per-model reasoning-effort ladders when the capability source publishes them. */
   modelReasoningEfforts: Record<string, string[]> | undefined;
+  /** Per-model effort and Fast support the adapter declared, when stored. */
+  declaredModelControls?: Record<string, AcpModelControls>;
 };
 
 export type ResolvedAcpSessionConfigSelection = {
@@ -241,6 +244,7 @@ export const resolveAcpSessionConfigSelection = (
     defaultModelId,
     configOptionSelectors,
     modelReasoningEfforts,
+    declaredModelControls,
   } = selectorOptions;
 
   const selectedModeId = resolveSelectField(
@@ -261,12 +265,21 @@ export const resolveAcpSessionConfigSelection = (
   );
   let selectors = configOptionSelectors;
   if (target) {
-    selectors = normalizeReasoningEffortSelectors(selectors, {
-      cliType: target.cliType,
-      agentType: target.agentType,
-      modelReasoningEfforts,
-      selectedModelId,
-    });
+    selectors = normalizeFastModeSelectors(
+      normalizeReasoningEffortSelectors(selectors, {
+        cliType: target.cliType,
+        agentType: target.agentType,
+        modelReasoningEfforts,
+        declaredModelControls,
+        selectedModelId,
+      }),
+      {
+        cliType: target.cliType,
+        agentType: target.agentType,
+        declaredModelControls,
+        selectedModelId,
+      }
+    );
   }
 
   const runtimeTable = runtimePreferences?.configOptionValues;
