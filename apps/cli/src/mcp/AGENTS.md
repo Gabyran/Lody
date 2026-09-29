@@ -47,6 +47,11 @@ Parent instructions apply.
 
 ## Session tool contracts
 
+- `lody_ios_simulator_preview` is the native-app tool; web previews remain
+  `lody_report_preview_candidate`. Bind local agent-control RPC to MCP session context;
+  the daemon resolves the active user. Return operation handles, never viewer URLs or
+  raw preview/transport errors. Reuse simulator lifecycle/schema, never a second owner.
+
 - Resource discovery uses `lib/resource-discovery.ts` for CLI and MCP. Resolve the
   active Turn user for MCP, never the daemon owner. Role list/get use
   `canReadAgentRole`; explicit Role creation retains its separate existing contract.

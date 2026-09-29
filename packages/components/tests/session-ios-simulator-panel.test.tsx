@@ -104,7 +104,12 @@ function createFakeMachine(initial: {
       case 'list':
         return state.list ?? answer({ devices: initial.devices });
       case 'status':
-        return answer({ preview: state.preview });
+        return answer({
+          preview:
+            !command.operationId || command.operationId === state.preview?.operationId
+              ? state.preview
+              : undefined,
+        });
       default:
         return new Promise<IosSimulatorResponse>((resolve) => pending.push(resolve));
     }
@@ -209,6 +214,49 @@ async function advance(ms: number) {
 }
 
 describe('SessionIosSimulatorPanel', () => {
+  it('discovers an agent replacement when reopening instead of querying the cached operation', async () => {
+    const machine = createFakeMachine({
+      devices: [device({ udid: 'phone' }), device({ udid: 'tablet', deviceType: 'iPad' })],
+    });
+    const { render } = await renderPanel({ machine });
+    await click('Start and preview');
+    await machine.answerNext(
+      answer({ preview: preview({ phase: 'ready', viewerUrl: VIEWER_URL }) })
+    );
+    expect(container?.querySelector('iframe')?.src).toBe(VIEWER_URL);
+    await render(false);
+    machine.setPreview(
+      preview({
+        operationId: 'agent-op',
+        udid: 'tablet',
+        phase: 'ready',
+        viewerUrl: `${VIEWER_ORIGIN}/replacement`,
+      })
+    );
+    await render(true);
+    expect(container?.querySelector('iframe')?.src).toBe(`${VIEWER_ORIGIN}/replacement`);
+    expect(machine.commands.at(-1)).toEqual({ action: 'status', operationId: undefined });
+  });
+
+  it('discovers an agent start through Refresh while the panel is already idle', async () => {
+    const machine = createFakeMachine({ devices: [device({ udid: 'phone' })] });
+    await renderPanel({ machine });
+    machine.setPreview(preview({ operationId: 'agent-op', phase: 'ready', viewerUrl: VIEWER_URL }));
+    await act(async () => {
+      container?.querySelector<HTMLButtonElement>('button[aria-label="Simulator"]')?.click();
+    });
+    await flush();
+    const refresh = document.querySelector<HTMLButtonElement>(
+      'button[aria-label="Refresh simulators"]'
+    );
+    expect(refresh).not.toBeNull();
+    await act(async () => {
+      refresh?.click();
+    });
+    await flush();
+    expect(container?.querySelector('iframe')?.src).toBe(VIEWER_URL);
+  });
+
   it('asks for an update on a Mac whose Lody predates the protocol, without calling it', async () => {
     const machine = createFakeMachine({ devices: [device({ udid: 'a' })] });
     await renderPanel({ machine, meta: macMeta() });

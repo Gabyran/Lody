@@ -20,5 +20,7 @@ Decision and rationale:
   Cancel are `stop{operationId}`; they end the preview only, never shut the device down.
 - Poll only while preparing, bounded, and only while on screen. A hidden panel keeps
   the viewer mounted and sends `visibility`; unmount never stops a preview.
+- Recovery and explicit Refresh discover session-current status, including agent
+  replacements. Preparation polls and Stop stay bound to their exact operation id.
 - Same-machine Electron is never blocked by cloud presence reporting its machine
   offline.

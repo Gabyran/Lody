@@ -70,6 +70,26 @@ A lazily started Baguette process captures and injects input on the Mac. Each ac
 
 ## RPC and authorization
 
+`lody_ios_simulator_preview` exposes list/start/status/stop separately from web
+preview. Its strict input has no identity selectors. The local-only
+`ios-simulator/agent-control` route derives the active invocation user and reuses
+service authorization. Results exclude viewer URLs and free-form preview diagnostics.
+
+An agent runs on the Mac while its user may view remotely. Selecting loopback during
+agent start would give the remote panel an unusable URL. Preparation instead reserves
+and boots the device, then waits for the first authorized panel start/status to select
+transport. Agent reads do not attach or renew. Cancellation and the one-hour idle limit
+release unattended reservations; repeated starts preserve an already attached plane.
+This requires no new dependency or durable metadata.
+
+Review caught recovery querying an obsolete operation after an agent replacement.
+Panel recovery now reads session-current status; preparation polls and Stop remain
+operation-specific. Device-picker Refresh discovers agent starts while already idle.
+No automatic panel opening or continuous idle/ready polling was added. Deterministic
+tests cover MCP input/output, active-user ingress, deferred attachment, cancellation,
+expiry, remote authorization and panel recovery. Live agent-to-native-viewer acceptance
+has not been repeated for this entry point.
+
 The version-1 capability is `iosSimulator`. One `ios-simulator/control` method accepts
 `list`, `start {udid}`, `status {operationId?}`, and `stop {operationId}`. The shared
 schema rejects extra fields. Start returns a preparing operation immediately;

@@ -24,6 +24,8 @@ type Operation = {
   deadline: number;
   timer?: ReturnType<typeof setTimeout>;
   renewTunnel?: () => void;
+  attachViewer?: (remote: boolean) => void;
+  viewerAttached?: Promise<void>;
 };
 type Dependencies = {
   workspaceId: string;
@@ -57,10 +59,21 @@ export class IosSimulatorService {
     this.local =
       deps.localProxy ?? new LocalPreviewProxyManager({ logger: deps.logger, now: this.now });
   }
-  async control(
+  controlFromAgent(request: IosSimulatorRequest): Promise<IosSimulatorResponse> {
+    return this.handleControl(request, false, undefined, true);
+  }
+  control(
     request: IosSimulatorRequest,
     remote: boolean,
     authorizeRemote?: () => Promise<unknown>
+  ): Promise<IosSimulatorResponse> {
+    return this.handleControl(request, remote, authorizeRemote, false);
+  }
+  private async handleControl(
+    request: IosSimulatorRequest,
+    remote: boolean,
+    authorizeRemote: (() => Promise<unknown>) | undefined,
+    fromAgent: boolean
   ): Promise<IosSimulatorResponse> {
     const base = { type: 'ios-simulator/control_response' as const, sessionId: request.sessionId };
     const generation = this.generations.get(request.sessionId) ?? 0;
@@ -101,10 +114,12 @@ export class IosSimulatorService {
       }
       if (command.action === 'status') {
         const op = this.operations.get(request.sessionId);
-        const preview =
-          op && (!command.operationId || op.state.operationId === command.operationId)
-            ? this.snapshot(op)
-            : undefined;
+        const matches =
+          op && (!command.operationId || op.state.operationId === command.operationId);
+        // Agent starts have no viewer location. The first authenticated panel
+        // selects its own local/remote plane; agent status reads never attach it.
+        if (matches && !fromAgent && !op.abort.signal.aborted) op.attachViewer?.(remote);
+        const preview = matches ? this.snapshot(op) : undefined;
         return { ...base, success: true, preview };
       }
       // Cancellation is eager, before joining an earlier replacement's cleanup barrier.
@@ -128,7 +143,8 @@ export class IosSimulatorService {
           !existing.abort.signal.aborted &&
           existing.state.udid.toUpperCase() === command.udid.toUpperCase()
         ) {
-          if (existing.state.transport !== (remote ? 'remote' : 'local'))
+          if (!fromAgent) existing.attachViewer?.(remote);
+          if (!fromAgent && existing.state.transport !== (remote ? 'remote' : 'local'))
             throw new Error('Stop the existing preview before changing its connection transport.');
           return { ...base, success: true, preview: this.snapshot(existing) };
         }
@@ -157,6 +173,19 @@ export class IosSimulatorService {
           done: Promise.resolve(),
           deadline: this.now() + DEFAULT_PREVIEW_IDLE_TIMEOUT_MS,
         };
+        if (fromAgent) {
+          op.viewerAttached = new Promise<void>((resolve) => {
+            op.attachViewer = (viewerRemote) => {
+              op.state.transport = viewerRemote ? 'remote' : 'local';
+              op.attachViewer = undefined;
+              resolve();
+            };
+            op.abort.signal.addEventListener('abort', () => resolve(), { once: true });
+          });
+          // An unattended agent start must not hold the device indefinitely.
+          op.timer = setTimeout(() => op.abort.abort(), DEFAULT_PREVIEW_IDLE_TIMEOUT_MS);
+          op.timer.unref?.();
+        }
         this.operations.set(request.sessionId, op);
         op.done = this.run(request.sessionId, op);
         return { ...base, success: true, preview: this.snapshot(op) };
@@ -215,6 +244,8 @@ export class IosSimulatorService {
       await (this.deps.boot ?? bootSimulator)(device.udid, signal);
       signal.throwIfAborted();
       op.state.phase = 'connecting';
+      await op.viewerAttached;
+      signal.throwIfAborted();
       // Abort native startup promptly, but keep a ready capture process alive
       // until the gateway has flushed touch-up during shutdown.
       const processStartup = new AbortController();

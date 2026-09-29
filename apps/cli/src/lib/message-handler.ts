@@ -6451,6 +6451,23 @@ export class MessageHandler {
         return await this.prepareSessionWithAccessCheck(request.params);
       case 'session/prepare-cancel':
         return await this.cancelSessionPreparationWithAccessCheck(request.params);
+      case 'ios-simulator/agent-control': {
+        const sessionId = request.params.sessionId as SessionId;
+        const invocation = this.executionService.getActiveInvocationContext(sessionId);
+        if (!invocation?.requesterUserId) {
+          return {
+            type: 'ios-simulator/control_response' as const,
+            sessionId,
+            success: false,
+            error: 'denied' as const,
+          };
+        }
+        return this.iosSimulatorService.controlFromAgent({
+          sessionId,
+          requestedByUserId: invocation.requesterUserId,
+          command: request.params.command,
+        });
+      }
       case 'ios-simulator/control':
         return this.iosSimulatorService.control(request.params, false);
       case 'session/preview-endpoint-acquire':

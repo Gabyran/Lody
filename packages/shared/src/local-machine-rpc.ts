@@ -1,4 +1,8 @@
-import { IosSimulatorRequestSchema, IosSimulatorResponseSchema } from './ios-simulator';
+import {
+  IosSimulatorCommandSchema,
+  IosSimulatorRequestSchema,
+  IosSimulatorResponseSchema,
+} from './ios-simulator';
 import { LocalFileResolutionSchema } from './local-file-preview';
 import { MachinePiExtensionsResponseSchema } from './pi-extensions';
 import { z } from 'zod';
@@ -86,6 +90,10 @@ export type SessionActiveInvocationContextResult = z.infer<
 >;
 
 export const LocalMachineRpcRequestSchema = z.discriminatedUnion('method', [
+  BaseLocalMachineRpcRequestSchema.extend({
+    method: z.literal('ios-simulator/agent-control'),
+    params: z.object({ sessionId: SessionIdSchema, command: IosSimulatorCommandSchema }).strict(),
+  }).strict(),
   BaseLocalMachineRpcRequestSchema.extend({
     method: z.literal('ios-simulator/control'),
     params: IosSimulatorRequestSchema,

@@ -148,22 +148,35 @@ function SessionIosSimulatorPanelController({
     }
   }, [request]);
 
-  const refreshStatus = useCallback(async () => {
-    const epoch = ++statusEpoch.current;
-    const current = statusRef.current;
-    const operationId = getIosSimulatorOperationId(current) ?? undefined;
-    const response = await request({ action: 'status', operationId });
-    if (!response || epoch !== statusEpoch.current) return;
-    // A status read that did not reach the machine keeps what is on screen;
-    // only an authoritative answer changes the preview's phase.
-    if (!response.success && response.error === 'failed') return;
-    setStatus(
-      toIosSimulatorPanelStatus(response, {
-        udid: getIosSimulatorStatusUdid(current) ?? undefined,
-        appOrigin: appOrigin(),
-      })
-    );
-  }, [request]);
+  const refreshStatus = useCallback(
+    async (operationId?: string) => {
+      const epoch = ++statusEpoch.current;
+      const current = statusRef.current;
+      // Recovery discovers the session's current operation, including agent starts.
+      // Only preparation polls bind the operation already on screen.
+      const response = await request({ action: 'status', operationId });
+      if (!response || epoch !== statusEpoch.current) return;
+      // A status read that did not reach the machine keeps what is on screen;
+      // only an authoritative answer changes the preview's phase.
+      if (!response.success && response.error === 'failed') return;
+      if (
+        !operationId &&
+        response.success &&
+        response.preview &&
+        response.preview.operationId !== getIosSimulatorOperationId(current)
+      ) {
+        // An external replacement supersedes the prior operation's device choice.
+        setChosenUdid(null);
+      }
+      setStatus(
+        toIosSimulatorPanelStatus(response, {
+          udid: getIosSimulatorStatusUdid(current) ?? undefined,
+          appOrigin: appOrigin(),
+        })
+      );
+    },
+    [request]
+  );
 
   const connected = Boolean(runtime && requesterUserId);
   const live = active && blocker === null && connected;
@@ -203,7 +216,7 @@ function SessionIosSimulatorPanelController({
     }
     const timer = setTimeout(() => {
       pollCount.current.count += 1;
-      void refreshStatus().finally(() => setPollTick((tick) => tick + 1));
+      void refreshStatus(operationId).finally(() => setPollTick((tick) => tick + 1));
     }, IOS_SIMULATOR_PREPARING_POLL_MS);
     return () => clearTimeout(timer);
   }, [operationId, pollTick, polling, refreshStatus]);
@@ -400,7 +413,10 @@ function SessionIosSimulatorPanelController({
       leadingSlot={leadingSlot}
       onSelectDevice={handleSelectDevice}
       onPickerOpenChange={handlePickerOpenChange}
-      onRefresh={() => void refreshCatalog()}
+      onRefresh={() => {
+        void refreshCatalog();
+        void refreshStatus();
+      }}
       onStart={startPreview}
       onCancel={() => stopOperation('cancel')}
       onStop={() => stopOperation('stop')}

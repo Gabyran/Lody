@@ -39,6 +39,17 @@ The initial stream uses MJPEG with bounded decoding/backpressure and single-poin
 input. H.264, multi-touch, keyboard and device configuration require separate acceptance.
 Readiness separates preparation/transport from the first decoded frame.
 
+Agents use `lody_ios_simulator_preview` for native apps, separate from the web tool
+`lody_report_preview_candidate`. Actions are `list`, `start {udid}`,
+`status {operationId?}` and `stop {operationId}`. Machine/session context is implicit;
+the daemon derives the requester from the active turn and checks session ownership.
+Tool output excludes viewer credentials. This tool does not build or install apps.
+An agent start prepares the device asynchronously; the first authorized panel selects
+local or remote viewing. Agent status cannot attach a viewer or renew the lease.
+An unattended start expires after one hour. Opening/reopening the panel or using its
+device-picker Refresh discovers the current operation; preparation polls and Stop
+remain operation-specific. The tool does not automatically open the panel.
+
 Evidence: [design note](../.agents/notes/implemented/architecture/2026-09-27-ios-simulator-panel.md),
 [CLI boundary](../apps/cli/src/ios-simulator/AGENTS.md). Implementation and validation are
 recorded in the note; this draft does not claim human approval or deployment.

@@ -70,6 +70,20 @@ CLI 上由按需启动的 Baguette 进程处理采集和输入；每个预览经
 
 ## RPC 与权限
 
+`lody_ios_simulator_preview` 独立于网页预览，提供 list/start/status/stop。严格输入不接受
+身份选择器；本地专用 `ios-simulator/agent-control` 从活动调用获取用户并复用服务授权。
+结果剔除 viewer URL 和预览自由文本诊断。
+
+Agent 在 Mac 执行，用户却可能从远端观看。启动时选择 loopback 会给远端面板不可用地址，
+因此准备阶段先占用并启动设备，等待第一个已授权面板的 start/status 选择传输方式。
+Agent 查询不接入、不续期；取消和一小时空闲期限释放无人接入的占用，重复启动保留已经
+接入的传输方式。不增加依赖或持久元数据。
+
+复审发现 agent 替换操作后，面板恢复会查询旧 operationId。恢复现在读取会话当前状态，
+准备轮询和停止仍绑定确切操作。设备选择器的刷新也能发现已经 idle 时的 agent 启动。
+没有增加自动打开或持续 idle/ready 轮询。确定性测试覆盖 MCP 输入／输出、活动用户入口、
+延迟接入、取消、过期、远端授权和面板恢复；新增入口尚未重复真实 agent 到原生 viewer 验收。
+
 版本 1 能力为 `iosSimulator`。单个 `ios-simulator/control` 接受 `list`、
 `start {udid}`、`status {operationId?}` 和 `stop {operationId}`；共享 schema 拒绝额外字段。
 Start 立即返回 preparing 操作；status 只观察、不续期。Stop 同时承担取消准备，必须指定

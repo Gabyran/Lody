@@ -31,6 +31,14 @@ daemon 实例。OS 决定入口，机器协议能力版本决定兼容性。公�
 首版使用 MJPEG、有界解码和背压、单指输入。H.264、多指、键盘和设备配置单独验收。
 准备完成/传输就绪与首帧成功应分别表达。
 
+Agent 通过独立工具 `lody_ios_simulator_preview` 预览原生应用；网页内容继续使用
+`lody_report_preview_candidate`。动作包括 `list`、`start {udid}`、
+`status {operationId?}` 和 `stop {operationId}`。机器和会话来自调用上下文，daemon
+从活动 turn 获取请求用户并校验会话归属。工具输出不含观看凭据，也不负责构建或安装应用。
+Agent 启动会异步准备设备，由第一个已授权面板选择本地或远端观看；agent 单独查询状态
+不会接入 viewer 或续期。无人接入的启动一小时后过期。打开／重开面板或点击设备选择器中的
+刷新会发现当前操作；准备轮询和停止仍绑定确切操作。工具不会自动打开面板。
+
 证据：[设计说明](../.agents/notes/implemented/architecture/2026-09-27-ios-simulator-panel.zh.md)、
 [CLI 边界](../apps/cli/src/ios-simulator/AGENTS.md)。说明文档记录实现和验证结果；本草案不代表
 规范已获人工批准或功能已经发布。

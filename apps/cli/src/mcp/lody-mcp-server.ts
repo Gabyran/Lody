@@ -135,6 +135,8 @@ import { getCliPlatformKind } from '@/lib/cli-platform';
 import { summarizeDiscoveryAgent as summarizeAgentConfig } from '@/lib/resource-discovery';
 import { SessionDiscoveryFilterShape, matchesSessionDiscovery } from '@/lib/discovery-query';
 
+import { registerIosSimulatorPreviewTool } from './ios-simulator-tool';
+
 const PREVIEW_TOOL_NAME = 'lody_report_preview_candidate';
 const IMAGE_UPLOAD_TOOL_NAME = 'lody_upload_images';
 const FILE_UPLOAD_TOOL_NAME = 'lody_upload_files';
@@ -3694,12 +3696,29 @@ export function buildLodyMcpServer(): McpServer {
     }
   );
 
+  registerIosSimulatorPreviewTool(server, async (command) => {
+    const ctx = getSessionContext();
+    const response = await Effect.runPromise(
+      makeLocalControlClientAuto({ socketPath: ctx.localControlSocketPath }).machineRpc(
+        {
+          method: 'ios-simulator/agent-control',
+          machineId: ctx.machineId,
+          workspaceId: ctx.workspaceId,
+          params: { sessionId: ctx.sessionId, command },
+        },
+        { timeoutMs: SESSION_CONTROL_TIMEOUT_MS }
+      )
+    );
+    if (!response.ok) throw new Error('Simulator control unavailable.');
+    return response.result;
+  });
+
   server.registerTool(
     PREVIEW_TOOL_NAME,
     {
       title: 'Report frontend dev server preview',
       description:
-        "Use this immediately after starting or discovering a frontend/web dev server for the current Lody session. Report the loopback host and port before telling the user the server is ready. On remote-preview-enabled machines, a validated report from the session owner's active agent starts preparing the authenticated remote tunnel in the background. Reporting does not wait for tunnel readiness. Tell the user to click the Browser button in the bar directly above the message input to open the preview.",
+        "Use this immediately after starting or discovering a frontend/web dev server for the current Lody session. Report the loopback host and port before telling the user the server is ready. On remote-preview-enabled machines, a validated report from the session owner's active agent starts preparing the authenticated remote tunnel in the background. Reporting does not wait for tunnel readiness. Tell the user to click the Browser button in the bar directly above the message input to open the preview. For native iOS apps running in an iOS Simulator, use lody_ios_simulator_preview.",
       // Pass the full ZodObject (not `.shape`) so `.strict()` carries through to SDK
       // validation; the MCP SDK runs `safeParseAsync` against this before invoking the
       // handler, so no second `.parse(args)` is needed below.

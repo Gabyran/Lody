@@ -1,12 +1,14 @@
 import { describe, expect, it, vi, afterEach } from 'vitest';
 import {
   DEFAULT_PREVIEW_IDLE_TIMEOUT_MS,
+  LocalMachineRpcRequestSchema,
   type IosSimulatorRequest,
   type IosSimulatorDevice,
 } from '@lody/shared';
 import { IosSimulatorService } from './service';
 import { SimulatorControlLeases } from './control-leases';
 import { parseSimulatorDevices } from './devices';
+import { MessageHandler } from '@/lib/message-handler';
 const udid = '5519CB11-71C9-46D9-AEFF-73C96F1104E0';
 const device: IosSimulatorDevice = {
   udid,
@@ -98,6 +100,9 @@ function fixture(workspaceId = 'w', leases = new SimulatorControlLeases(), boot 
   return {
     service,
     call,
+    agentCall: (command: IosSimulatorRequest['command']) =>
+      service.controlFromAgent({ sessionId: 's', requestedByUserId: 'u', command }),
+    captureStarted: () => captureSignal !== undefined,
     ready,
     active: () => active?.(),
     renew: () => renew?.(),
@@ -106,6 +111,122 @@ function fixture(workspaceId = 'w', leases = new SimulatorControlLeases(), boot 
   };
 }
 describe('simulator ownership and lifecycle', () => {
+  it('local agent ingress derives the active user and fails closed without that identity', async () => {
+    const service = new IosSimulatorService({
+      workspaceId: 'w',
+      logger,
+      runtimeBaseUrl: 'https://example.test',
+      authorize: async (request) => {
+        if (request.sessionId !== 's' || request.requestedByUserId !== 'session-owner')
+          throw new Error('not owner');
+      },
+      list: async () => [device],
+    });
+    services.push(service);
+    let requesterUserId: string | undefined;
+    const handler: MessageHandler = Object.assign(Object.create(MessageHandler.prototype), {
+      iosSimulatorService: service,
+      executionService: {
+        getActiveInvocationContext: (sessionId: string) =>
+          sessionId === 's' && requesterUserId ? { requesterUserId } : null,
+      },
+    });
+    const input = {
+      machineId: 'm',
+      workspaceId: 'w',
+      method: 'ios-simulator/agent-control',
+      params: { sessionId: 's', command: { action: 'list' } },
+    };
+    const request = LocalMachineRpcRequestSchema.parse(input);
+    expect(
+      LocalMachineRpcRequestSchema.safeParse({
+        ...input,
+        params: { ...input.params, requestedByUserId: 'session-owner' },
+      }).success
+    ).toBe(false);
+    expect(await handler.handleLocalMachineRpc(request)).toMatchObject({
+      ok: true,
+      result: { success: false, error: 'denied' },
+    });
+    requesterUserId = 'teammate';
+    expect(await handler.handleLocalMachineRpc(request)).toMatchObject({
+      ok: true,
+      result: { success: false, error: 'denied' },
+    });
+    requesterUserId = 'session-owner';
+    expect(await handler.handleLocalMachineRpc(request)).toMatchObject({
+      ok: true,
+      result: { success: true, devices: [device] },
+    });
+  });
+
+  it('agent preparation waits for a panel and agent status cannot attach or renew it', async () => {
+    vi.useFakeTimers();
+    const a = fixture();
+    const started = await a.agentCall({ action: 'start', udid });
+    expect(started.success).toBe(true);
+    const waiting = await a.agentCall({ action: 'status' });
+    expect(waiting.preview?.phase).toBe('connecting');
+    expect(a.captureStarted()).toBe(false);
+    await vi.advanceTimersByTimeAsync(DEFAULT_PREVIEW_IDLE_TIMEOUT_MS / 2);
+    await a.agentCall({ action: 'status' });
+    await vi.advanceTimersByTimeAsync(DEFAULT_PREVIEW_IDLE_TIMEOUT_MS / 2);
+    expect((await a.agentCall({ action: 'status' })).preview?.phase).toBe('closed');
+    expect(a.captureStarted()).toBe(false);
+    expect((await a.call({ action: 'list' })).devices?.[0]?.occupancy).toBe('available');
+  });
+
+  it('the local panel attaches an agent operation, and a stale stop cannot cancel its replacement', async () => {
+    const a = fixture();
+    const first = await a.agentCall({ action: 'start', udid });
+    const operationId = first.preview!.operationId;
+    expect((await a.call({ action: 'status' })).preview?.operationId).toBe(operationId);
+    await a.ready.promise;
+    expect((await a.agentCall({ action: 'status' })).preview).toMatchObject({
+      phase: 'ready',
+      transport: 'local',
+    });
+    expect((await a.agentCall({ action: 'start', udid })).preview?.operationId).toBe(operationId);
+    await a.agentCall({ action: 'stop', operationId });
+    const next = await a.agentCall({ action: 'start', udid });
+    await a.agentCall({ action: 'stop', operationId });
+    expect((await a.agentCall({ action: 'status' })).preview?.operationId).toBe(
+      next.preview?.operationId
+    );
+    await a.agentCall({ action: 'stop', operationId: next.preview!.operationId });
+    expect((await a.call({ action: 'list' })).devices?.[0]?.occupancy).toBe('available');
+  });
+
+  it('only an authorized remote panel selects the deferred plane, and revocation cancels it', async () => {
+    const boot = deferred<void>();
+    const a = fixture('w', undefined, () => boot.promise);
+    await a.agentCall({ action: 'start', udid });
+    const request: IosSimulatorRequest = {
+      sessionId: 's',
+      requestedByUserId: 'u',
+      command: { action: 'status' },
+    };
+    expect((await a.service.control(request, true, async () => {})).error).toBe('denied');
+    a.service.enableRemote();
+    expect(
+      (
+        await a.service.control(request, true, async () => {
+          throw new Error('invalid proof');
+        })
+      ).error
+    ).toBe('denied');
+    expect((await a.agentCall({ action: 'status' })).preview?.transport).toBe('local');
+    expect((await a.service.control(request, true, async () => {})).preview?.transport).toBe(
+      'remote'
+    );
+    expect((await a.agentCall({ action: 'start', udid })).preview?.transport).toBe('remote');
+    a.service.revokeRemote();
+    boot.resolve();
+    await a.service.closeSession('s');
+    expect(a.captureStarted()).toBe(false);
+    expect((await a.call({ action: 'list' })).devices?.[0]?.occupancy).toBe('available');
+  });
+
   it('revokes admission while a remote proof is pending and stays disabled until re-enabled', async () => {
     const a = fixture();
     const proof = deferred<void>();
