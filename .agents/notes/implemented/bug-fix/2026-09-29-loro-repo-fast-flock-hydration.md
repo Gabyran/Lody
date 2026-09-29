@@ -5,7 +5,7 @@ Translation: current
 
 [中文](2026-09-29-loro-repo-fast-flock-hydration.zh.md)
 
-PR: pending
+PR: [LodyAI/Lody#1113](https://github.com/LodyAI/Lody/pull/1113)
 
 ## Abstract
 
@@ -17,7 +17,7 @@ On loro-repo 0.21.0 the renderer rebuilt the entire workspace metadata Flock eac
 - **Cause.** [loro-dev/loro-repo#132](https://github.com/loro-dev/loro-repo/pull/132) (0.20.3) changed the shared `hydrateMetaSnapshots` helper from `Flock.fromFile`/`importFile` to `recoverFromFile`/`recoverImportFile`. It did this so that corrupt remote Streams bytes written into the update log would be dropped before being folded into a base. That helper also opens the locally written base snapshot, and `MetaPersister` triggers compaction periodically. As a result, every compaction and load decoded and rebuilt the whole store.
 - **Fix.** [loro-dev/loro-repo#142](https://github.com/loro-dev/loro-repo/pull/142), released in 0.21.1, routes every stored Flock file through `importFile`. On a clean v2 file imported into an empty Flock, this checks the table CRCs and then adopts the file lazily in O(1). If a file is rejected, flock-wasm retries through `recoverImportFile` itself, so detected corruption still drops only the unreadable entries. The 0.21.0 → 0.21.1 package diff changes only `dist/flock-snapshot.*` and the version field, and the public declarations are unchanged.
 - **Upstream measurements.** In upstream Node measurements with 100k entries (a 640 KB file), opening the base dropped from 530 ms to 2.6 ms, and the export after one local write dropped from 147 ms to 6.5 ms.
-- **Lody changes.** The shared catalog pin, the exact release-age exception, and the package-scoped `@loro-dev/streams-crdt` peer allowance move from 0.21.0 to 0.21.1. The peer range is still `^0.15.0`. The lockfile changes only the loro-repo version, its integrity hash, and peer-qualified references.
+- **Lody changes.** The shared catalog pin, the exact release-age exception, and the package-scoped `@loro-dev/streams-crdt` peer allowance move from 0.21.0 to 0.21.1. The peer range is still `^0.15.0`. The lockfile changes only the loro-repo version, its integrity hash, and peer-qualified references. This continues the [loro-repo 0.21.0 persistence migration](../architecture/2026-09-27-loro-repo-flock-persistence-migration.md); replica-bound checkpoints and the other #132 persistence fixes are unchanged.
 
 ## Verification and limits
 
