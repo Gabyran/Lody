@@ -81,15 +81,16 @@ mobile surfaces.
   `vite-top-level-await-fixed.ts`. Do not bypass its audited-version assertion.
 - System theme state, persistence, and browser preference tracking are owned by
   `next-themes`. Keep Lody's wrapper focused on preview state, fixed VS Code theme
-  application, and the Electron native-theme bridge. It also mirrors the COMMITTED
-  theme (never a preview) to Electron main via `app.setStartupThemeSource`; that
-  is main's only record of it, and the next launch needs it to pick the window
-  color and the pre-paint `.dark` class. See `apps/electron/AGENTS.md`.
-- Pre-paint theme is a per-host contract, and shared code must not fake one. The
-  browser gets it from next-themes' inline script and Electron from preload plus
-  the persisted main-process theme. A native mobile shell has neither, so its
-  WebView background and splash color must be driven from the same committed
-  theme by the shell project, which lives outside this repository.
+  application, and the host bridges. It mirrors the COMMITTED theme (never a
+  preview) to every host that paints before the renderer runs: Electron main
+  via `app.setStartupThemeSource` (window color, the preload `.dark` class; see
+  `apps/electron/AGENTS.md`) and a native mobile shell via
+  `window.__LODY_STARTUP_THEME__.persist` (splash and WebView background). The
+  bridge TYPE lives here, like `LodyLiveActivityBridge`; the shell implements it
+  from its own storage, because the renderer's `localStorage` is unreadable
+  there. Inside the renderer itself no host needs help: a React-inserted
+  next-themes script lands before first paint (measured), and Electron's CSP
+  exception is handled by preload.
 - A `Suspense` fallback for a lazy route is never `null`. `RouteSuspense` paints
   `bg-background` on the first frame; a `null` fallback left the window on the
   bare `<body>` canvas for the whole chunk fetch, which is the white flash right

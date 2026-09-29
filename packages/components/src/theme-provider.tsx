@@ -25,6 +25,20 @@ import {
 export type Theme = 'dark' | 'light' | 'system';
 export type ResolvedTheme = 'light' | 'dark';
 
+/**
+ * Installed by a native shell (`window.__LODY_STARTUP_THEME__`) so the theme the
+ * user COMMITTED reaches the process that paints before this code runs.
+ *
+ * On mobile that is the splash and the WebView background, which the shell
+ * has to color from its own storage at launch; the renderer's `localStorage`
+ * is not readable there. Electron gets the same value over IPC instead. A
+ * preview never travels this way — only a committed choice says how the next
+ * launch should look.
+ */
+export type LodyStartupThemeBridge = {
+  persist: (theme: Theme) => Promise<void>;
+};
+
 export const THEME_CYCLE_ORDER: readonly Theme[] = ['light', 'dark', 'system'];
 
 export function nextCycledTheme(current: Theme): Theme {
@@ -159,14 +173,17 @@ function LodyThemeProvider({
     void getIpcServices()?.app.setNativeTheme(theme);
   }, [theme]);
 
-  // Mirror the COMMITTED choice into the main process. It is the only record
-  // main has of the user's theme — the renderer keeps it in `localStorage`,
-  // which main cannot read — and the next launch needs it before any renderer
-  // code runs, to pick the window background color and to hand preload the
-  // class to put on `<html>` ahead of the first frame. A preview is excluded on
+  // Mirror the COMMITTED choice into whichever host paints before this code
+  // runs: Electron main (window background, the preload `.dark` class) over
+  // IPC, and a native mobile shell (splash, WebView background) through its
+  // bridge. Both keep it in their own storage because the renderer's
+  // `localStorage` is not readable from there. A preview is excluded on
   // purpose: it says nothing about how the app should open.
   useEffect(() => {
     void getIpcServices()?.app.setStartupThemeSource(storedTheme);
+    window.__LODY_STARTUP_THEME__?.persist(storedTheme).catch((error: unknown) => {
+      console.warn('[theme] Failed to persist the startup theme to the native shell', error);
+    });
   }, [storedTheme]);
 
   useIsomorphicLayoutEffect(() => {
