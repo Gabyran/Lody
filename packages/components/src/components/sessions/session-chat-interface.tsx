@@ -6249,6 +6249,7 @@ export const SessionChatInterface = memo(
                                 workspaceId={workspaceId}
                                 showSenderIdentity={isMultiMember}
                                 view={conversationView}
+                                isVisible={isVisible}
                                 sessionCreatedAt={session?.createdAt}
                                 dividerLabel={sessionDividerLabel}
                                 className="h-full"
