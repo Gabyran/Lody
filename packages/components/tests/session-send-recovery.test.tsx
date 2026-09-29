@@ -582,6 +582,135 @@ it('shows a text-only send as an ordinary turn at once, and as pending only when
   expect(mark()?.dataset.sessionSendState).toBe('failed');
 });
 
+// Commit writes history before the journal records it; in between, the turn
+// must show once, as the history row, not also as a pending row beneath it.
+it('hides a pending row as soon as its turn is in history', async () => {
+  const { SessionPendingMessages } =
+    await import('../src/components/chat/session-pending-messages');
+  const { runtimeAtom } = await import('../src/atoms/runtime');
+  vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true);
+  const { createObjectURL, revokeObjectURL } = URL;
+  URL.createObjectURL = () => 'blob:photo';
+  URL.revokeObjectURL = () => {};
+  cleanups.push(async () => {
+    URL.createObjectURL = createObjectURL;
+    URL.revokeObjectURL = revokeObjectURL;
+  });
+  await initI18n();
+  const records = new Map<string, SessionSendRecord>();
+  const resources = createSessionSendResources({
+    acquire: async () => {
+      throw new Error('unused');
+    },
+    releaseRef: () => {},
+  });
+  const historyIds = new Set<string>();
+  const listeners = new Set<() => void>();
+  const history = {
+    indexOf: (id: string) => (historyIds.has(id) ? 0 : -1),
+    subscribe: (listener: () => void) => {
+      listeners.add(listener);
+      return () => listeners.delete(listener);
+    },
+  };
+  const committing = deferred<void>();
+  const finishCommit = deferred<void>();
+  const journal = createSessionSendJournal({
+    resources,
+    storage: {
+      list: async () => [...records.values()],
+      insert: async (value) => {
+        const saved = { ...value, sequence: records.size + 1 };
+        records.set(saved.id, saved);
+        return saved;
+      },
+      put: async (value) => {
+        records.set(value.id, value);
+      },
+      remove: async (id) => {
+        records.delete(id);
+      },
+      close: async () => {},
+    },
+    lock: async (_key, _signal, run) => run(),
+    prepareInput: async () => {},
+    prepare: async () => new Uint8Array([1]),
+    commit: async (record) => {
+      historyIds.add(record.id);
+      for (const listener of listeners) listener();
+      committing.resolve();
+      await finishCommit.promise;
+    },
+    deliver: async () => {},
+  });
+  const store = createStore();
+  store.set(runtimeAtom, {
+    workspaceId: 'workspace',
+    workspaceSlug: 'workspace',
+    sendResources: resources,
+    sendJournal: journal,
+  } as never);
+  const container = document.createElement('div');
+  document.body.append(container);
+  const root = createRoot(container);
+  cleanups.push(async () => {
+    finishCommit.resolve();
+    await act(async () => root.unmount());
+    container.remove();
+    await resources.dispose();
+    await journal.close();
+  });
+  await act(async () => {
+    root.render(
+      <Provider store={store}>
+        <SessionPendingMessages sessionId={'session' as SessionId} history={history} />
+      </Provider>
+    );
+  });
+  await act(async () => {
+    await journal.accept({
+      id: 'photo',
+      sessionId: 'session' as SessionId,
+      accountId: 'account',
+      workspaceId: 'workspace',
+      sourceReplica: 'replica',
+      entry: {
+        id: 'photo',
+        role: 'user',
+        items: [{ type: 'text', text: 'photo text' }],
+        timestamp: 't',
+      } as SessionHistory,
+      delivery: { kind: 'dispatch' },
+      attachments: [
+        {
+          id: 'photo-image',
+          kind: 'image',
+          source: new Blob(['bytes']),
+          name: 'photo.png',
+          mimeType: 'image/png',
+          lastModified: 1,
+        },
+      ],
+    });
+  });
+  expect(container.textContent).toContain('photo text');
+
+  let work!: Promise<void>;
+  await act(async () => {
+    work = journal.retry('session' as SessionId).catch(() => {});
+    await committing.promise;
+  });
+  expect(records.get('photo')?.stage).toBe('committed');
+  expect(records.get('photo')?.version).toBe(4);
+  expect(container.textContent).toBe('');
+
+  await act(async () => {
+    finishCommit.resolve();
+    await work;
+  });
+  expect(container.textContent).toBe('');
+});
+
 it('shows a queue-bound upload in the queue sheet until its queue item replaces it', async () => {
   const { SessionPendingMessages } =
     await import('../src/components/chat/session-pending-messages');

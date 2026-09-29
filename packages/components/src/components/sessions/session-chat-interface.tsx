@@ -304,6 +304,7 @@ import { SessionPin } from './session-pin';
 import { SessionPinContext, type SessionPinContextValue } from './session-pin-context';
 import { SessionSyncingIndicator } from './session-syncing-indicator';
 import { ConversationSkeleton } from '@/components/ai-gui/conversation-sync-placeholders';
+import { sessionUnsentNewConversationAtomFamily } from '@/atoms/session-send-status';
 import { useDisplayedContentSyncState } from '@/hooks/use-displayed-content-sync-state';
 import { resolveSessionContentSyncState } from '@/lib/session-content-sync-state';
 import { ChildTabEmptyState } from './child-tab-empty-state';
@@ -1277,9 +1278,7 @@ export function SessionHeaderMenu({
               so the flip is visible. */}
           <Menu.Item closeOnClick={false} onClick={() => setConversationWide(!conversationWide)}>
             <MoveHorizontal className="h-3.5 w-3.5 shrink-0" />
-            <span className="min-w-0 flex-1 truncate">
-              {t('sessions.fullWidth', 'Full width')}
-            </span>
+            <span className="min-w-0 flex-1 truncate">{t('sessions.fullWidth', 'Full width')}</span>
             <Switch
               checked={conversationWide}
               onCheckedChange={(checked) => setConversationWide(checked === true)}
@@ -1586,7 +1585,6 @@ export function SessionHeaderMenu({
                   </Menu.Item>
                 </>
               )}
-
         </Menu.Content>
       </Menu.Root>
       <ReviewAgentSetupDialog
@@ -4517,16 +4515,48 @@ export const SessionChatInterface = memo(
     const handleChildEmptyStateSuggest = useCallback((text: string) => {
       inputAreaRef.current?.setInputText(text);
     }, []);
+    // The sender the delivered user row resolves (same query, same cache), so
+    // the pending row it replaces draws the same avatar.
+    const pendingSender = useCloudQuery(
+      cloudOperations.auth.getUserById,
+      currentUser?.id && workspaceId ? { userId: currentUser.id, workspaceId } : 'skip'
+    );
+    const pendingMessages = useMemo(
+      () => (
+        <SessionPendingMessages
+          sessionId={session.id}
+          history={conversationView}
+          user={pendingSender}
+          conversationFontSize={conversationFontSize}
+        />
+      ),
+      [conversationFontSize, conversationView, pendingSender, session.id]
+    );
+    // A first message still uploading is the conversation's only content: it
+    // takes the top of the empty stream (where its committed turn will land)
+    // instead of a loading skeleton with the pending row pinned under it.
+    const hasUnsentNewConversation = useAtomValue(
+      sessionUnsentNewConversationAtomFamily(session.id)
+    );
+    const unsentFirstMessage = hasUnsentNewConversation && sessionHistoryLength === 0;
     const chatStreamEmptyState = useMemo(
       () =>
-        contentSyncState === 'cold' ? (
+        unsentFirstMessage ? (
+          pendingMessages
+        ) : contentSyncState === 'cold' ? (
           <ConversationSkeleton />
         ) : isChildSession ? (
           <ChildTabEmptyState onSuggest={handleChildEmptyStateSuggest} />
         ) : (
           EMPTY_CHAT_STREAM_EMPTY_STATE
         ),
-      [contentSyncState, handleChildEmptyStateSuggest, isChildSession]
+      [
+        contentSyncState,
+        handleChildEmptyStateSuggest,
+        isChildSession,
+        pendingMessages,
+        unsentFirstMessage,
+      ]
     );
     const handleAgentConfigChange = useCallback(
       (selection: AgentSelection) => {
@@ -6244,7 +6274,7 @@ export const SessionChatInterface = memo(
                               className="h-full"
                               leadingContent={openedByConversationStart}
                               emptyState={chatStreamEmptyState}
-                              trailingContent={<SessionPendingMessages sessionId={session.id} />}
+                              trailingContent={unsentFirstMessage ? undefined : pendingMessages}
                               agentActivityLabel={agentActivityLabel}
                               agentActivityTone={agentActivityTone}
                               agentActivityShimmer={agentActivityShimmer}

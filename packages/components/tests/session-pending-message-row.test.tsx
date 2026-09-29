@@ -155,7 +155,22 @@ describe('PendingMessageRow failure presentation', () => {
     const host = await render(record({ error: REASON, attachments: [readyImage] }));
 
     expect(reasonNodes(host)).toHaveLength(1);
-    expect(host.textContent).toContain('Ready');
+    expect(
+      host.querySelector('.border-destructive\\/30')?.contains(host.querySelector('img'))
+    ).toBe(false);
+  });
+
+  // Image frames match the delivered image and carry no caption, so a failed
+  // image's reason must still reach the reader through the row notice.
+  it('explains a failed image through the row notice', async () => {
+    const host = await render(
+      record({
+        error: REASON,
+        attachments: [{ ...readyImage, id: 'failed-image', ready: undefined, error: REASON }],
+      })
+    );
+
+    expect(reasonNodes(host)).toHaveLength(1);
   });
 
   // A ready FILE sits beside the failed one on purpose: with only a ready image

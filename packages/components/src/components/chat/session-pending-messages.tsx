@@ -1,11 +1,19 @@
-import { useEffect, useState, useSyncExternalStore } from 'react';
+import { useCallback, useEffect, useState, useSyncExternalStore } from 'react';
 import { useAtomValue } from 'jotai';
 import { AlertCircle, Check, Clock3, Image as ImageIcon } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import type { SessionId } from '@lody/shared';
 import { activeWorkspaceRuntimeAtom } from '@/atoms/runtime';
+import { DEFAULT_CONVERSATION_FONT_SIZE, type ConversationFontSize } from '@/atoms/settings';
+import { conversationTextFontSizeStyle } from '@/components/ai-gui/conversation-font-size-classes';
 import { getSessionFileIcon } from '@/components/ai-gui/session-file-card';
+import type { SessionChatUser } from '@/components/ai-gui/view';
 import { ConversationColumn } from '@/components/shared/conversation-column';
+import { UserAvatar } from '@/components/user-avatar';
+import { useIsMobile } from '@/hooks/use-mobile';
+import type { ConversationView } from '@/lib/conversation-view/types';
+import { formatConversationTimestamp } from '@/lib/format-conversation-timestamp';
+import { toIntlLocale } from '@/lib/intl-locale';
 import type { SessionAttachmentDraft } from '@/lib/session-attachment-draft';
 import type { SessionSendRecord, SessionSendViewRecord } from '@/lib/session-send-journal';
 import {
@@ -167,12 +175,23 @@ function AttachmentProgressTrack({
   );
 }
 
+/** The delivered `UserImageBlock`'s large-thumbnail square. */
+const IMAGE_SQUARE_CLASS = 'h-36 w-36 sm:h-40 sm:w-40';
+
+/**
+ * Framed like the delivered image the commit replaces it with: a lone image at
+ * its natural size capped at 10.5rem, several as large squares. The delivered
+ * image has no caption row, so the progress strip rides the frame's bottom edge
+ * instead; a caption here is what made the row shrink the moment it was sent.
+ */
 function PendingImageAttachment({
   attachment,
   active,
+  single,
 }: {
   attachment: SessionAttachmentDraft;
   active: boolean;
+  single: boolean;
 }) {
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
   useEffect(() => {
@@ -191,48 +210,41 @@ function PendingImageAttachment({
   return (
     <div
       className={cn(
-        'w-36 overflow-hidden rounded-xl border transition-colors',
-        failed ? FAILED_FRAME_CLASS : 'border-border/60 bg-card/80'
+        'relative overflow-hidden rounded-xl border transition-colors',
+        failed ? FAILED_FRAME_CLASS : 'border-border/70 bg-muted/20',
+        single ? 'inline-flex max-w-full flex-col' : `${IMAGE_SQUARE_CLASS} shrink-0`
       )}
+      title={`${attachment.name} · ${label}`}
     >
-      <div className="relative aspect-square bg-muted">
-        {previewUrl ? (
-          <img
-            src={previewUrl}
-            alt=""
-            /* Pure black/white at 10%: a tinted neutral picks up the surface
-               under it and reads as dirt on the image edge. */
-            className="size-full object-cover outline-1 -outline-offset-1 outline-black/10 dark:outline-white/10"
-          />
-        ) : (
-          <div className="flex size-full items-center justify-center text-muted-foreground">
-            <ImageIcon className="size-6" aria-hidden="true" />
-          </div>
-        )}
-        {failed ? (
-          /* Neutral scrim, not a red wash: it only has to make the one glyph
-             legible over whatever the photo happens to be. */
-          <div className="absolute inset-0 flex items-center justify-center bg-background/55">
-            <AlertCircle className="size-6 text-destructive" aria-hidden="true" />
-          </div>
-        ) : null}
-      </div>
-      {/* Between the thumbnail and the caption rather than floating over the
-          photo, so it lines up with the file card's strip. */}
-      <AttachmentProgressTrack attachment={attachment} active={state === 'uploading'} />
-      <div className="space-y-0.5 px-2.5 py-2">
-        <p className="truncate text-xs font-medium" title={attachment.name}>
-          {attachment.name}
-        </p>
-        <p
+      {previewUrl ? (
+        <img
+          src={previewUrl}
+          alt={attachment.name}
+          className={
+            single
+              ? 'block max-h-[10.5rem] max-w-full object-contain'
+              : `${IMAGE_SQUARE_CLASS} object-cover`
+          }
+        />
+      ) : (
+        <div
           className={cn(
-            'truncate text-[11px]',
-            failed ? 'text-destructive' : 'text-muted-foreground'
+            'flex items-center justify-center text-muted-foreground',
+            single ? 'h-36 w-56 max-w-full sm:w-72 md:w-80' : IMAGE_SQUARE_CLASS
           )}
-          title={failed ? label : undefined}
         >
-          {label}
-        </p>
+          <ImageIcon className="size-6" aria-hidden="true" />
+        </div>
+      )}
+      {failed ? (
+        /* Neutral scrim, not a red wash: it only has to make the one glyph
+           legible over whatever the photo happens to be. */
+        <div className="absolute inset-0 flex items-center justify-center bg-background/55">
+          <AlertCircle className="size-6 text-destructive" aria-hidden="true" />
+        </div>
+      ) : null}
+      <div className="absolute inset-x-0 bottom-0">
+        <AttachmentProgressTrack attachment={attachment} active={state === 'uploading'} />
       </div>
     </div>
   );
@@ -288,33 +300,43 @@ function PendingFileAttachment({
  * the message level carries one short status ("Not sent"), and the reason lives
  * inside the attachment card that actually failed. Exported for Storybook so the
  * states render without a workspace runtime.
+ *
+ * The shell (avatar column, widths, metadata line, image frames, text bubble)
+ * mirrors the delivered `UserMessageRowView`: when the turn commits, that row
+ * takes this one's place and only the status beside the timestamp changes.
  */
 export function PendingMessageRow({
   record,
+  user,
+  conversationFontSize = DEFAULT_CONVERSATION_FONT_SIZE,
   onRetry,
   onCancel,
   onDiscard,
   busy = false,
 }: {
   record: SessionSendViewRecord;
+  user?: SessionChatUser;
+  conversationFontSize?: ConversationFontSize;
   onDiscard?: () => void;
   busy?: boolean;
   onRetry: () => void;
   onCancel: () => void;
 }) {
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
+  const isMobile = useIsMobile();
   const text = record.entry.items
     ?.flatMap((item) => (item.type === 'text' ? [item.text] : []))
     .join('\n');
+  const timestampLabel = formatConversationTimestamp(record.entry.timestamp, {
+    locale: toIntlLocale(i18n?.resolvedLanguage ?? i18n?.language),
+  });
   const failed = Boolean(record.error);
   const interrupted = record.activity === 'interrupted';
   const images = record.attachments?.filter((attachment) => attachment.kind === 'image') ?? [];
   const files = record.attachments?.filter((attachment) => attachment.kind === 'file') ?? [];
   // Only fall back to the record-level reason when no card shows one, so the
-  // same failure is never spelled out twice.
-  const reasonOnACard = record.attachments?.some(
-    (attachment) => attachmentState(attachment) === 'failed'
-  );
+  // same failure is never spelled out twice. Image frames carry no caption.
+  const reasonOnACard = files.some((attachment) => attachmentState(attachment) === 'failed');
   const messageStatus = failed
     ? t('sessions.pendingMessageUploadFailed')
     : interrupted
@@ -329,52 +351,79 @@ export function PendingMessageRow({
   const showCancel = record.stage === 'saved';
 
   return (
-    <ConversationColumn className="pb-3 sm:pb-4">
-      <article className="ml-auto flex w-full max-w-[80%] flex-col items-end gap-1.5 sm:max-w-[70%]">
-        {/* Neutral on purpose: the icon and the word already say "not sent", and
-            the failure itself is framed below. Colouring this line too turned
-            one fault into three red things stacked down the row. */}
-        <div
-          className="inline-flex items-center gap-1.5 text-[11px] text-muted-foreground"
-          role="status"
-        >
-          {failed ? (
-            <AlertCircle className="size-3.5" strokeWidth={2} aria-hidden="true" />
-          ) : (
-            <Clock3 className="size-3.5" strokeWidth={2} aria-hidden="true" />
-          )}
-          <span>{messageStatus}</span>
+    <ConversationColumn className="py-2 sm:py-3">
+      <article className={cn('flex w-full flex-row-reverse', isMobile ? 'gap-2 pl-7' : 'gap-2.5')}>
+        <div className="mt-0.5 shrink-0 text-muted-foreground">
+          <UserAvatar user={user} size="large" showIcon />
         </div>
-        {images.length ? (
-          <div className="flex w-full flex-wrap justify-end gap-2">
-            {images.map((attachment) => (
-              <PendingImageAttachment
-                key={attachment.id}
-                attachment={attachment}
-                active={!interrupted}
-              />
-            ))}
+        <div
+          className={cn(
+            'flex min-w-0 flex-1 flex-col items-end text-left',
+            isMobile
+              ? 'max-w-[min(100%,28rem)] gap-1'
+              : 'max-w-full gap-1.5 @[520px]:max-w-[80%] @[720px]:max-w-[70%]'
+          )}
+        >
+          <div className="flex flex-row-reverse items-center gap-1.5 text-[11px] text-muted-foreground">
+            {timestampLabel ? <span className="tabular-nums">{timestampLabel}</span> : null}
+            {/* Where the delivered row shows its read mark. Neutral on purpose:
+                the icon and the word already say "not sent", and the failure
+                itself is framed below. */}
+            <span
+              className="inline-flex items-center gap-1 text-muted-foreground"
+              role="status"
+              title={messageStatus}
+            >
+              {failed ? (
+                <AlertCircle className="size-3.5" strokeWidth={2} aria-hidden="true" />
+              ) : (
+                <Clock3 className="size-3.5" strokeWidth={2} aria-hidden="true" />
+              )}
+              {isMobile ? <span className="sr-only">{messageStatus}</span> : messageStatus}
+            </span>
           </div>
-        ) : null}
-        {files.length ? (
-          <div className="flex w-full flex-col items-end gap-2">
-            {files.map((attachment) => (
-              <PendingFileAttachment
-                key={attachment.id}
-                attachment={attachment}
-                active={!interrupted}
-              />
-            ))}
+          <div className="flex min-w-0 max-w-full flex-col items-end gap-2">
+            {images.length ? (
+              <div className="flex w-full flex-wrap justify-end gap-2 px-2 pt-1">
+                {images.map((attachment) => (
+                  <PendingImageAttachment
+                    key={attachment.id}
+                    attachment={attachment}
+                    active={!interrupted}
+                    single={images.length === 1}
+                  />
+                ))}
+              </div>
+            ) : null}
+            {files.length ? (
+              <div className="flex w-full flex-col items-end gap-2">
+                {files.map((attachment) => (
+                  <PendingFileAttachment
+                    key={attachment.id}
+                    attachment={attachment}
+                    active={!interrupted}
+                  />
+                ))}
+              </div>
+            ) : null}
+            {text ? (
+              <div className="flex max-w-full justify-end sm:pl-2">
+                <div className="min-w-0 max-w-full rounded-[1.15rem] bg-foreground/[0.05] px-3.5 py-2 sm:rounded-2xl sm:px-4 sm:py-2.5">
+                  <div
+                    className="min-w-0 max-w-full whitespace-pre-wrap text-reading [overflow-wrap:anywhere]"
+                    style={conversationTextFontSizeStyle(conversationFontSize)}
+                  >
+                    {text}
+                  </div>
+                </div>
+              </div>
+            ) : null}
           </div>
-        ) : null}
-        {text ? (
-          <div className="max-w-full rounded-2xl border border-foreground/[0.08] bg-foreground/[0.05] px-4 py-2.5 text-sm break-words whitespace-pre-wrap">
-            {text}
-          </div>
-        ) : null}
-        {failed && !reasonOnACard ? <PendingFailureNotice reason={record.error!} clamp /> : null}
-        {showRetry || showCancel || showDiscard ? (
-          <div className="flex flex-wrap items-center justify-end gap-2">
+          {failed && !reasonOnACard ? <PendingFailureNotice reason={record.error!} clamp /> : null}
+          {/* Always in the flow at the delivered row's 28px action height, so
+              committing (which swaps these for hover-revealed copy/fork) does
+              not move anything below. */}
+          <div className="flex min-h-7 flex-wrap items-center justify-end gap-2">
             {showCancel ? (
               <Button size="small" variant="ghost" onClick={onCancel}>
                 {t('sessions.cancelPendingSend')}
@@ -391,19 +440,34 @@ export function PendingMessageRow({
               </Button>
             ) : null}
           </div>
-        ) : null}
-        {showDiscard ? (
-          <p className="max-w-sm text-xs text-muted-foreground">
-            {t('sessions.discardPreparedSendDescription')}
-          </p>
-        ) : null}
+          {showDiscard ? (
+            <p className="max-w-sm text-xs text-muted-foreground">
+              {t('sessions.discardPreparedSendDescription')}
+            </p>
+          ) : null}
+        </div>
       </article>
     </ConversationColumn>
   );
 }
 
-/** Local pending rows render beside ordinary conversation messages, never in the composer. */
-export function SessionPendingMessages({ sessionId }: { sessionId: SessionId }) {
+/**
+ * Local pending rows render beside ordinary conversation messages, never in the
+ * composer. `history` hides a record whose turn already landed: commit writes
+ * history before the journal records it, and both must not show at once.
+ * `user` is the local sender as the delivered row resolves it.
+ */
+export function SessionPendingMessages({
+  sessionId,
+  history,
+  user,
+  conversationFontSize,
+}: {
+  sessionId: SessionId;
+  history?: Pick<ConversationView, 'indexOf' | 'subscribe'> | null;
+  user?: SessionChatUser;
+  conversationFontSize?: ConversationFontSize;
+}) {
   const runtime = useAtomValue(activeWorkspaceRuntimeAtom);
   const journal = runtime?.sendJournal;
   const records = useSyncExternalStore(
@@ -411,6 +475,20 @@ export function SessionPendingMessages({ sessionId }: { sessionId: SessionId }) 
     journal?.getSnapshot ?? emptySnapshot,
     emptySnapshot
   );
+  // A string snapshot: the view changes at token rate, the landed set rarely.
+  const readLanded = () =>
+    history
+      ? records
+          .filter((record) => history.indexOf(record.id) >= 0)
+          .map((record) => record.id)
+          .join('\n')
+      : '';
+  const subscribeHistory = useCallback(
+    (onChange: () => void) => history?.subscribe(onChange) ?? (() => {}),
+    [history]
+  );
+  const landedKey = useSyncExternalStore(subscribeHistory, readLanded, readLanded);
+  const landed = new Set(landedKey ? landedKey.split('\n') : []);
   const { t } = useTranslation();
   const [busy, setBusy] = useState<string | null>(null);
   const [failure, setFailure] = useState<string | null>(null);
@@ -429,7 +507,8 @@ export function SessionPendingMessages({ sessionId }: { sessionId: SessionId }) 
       record.sessionId === sessionId &&
       !isQueueBoundSendRecord(record) &&
       !instant.has(record.id) &&
-      isUnsent(record)
+      isUnsent(record) &&
+      !landed.has(record.id)
   );
   if (!pending.length) return null;
   const action = async (record: SessionSendRecord, kind: 'retry' | 'cancel' | 'discard') => {
@@ -451,6 +530,8 @@ export function SessionPendingMessages({ sessionId }: { sessionId: SessionId }) 
         <PendingMessageRow
           key={record.id}
           record={record}
+          user={user}
+          conversationFontSize={conversationFontSize}
           busy={busy === record.id}
           onRetry={() => void action(record, 'retry')}
           onCancel={() => void action(record, 'cancel')}
