@@ -56,6 +56,7 @@ Root `AGENTS.md` applies; this file adds CLI context. Build, PR-poller, and adap
   rotation window. Move it to `logger.trace` (`LODY_LOG_TRACE=1`) only if its subsystem's failures
   stay diagnosable without it; keep failing/slow branches at `debug`
   ([note](../../.agents/notes/implemented/architecture/2026-09-16-daemon-log-volume.md)).
+- File logs use `createFileTransport`; a raw `DailyRotateFile` makes a full disk crash the daemon.
 - Read context/local-agent-ownership.md before changing local ports/sockets, daemon PID state,
   Electron/daemon startup, Supervisor retries, or Worker shutdown; health probes are observation
   only and never authorize PID killing.
@@ -73,7 +74,8 @@ execution/consent rules. These rules also bind CLI callers outside that director
   never rewrite the exact opener to the root or treat either as `parentSessionId`.
 - INVARIANT: reasoning effort and fast mode are per MODEL, because an ACP probe's `configOptions`
   describe only the model current at probe time. Validate effort against the TARGET model using
-  `AcpCapabilityCacheEntry.modelReasoningEfforts` and skip the resulting `validatedConfigIds` in
+  `getModelEffortChoices` (the stored per-model declaration first, then
+  `modelReasoningEfforts`) and skip the resulting `validatedConfigIds` in
   `validateTurnConfigOptionValues`; dispatch what cannot be checked offline as requested. Keep
   runtime rejections in debug diagnostics: Codex/Claude mismatches for model, effort, Fast, or Plan
   never become visible `agent_warning` notices, while other rejections still do. Claude Fable

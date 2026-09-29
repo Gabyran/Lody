@@ -91,8 +91,12 @@ import {
   SIDEBAR_GROUP_LABEL_CLASS,
   SIDEBAR_GROUP_LABEL_COLOR_CLASS,
   SidebarGroupActivityMark,
+  SIDEBAR_UNSENT_TITLE_CLASS,
   summarizeSidebarGroupActivity,
+  useSessionUnsentNewConversation,
+  withSessionSendStates,
 } from '@/components/sidebar-row-shared';
+import { sessionSendStatesAtom } from '@/atoms/session-send-status';
 import { SessionInfoHoverCard } from '@/components/session-info-hover-card';
 import type { SessionSharingState } from '@/lib/session-sharing';
 import {
@@ -656,8 +660,17 @@ const SessionGroupRow = memo(function SessionGroupRow({
   // interactive child added inside an anchored row needs the same treatment.
   const sessionHref = isSelectable ? getSessionHref?.(session.sessionId) : undefined;
   const useAnchor = typeof sessionHref === 'string' && sessionHref.length > 0;
+  const isUnsent = useSessionUnsentNewConversation(session.sessionId);
   const renderTitle = (extraClassName?: string) => (
-    <span className={cn('truncate font-normal', extraClassName)}>{session.title}</span>
+    <span
+      className={cn(
+        'truncate font-normal',
+        isUnsent && !showSelectedState && SIDEBAR_UNSENT_TITLE_CLASS,
+        extraClassName
+      )}
+    >
+      {session.title}
+    </span>
   );
   const handleAnchorClick = useAnchor
     ? (event: ReactMouseEvent<HTMLAnchorElement>) => {
@@ -775,7 +788,7 @@ const SessionGroupRow = memo(function SessionGroupRow({
           onClick={handleAnchorClick}
         />
       ) : null}
-      <div className="flex min-w-0 items-center gap-1.5">
+      <div className={cn('flex min-w-0 items-center', isMobile ? 'gap-1.5' : 'gap-2')}>
         <SessionRowLeadingSlot
           showMenuButton={hasMenuActions}
           menuLabel={moreActionsLabel}
@@ -804,6 +817,7 @@ const SessionGroupRow = memo(function SessionGroupRow({
         </div>
         {/* Keep PR at the right edge. Line totals stay in the hover card. */}
         <SidebarRowEndSlot
+          sessionId={session.sessionId}
           isWaitingPermission={session.isWaitingPermission}
           isWorking={session.isWorking}
           hasUnreadMessages={session.hasUnreadMessages}
@@ -1165,9 +1179,15 @@ const SessionGroupSection = memo(function SessionGroupSection({
     };
   }, [collapsedOpenedBySessionIds, group, whetherShowFullList]);
   // A folded group still says whether anything inside it needs the user.
+  const sendStates = useAtomValue(sessionSendStatesAtom);
   const collapsedActivity = useMemo(
-    () => (group.collapsed ? summarizeSidebarGroupActivity(group.sessions) : null),
-    [group.collapsed, group.sessions]
+    () =>
+      group.collapsed
+        ? summarizeSidebarGroupActivity(
+            withSessionSendStates(group.sessions, (row) => row.sessionId, sendStates)
+          )
+        : null,
+    [group.collapsed, group.sessions, sendStates]
   );
   const toggleListLabel = whetherShowFullList
     ? t('sessions.showLess', 'Show less')
@@ -1202,7 +1222,7 @@ const SessionGroupSection = memo(function SessionGroupSection({
           data-sidebar-group-key={group.key}
           className={cn(
             'relative flex w-full select-none items-center rounded-md px-2 text-left',
-            isGroupLabel ? 'h-[26px] gap-1.5' : 'h-7 gap-1',
+            isGroupLabel ? 'h-[26px] gap-1.5' : cn('h-7', isMobile ? 'gap-1' : 'gap-0.5'),
             'border border-transparent',
             'min-w-0 flex-1 transition-colors',
             headerTypographyClass,

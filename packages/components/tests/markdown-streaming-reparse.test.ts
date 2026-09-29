@@ -3,7 +3,9 @@
 import { act, createElement, type ComponentProps } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { createStore, Provider } from 'jotai';
 
+import { inlineMathEnabledAtom } from '../src/atoms/settings';
 import { MarkdownRenderer } from '../src/components/ai-gui/markdown-renderer';
 
 vi.mock('react-i18next', () => ({
@@ -46,6 +48,20 @@ const TRIPLE_STAR_BOLD_ITALIC_AUTOLINK_MARKDOWN = '***https://example.com***(_br
 const ESCAPED_INTERNAL_DOUBLE_ASTERISK_MARKDOWN = '**https://example.com/\\*\\*path**(`code`)';
 const HTML_ENTITY_BOLD_AUTOLINK_MARKDOWN =
   '**https://example.com/?a=1&amp;b=2**(`fix/some-branch` -> `main`)';
+const INLINE_DISPLAY_MATH_CONTEXT_MARKDOWN = String.raw`The unrestricted identity is:
+
+\[
+F(x) = G(x)+O(1)
+\]
+
+An estimate may resemble\[
+F^{p(t)}(x)
+\le G^t(x)+O(1)
+\]
+
+Here \(p\) is a polynomial.`;
+const PARENTHESIS_INLINE_MATH_MARKDOWN = String.raw`The variable \(x\) is a parameter.`;
+const NORMALIZED_INLINE_MATH_MARKDOWN = 'The variable $$x$$ is a parameter.';
 
 const buildStreamingMarkdownChunks = (count: number): string[] =>
   Array.from({ length: count }, (_, index) => {
@@ -88,6 +104,7 @@ describe('MarkdownRenderer streaming rendering', () => {
     root = undefined;
     container?.remove();
     container = undefined;
+    localStorage.removeItem('lody-inline-math-enabled');
     vi.restoreAllMocks();
   });
 
@@ -101,6 +118,22 @@ describe('MarkdownRenderer streaming rendering', () => {
 
     await act(async () => {
       root?.render(createElement(MarkdownRenderer, { text, ...props }));
+    });
+  };
+
+  const renderMarkdownWithStore = async (
+    text: string,
+    store: ReturnType<typeof createStore>,
+    props: Partial<ComponentProps<typeof MarkdownRenderer>> = {}
+  ): Promise<void> => {
+    if (!root) {
+      throw new Error('Expected test root to be initialized');
+    }
+
+    await act(async () => {
+      root?.render(
+        createElement(Provider, { store }, createElement(MarkdownRenderer, { text, ...props }))
+      );
     });
   };
 
@@ -446,6 +479,144 @@ End of synthetic document.`,
     expect(container?.querySelector('.katex')).toBeNull();
     expect(container?.textContent).toContain('$E = mc^2$');
     expect(await waitForElement('[data-streamdown="mermaid-block"]')).not.toBeNull();
+  });
+
+  it('renders inline dollar and parenthesis math when the preference is enabled', async () => {
+    const store = createStore();
+    store.set(inlineMathEnabledAtom, true);
+    await renderMarkdownWithStore('Inline $E = mc^2$ and \\(t_i\\).', store);
+
+    expect(container?.querySelectorAll('.katex')).toHaveLength(2);
+    expect(container?.querySelectorAll('.katex-display')).toHaveLength(0);
+  });
+
+  it('renders parenthesis inline math through the streaming path when enabled', async () => {
+    const store = createStore();
+    store.set(inlineMathEnabledAtom, true);
+    await renderMarkdownWithStore(PARENTHESIS_INLINE_MATH_MARKDOWN, store, {
+      isStreaming: true,
+    });
+
+    await act(async () => {
+      await import('@lobehub/streamdown');
+    });
+    expect(container?.querySelectorAll('.katex')).toHaveLength(1);
+    expect(container?.querySelectorAll('.katex-display')).toHaveLength(0);
+  });
+
+  it('renders an already normalized inline pair when enabled', async () => {
+    const store = createStore();
+    store.set(inlineMathEnabledAtom, true);
+    await renderMarkdownWithStore(NORMALIZED_INLINE_MATH_MARKDOWN, store);
+
+    expect(container?.querySelectorAll('.katex')).toHaveLength(1);
+    expect(container?.querySelectorAll('.katex-display')).toHaveLength(0);
+  });
+
+  it('updates an existing renderer when the inline math preference changes', async () => {
+    const store = createStore();
+    await renderMarkdownWithStore(PARENTHESIS_INLINE_MATH_MARKDOWN, store);
+    expect(container?.querySelectorAll('.katex')).toHaveLength(0);
+    expect(container?.textContent).toContain('(x)');
+
+    await act(async () => {
+      store.set(inlineMathEnabledAtom, true);
+    });
+
+    expect(container?.querySelectorAll('.katex')).toHaveLength(1);
+    expect(container?.textContent).not.toContain('$$x$$');
+  });
+
+  it('reparses a mounted streaming renderer when inline math is enabled', async () => {
+    const store = createStore();
+    const text = PARENTHESIS_INLINE_MATH_MARKDOWN;
+    await renderMarkdownWithStore(text, store, { isStreaming: true });
+    expect(container?.querySelectorAll('.katex')).toHaveLength(0);
+
+    await act(async () => {
+      store.set(inlineMathEnabledAtom, true);
+    });
+
+    await act(async () => {
+      await import('@lobehub/streamdown');
+    });
+    expect(container?.querySelectorAll('.katex')).toHaveLength(1);
+    expect(container?.textContent).not.toContain('$$x$$');
+  });
+
+  it('renders later inline math after prose-positioned display delimiters', async () => {
+    const store = createStore();
+    await renderMarkdownWithStore(INLINE_DISPLAY_MATH_CONTEXT_MARKDOWN, store);
+
+    expect(container?.querySelectorAll('.katex-display')).toHaveLength(1);
+
+    await act(async () => {
+      store.set(inlineMathEnabledAtom, true);
+    });
+
+    expect(container?.querySelectorAll('.katex-display')).toHaveLength(1);
+    expect(container?.textContent).not.toContain('$$p$$');
+    expect(container?.querySelectorAll('.katex').length).toBeGreaterThan(1);
+  });
+
+  it('renders later inline math after prose-positioned display delimiters while streaming', async () => {
+    const store = createStore();
+    await renderMarkdownWithStore(INLINE_DISPLAY_MATH_CONTEXT_MARKDOWN, store, {
+      isStreaming: true,
+    });
+
+    await act(async () => {
+      await import('@lobehub/streamdown');
+    });
+    expect(container?.querySelectorAll('.katex-display')).toHaveLength(1);
+
+    await act(async () => {
+      store.set(inlineMathEnabledAtom, true);
+    });
+
+    expect(container?.querySelectorAll('.katex-display')).toHaveLength(1);
+    expect(container?.textContent).not.toContain('$$p$$');
+    expect(container?.querySelectorAll('.katex').length).toBeGreaterThan(1);
+  });
+
+  it('keeps code literal when inline math is enabled', async () => {
+    const store = createStore();
+    store.set(inlineMathEnabledAtom, true);
+    await renderMarkdownWithStore(
+      [
+        '`\\(inline_code\\)`',
+        '',
+        '```tex',
+        '\\[',
+        'fenced_code',
+        '\\]',
+        '```',
+        '',
+        '\\(x_i\\)',
+      ].join('\n'),
+      store
+    );
+
+    expect(container?.querySelectorAll('.katex')).toHaveLength(1);
+    expect(container?.querySelector('code')?.textContent).toBe('\\(inline_code\\)');
+    expect(container?.textContent).toContain('\\[fenced_code\\]');
+  });
+
+  it('keeps inline delimiters in links literal when enabled', async () => {
+    const store = createStore();
+    store.set(inlineMathEnabledAtom, true);
+    await renderMarkdownWithStore('[\\(x_i\\)](https://example.com)', store);
+
+    expect(container?.querySelectorAll('.katex')).toHaveLength(0);
+    expect(container?.querySelector('a')?.textContent).toContain('(x_i)');
+  });
+
+  it('renders inline delimiters in ordinary square-bracket text when enabled', async () => {
+    const store = createStore();
+    store.set(inlineMathEnabledAtom, true);
+    await renderMarkdownWithStore('[\\(x_i\\)]', store);
+
+    expect(container?.querySelectorAll('.katex')).toHaveLength(1);
   });
 
   it('keeps parenthesis LaTeX literal while rendering bracket display LaTeX', async () => {

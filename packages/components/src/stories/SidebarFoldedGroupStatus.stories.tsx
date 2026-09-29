@@ -12,7 +12,10 @@ import type {
 import { Tooltip } from '@lody/ui/tooltip';
 import { LocalProjectItem } from '@/components/loro-app-sidebar';
 import { SessionList, type SessionListRow } from '@/components/session-list';
-import { SidebarSectionHeader } from '@/components/sidebar-row-shared';
+import {
+  EMPTY_SIDEBAR_GROUP_ACTIVITY,
+  SidebarSectionHeader,
+} from '@/components/sidebar-row-shared';
 
 /**
  * What a folded sidebar group says about the Sessions it hides: one mark in the
@@ -124,7 +127,7 @@ const CHAT_SESSIONS: SessionListRow[] = [
 ];
 
 /** A teammate's machine that starts folded, with one Session running on it. */
-const TEAMMATE_ACTIVITY = { waiting: 0, working: 1, unread: 0 };
+const TEAMMATE_ACTIVITY = { ...EMPTY_SIDEBAR_GROUP_ACTIVITY, working: 1 };
 
 function FoldedGroupsSidebar({ folded, heading }: { folded: boolean; heading?: string }) {
   const [collapsedProjects, setCollapsedProjects] = useState<Record<string, boolean>>(() =>

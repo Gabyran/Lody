@@ -1,4 +1,5 @@
 import type { RateLimit } from 'acp-extension-core';
+import { CodexAuthProfileSchema, assertManagedCodexProfileConfig } from './codex-auth-profile';
 import {
   getAcpCapabilityCacheKey,
   hasBuiltinRuntimeOverrideValues,
@@ -12,6 +13,7 @@ import {
   type CliType,
   type ManagedBuiltinAgentType,
 } from './ai';
+import { isAcpModelCapabilities, type AcpModelCapabilities } from './acp-model-capabilities';
 import type { AgentConfigId, MachineId, SessionId, WorkspaceId } from './ids';
 import type { LocalProjectWorktreeCleanupItem, LocalProjectWorktreeCleanupResult } from './message';
 import type {
@@ -175,6 +177,8 @@ export type MachineFlockProviderSetupKey = ['providerSetup', AgentConfigId];
 export type MachineFlockProviderSetupCancellationKey = ['providerSetupCancellation', AgentConfigId];
 export type MachineFlockAgentConfigIndexKey = ['agentConfigIndex', AgentConfigId];
 export type MachineFlockAcpCapabilityKey = ['acpCapability', AgentConfigId];
+/** Per-model controls an agent config's adapter declared (`AcpModelCapabilities`). */
+export type MachineFlockAcpModelCapabilityKey = ['acpModelCapability', AgentConfigId];
 export type MachineFlockRateLimitKey = ['rateLimit', CliType, string];
 export type MachineFlockBuiltinAgentOptOutKey = ['builtinAgentOptOut', ManagedBuiltinAgentType];
 /** @deprecated Compatibility read/cleanup only. New writers must not store launch config per session. */
@@ -191,6 +195,7 @@ export type MachineFlockKey =
   | MachineFlockProviderSetupCancellationKey
   | MachineFlockAgentConfigIndexKey
   | MachineFlockAcpCapabilityKey
+  | MachineFlockAcpModelCapabilityKey
   | MachineFlockRateLimitKey
   | MachineFlockBuiltinAgentOptOutKey
   | MachineFlockSessionLaunchConfigKey;
@@ -232,6 +237,11 @@ export type ParsedMachineFlockKey =
   | {
       kind: 'acpCapability';
       key: MachineFlockAcpCapabilityKey;
+      configId: AgentConfigId;
+    }
+  | {
+      kind: 'acpModelCapability';
+      key: MachineFlockAcpModelCapabilityKey;
       configId: AgentConfigId;
     }
   | {
@@ -287,6 +297,10 @@ export const machineFlockKeys = {
   ],
   acpCapability: (configId: AgentConfigId): MachineFlockAcpCapabilityKey => [
     'acpCapability',
+    configId,
+  ],
+  acpModelCapability: (configId: AgentConfigId): MachineFlockAcpModelCapabilityKey => [
+    'acpModelCapability',
     configId,
   ],
   rateLimit: (cliType: CliType, limitId: string): MachineFlockRateLimitKey => [
@@ -399,6 +413,15 @@ export const parseMachineFlockKey = (
     };
   }
 
+  if (key.length === 2 && key[0] === 'acpModelCapability' && isNonEmptyString(key[1])) {
+    const configId = key[1] as AgentConfigId;
+    return {
+      kind: 'acpModelCapability',
+      key: machineFlockKeys.acpModelCapability(configId),
+      configId,
+    };
+  }
+
   if (key.length === 2 && key[0] === 'acpCapability' && isNonEmptyString(key[1])) {
     const configId = key[1] as AgentConfigId;
     return {
@@ -459,6 +482,7 @@ export type MachineFlockRow =
     }
   | { key: MachineFlockAgentConfigIndexKey; value: AgentConfigListSummary }
   | { key: MachineFlockAcpCapabilityKey; value: AcpCapabilityCacheEntry }
+  | { key: MachineFlockAcpModelCapabilityKey; value: AcpModelCapabilities }
   | { key: MachineFlockRateLimitKey; value: RateLimit }
   | { key: MachineFlockBuiltinAgentOptOutKey; value: BuiltinAgentOptOut }
   | { key: MachineFlockSessionLaunchConfigKey; value: SessionLaunchConfig };
@@ -501,6 +525,7 @@ export type MachineFlockRowFamily =
   | 'providerSetupCancellation'
   | 'agentConfigIndex'
   | 'acpCapability'
+  | 'acpModelCapability'
   | 'rateLimit'
   | 'builtinAgentOptOut'
   | 'sessionLaunchConfig';
@@ -516,6 +541,7 @@ const MACHINE_FLOCK_ROW_FAMILY_PREFIXES: Record<MachineFlockRowFamily, readonly 
   providerSetupCancellation: ['providerSetupCancellation'],
   agentConfigIndex: ['agentConfigIndex'],
   acpCapability: ['acpCapability'],
+  acpModelCapability: ['acpModelCapability'],
   rateLimit: ['rateLimit'],
   builtinAgentOptOut: ['builtinAgentOptOut'],
   sessionLaunchConfig: ['sessionLaunchConfig'],
@@ -585,6 +611,11 @@ const isMachineFlockAcpCapabilityRow = (
 ): row is Extract<MachineFlockRow, { key: MachineFlockAcpCapabilityKey }> =>
   row.key[0] === 'acpCapability';
 
+const isMachineFlockAcpModelCapabilityRow = (
+  row: MachineFlockRow
+): row is Extract<MachineFlockRow, { key: MachineFlockAcpModelCapabilityKey }> =>
+  row.key[0] === 'acpModelCapability';
+
 const isMachineFlockAgentConfigRow = (
   row: MachineFlockRow
 ): row is Extract<MachineFlockRow, { key: MachineFlockAgentConfigKey }> =>
@@ -651,15 +682,61 @@ export function getMachineFlockDeleteLocalProjectIds(
   );
 }
 
+/**
+ * Row families a capability reader asks for, so per-model controls are never
+ * dropped by a reader that forgot the second family.
+ */
+export const ACP_CAPABILITY_ROW_FAMILIES = ['acpCapability', 'acpModelCapability'] as const;
+
+/**
+ * Merged entries keyed by the stored capability row and then by the stored
+ * declaration, so an unchanged pair keeps one object identity across the
+ * incremental row updates the renderer re-merges on.
+ */
+const mergedAcpCapabilityEntries = new WeakMap<
+  AcpCapabilityCacheEntry,
+  WeakMap<AcpModelCapabilities, AcpCapabilityCacheEntry>
+>();
+
+const withDeclaredModelControls = (
+  entry: AcpCapabilityCacheEntry,
+  declaration: AcpModelCapabilities
+): AcpCapabilityCacheEntry => {
+  let byDeclaration = mergedAcpCapabilityEntries.get(entry);
+  if (!byDeclaration) {
+    byDeclaration = new WeakMap();
+    mergedAcpCapabilityEntries.set(entry, byDeclaration);
+  }
+  let merged = byDeclaration.get(declaration);
+  if (!merged) {
+    merged = { ...entry, declaredModelControls: declaration.models };
+    byDeclaration.set(declaration, merged);
+  }
+  return merged;
+};
+
+/**
+ * Capability entries by cache key. When the rows include the config's
+ * `acpModelCapability` row for the same source version, the entry carries its
+ * per-model controls as `declaredModelControls`, so every reader resolves effort
+ * and Fast for the selected model rather than the probed one.
+ */
 export function getMachineFlockAcpCapabilities(
   rows: MachineFlockRowMap
 ): Record<string, AcpCapabilityCacheEntry> {
   const capabilities: Record<string, AcpCapabilityCacheEntry> = {};
   for (const row of Object.values(rows)) {
-    if (!isMachineFlockAcpCapabilityRow(row)) {
-      continue;
+    if (isMachineFlockAcpCapabilityRow(row)) {
+      capabilities[getAcpCapabilityCacheKey(row.key[1])] = row.value;
     }
-    capabilities[getAcpCapabilityCacheKey(row.key[1])] = row.value;
+  }
+  for (const row of Object.values(rows)) {
+    if (!isMachineFlockAcpModelCapabilityRow(row)) continue;
+    const key = getAcpCapabilityCacheKey(row.key[1]);
+    const entry = capabilities[key];
+    if (entry && entry.sourceVersion === row.value.sourceVersion) {
+      capabilities[key] = withDeclaredModelControls(entry, row.value);
+    }
   }
   return capabilities;
 }
@@ -910,6 +987,7 @@ export function buildSessionLaunchConfig(
     return undefined;
   }
   const config: SessionLaunchConfig = {};
+  if (input.codexAuth) config.codexAuth = CodexAuthProfileSchema.parse(input.codexAuth);
   if (input.customAcp) {
     config.customAcp = input.customAcp;
   }
@@ -933,6 +1011,7 @@ export function mergeSessionLaunchConfig(
   fallback: SessionLaunchConfig | undefined
 ): SessionLaunchConfig | undefined {
   return buildSessionLaunchConfig({
+    codexAuth: primary?.codexAuth ?? fallback?.codexAuth,
     customAcp: primary?.customAcp ?? fallback?.customAcp,
     runtimeOverrides: primary?.runtimeOverrides ?? fallback?.runtimeOverrides,
     env: primary?.env ?? fallback?.env,
@@ -962,7 +1041,16 @@ export function writeMachineFlockRowToFlock(
   if (machineFlockRowsEqual(previous, normalized)) {
     return false;
   }
-  flock.set(normalized.key, normalized.value, nowMs);
+  const persisted =
+    normalized.key[0] === 'agentConfig'
+      ? encodeCodexProfileConfig(normalized.value as AgentConfigMeta)
+      : normalized.key[0] === 'providerSetup'
+        ? {
+            ...(normalized.value as ProviderSetupTask),
+            config: encodeCodexProfileConfig((normalized.value as ProviderSetupTask).config),
+          }
+        : normalized.value;
+  flock.set(normalized.key, persisted, nowMs);
   flock.commit();
   return true;
 }
@@ -1076,6 +1164,8 @@ export function parseMachineFlockRow(
     }
     case 'acpCapability':
       return isAcpCapabilityCacheEntry(value) ? { key: parsedKey.key, value } : undefined;
+    case 'acpModelCapability':
+      return isAcpModelCapabilities(value) ? { key: parsedKey.key, value } : undefined;
     case 'rateLimit':
       return isRecord(value) ? { key: parsedKey.key, value: value as RateLimit } : undefined;
     case 'builtinAgentOptOut': {
@@ -1161,6 +1251,11 @@ const normalizeSessionLaunchConfig = (value: unknown): SessionLaunchConfig | und
     return undefined;
   }
   const config: SessionLaunchConfig = {};
+  if (!isMissing(value.codexAuth)) {
+    const profile = CodexAuthProfileSchema.safeParse(value.codexAuth);
+    if (!profile.success) return undefined;
+    config.codexAuth = profile.data;
+  }
   if (!isMissing(value.customAcp)) {
     if (!isCustomAcpLaunchSpec(value.customAcp)) {
       return undefined;
@@ -1430,6 +1525,22 @@ const normalizeAgentConfigMeta = (value: unknown): AgentConfigMeta | undefined =
     config.brandId = value.brandId as AgentConfigMeta['brandId'];
   }
 
+  if (!isMissing(value.codexAuth)) {
+    const profile = CodexAuthProfileSchema.safeParse(value.codexAuth);
+    if (!profile.success) return undefined;
+    config.codexAuth = profile.data;
+    try {
+      if (
+        config.runtimeOverrides?.codexPath === CODEX_PROFILE_LEGACY_LAUNCH_GUARD &&
+        Object.keys(config.runtimeOverrides).length === 1
+      )
+        delete config.runtimeOverrides;
+      assertManagedCodexProfileConfig(config);
+    } catch {
+      return undefined;
+    }
+  }
+
   return config;
 };
 
@@ -1560,3 +1671,4 @@ const isAcpCapabilityCacheEntry = (value: unknown): value is AcpCapabilityCacheE
   Array.isArray(value.modes) &&
   Array.isArray(value.models) &&
   typeof value.fetchedAt === 'number';
+import { encodeCodexProfileConfig, CODEX_PROFILE_LEGACY_LAUNCH_GUARD } from './codex-auth-profile';

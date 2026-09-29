@@ -1,3 +1,4 @@
+import type { AcpModelControls } from './acp-model-capabilities';
 import {
   AvailableCommand,
   PermissionOption,
@@ -9,6 +10,7 @@ import type { ToolCallContent as AcpToolCallContent, SessionMode } from '@agentc
 import type { PermissionOutcome } from './message';
 import type { SessionGoalAction } from './goal';
 import { createPlanModeConfigOption } from 'acp-extension-core';
+import type { LodySubagentSnapshot, LodySubagentProgress } from 'acp-extension-core';
 import type { AgentConfigId, AgentRoleId, McpServerId, SessionId } from './ids';
 import type { MessageTextSpan } from './message-text-spans';
 import type { MinimalVisualAnnotationAnchor } from './visual-annotation-types';
@@ -397,6 +399,12 @@ export type AcpCapabilityCacheEntry = {
    * `configOptions` is a snapshot that only describes `currentValue`'s model.
    */
   modelReasoningEfforts?: Record<string, string[]>;
+  /**
+   * Per-model controls from the config's `acpModelCapability` row, attached by
+   * `getMachineFlockAcpCapabilities` when its source version matches. Never
+   * stored in the capability row itself; see `acp-model-capabilities.ts`.
+   */
+  declaredModelControls?: Record<string, AcpModelControls>;
   /** Available slash commands advertised by the agent. */
   availableCommands?: AcpCommandSummary[];
   /** True only when the runtime initialize response advertised `sessionCapabilities.fork`. */
@@ -1676,6 +1684,13 @@ export type SubagentTaskUsage = {
  * event into the transcript.
  */
 export type SubagentTaskPayload = {
+  /** Normalized run transcript. Absent on legacy provider task rows. */
+  run?: {
+    sessionId: string;
+    snapshot: LodySubagentSnapshot;
+    progress?: LodySubagentProgress;
+    items: SubagentRunItem[];
+  };
   taskId: string;
   status: SubagentTaskStatus;
   /** Provider-neutral task category published through `_meta.lody.task`. */
@@ -1705,6 +1720,11 @@ export type SubagentTaskPayload = {
   skipTranscript?: boolean;
   hasOutputFile?: boolean;
 };
+
+export type SubagentRunItem = Extract<
+  MessageContent,
+  { type: 'text' | 'thought' | 'tool_call' | 'plan' }
+> & { nativeTurnId?: string; messageId?: string };
 
 export type MessageContent =
   | {
