@@ -286,6 +286,7 @@ export type GenerateTitleOptions = {
   taskPrompt: string;
   logger: Logger;
   env?: Record<string, string>;
+  codexProfile?: import('./codex-profile-runtime').CodexProfileExecution;
   titleConfig?: TitleGenerationConfig;
 };
 
@@ -304,6 +305,7 @@ export const generateTitleIsolated = async (
       `[title-generator] Starting isolated title ACP agent (cliType=${options.cliType} agentType=${options.agentType})`
     );
     const { agentProcess, client, acpSessionId, sessionResponse } = await startLocalAcpAgent({
+      codexProfile: options.codexProfile,
       cliType: options.cliType,
       agentType: options.agentType,
       customAcp: options.customAcp,
@@ -355,6 +357,16 @@ export const generateTitleIsolated = async (
           });
         }
       }
+
+      // Title material is only what the agent streams in answer to this prompt;
+      // everything delivered before this line is discarded. pi-acp emits its startup
+      // banner (or, with quietStartup, its update notice) as an untyped
+      // agent_message_chunk right after session/new, outside any turn, and without this
+      // reset it filled sanitizeTitle's 80-character window. What puts that chunk ahead
+      // of the reset is the config round trip above: applying an option is a real
+      // request to the agent. A titleConfig whose every value the agent cannot apply
+      // skips that request, and is not covered.
+      collectedText = '';
 
       options.logger.debug(`[title-generator] Sending title prompt (acpSessionId=${acpSessionId})`);
       const response = await client?.prompt(acpSessionId, prompt);

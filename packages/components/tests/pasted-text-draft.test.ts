@@ -4,12 +4,16 @@ import { applyTextRewrites } from '@lody/shared';
 import {
   arePastedTextDraftsEqual,
   buildPastedTextRewrites,
+  createPastedTextFile,
   getPastedTextCharacterCount,
   getPastedTextDraftsAfterInsertion,
   getPastedTextLineCount,
   getPastedTextClipboardTextForSelection,
   insertPastedTextDraft,
   isLargePastedText,
+  isPastedTextTooLarge,
+  getPastedTextByteSize,
+  MAX_PASTED_TEXT_BYTE_SIZE,
   normalizePastedTextDraft,
   sanitizePastedTextDrafts,
   shouldCapturePastedTextDraft,
@@ -29,6 +33,18 @@ describe('shouldCapturePastedTextDraft', () => {
         Array.from({ length: 20 }, (_, index) => `line ${index}`).join('\n')
       )
     ).toBe(false);
+  });
+});
+
+describe('createPastedTextFile', () => {
+  it('keeps the clipboard bytes in a plain-text attachment', async () => {
+    const text = '前缀\r\nlog line\n';
+    const file = createPastedTextFile(text);
+
+    expect(file.name).toBe('pasted-text.txt');
+    expect(file.type).toBe('text/plain');
+    expect(file.size).toBe(new TextEncoder().encode(text).length);
+    await expect(file.text()).resolves.toBe(text);
   });
 });
 
@@ -340,6 +356,32 @@ describe('isLargePastedText', () => {
     expect(
       isLargePastedText(Array.from({ length: 20 }, (_, index) => `line ${index}`).join('\n'))
     ).toBe(false);
+  });
+});
+
+describe('isPastedTextTooLarge', () => {
+  it('rejects a paste whose stored text exceeds the byte ceiling', () => {
+    expect(isPastedTextTooLarge('a'.repeat(MAX_PASTED_TEXT_BYTE_SIZE + 1))).toBe(true);
+  });
+
+  it('accepts a paste exactly at the byte ceiling', () => {
+    expect(isPastedTextTooLarge('a'.repeat(MAX_PASTED_TEXT_BYTE_SIZE))).toBe(false);
+  });
+
+  it('measures UTF-8 bytes, not characters', () => {
+    // Each CJK character is three UTF-8 bytes, so a third as many characters
+    // is enough to cross a ceiling that a character count would let through.
+    const text = '\u65e5'.repeat(Math.ceil(MAX_PASTED_TEXT_BYTE_SIZE / 3));
+    expect(text.length).toBeLessThan(MAX_PASTED_TEXT_BYTE_SIZE);
+    expect(isPastedTextTooLarge(text)).toBe(true);
+  });
+
+  it('measures the normalized, trimmed text the draft would store', () => {
+    const padding = ' '.repeat(1024);
+    const body = 'a'.repeat(MAX_PASTED_TEXT_BYTE_SIZE);
+    expect(getPastedTextByteSize(`${padding}${body}${padding}`)).toBe(MAX_PASTED_TEXT_BYTE_SIZE);
+    expect(isPastedTextTooLarge(`${padding}${body}${padding}`)).toBe(false);
+    expect(getPastedTextByteSize('a\r\nb')).toBe(3);
   });
 });
 

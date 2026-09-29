@@ -1,44 +1,49 @@
+import { useSelectionStableValue } from '@/hooks/use-conversation-text-selection';
 import {
   type ComponentPropsWithoutRef,
+  type ComponentType,
   type CSSProperties,
   type ReactNode,
+  createContext,
+  lazy,
   useState,
+  useContext,
   useCallback,
+  useEffect,
   useMemo,
   useLayoutEffect,
   useRef,
   memo,
+  Suspense,
 } from 'react';
-import { createMathPlugin } from '@streamdown/math';
+import { createPortal } from 'react-dom';
+import { useAtomValue } from 'jotai';
+import type { StreamdownProps } from '@lobehub/streamdown';
+import Markdown, {
+  defaultUrlTransform,
+  type Components,
+  type ExtraProps,
+  type UrlTransform,
+} from 'react-markdown';
+import rehypeKatex from 'rehype-katex';
 import rehypeRaw from 'rehype-raw';
 import rehypeSanitize from 'rehype-sanitize';
 import remarkGfm from 'remark-gfm';
-import {
-  Streamdown,
-  defaultUrlTransform,
-  type CodeHighlighterPlugin,
-  type Components,
-  type ControlsConfig,
-  type HighlightOptions,
-  type MermaidOptions,
-  type PluginConfig,
-  type StreamdownTranslations,
-  type ThemeInput,
-  type UrlTransform,
-} from 'streamdown';
-import type { BundledLanguage } from 'shiki';
+import remarkMath from 'remark-math';
 import { Check, Copy } from 'lucide-react';
-import { useAtomValue } from 'jotai';
 import { useTranslation } from 'react-i18next';
-import { parseTaskImageMarkdownUrl } from '@lody/shared';
-import { DEFAULT_CONVERSATION_FONT_SIZE, tasksFeatureEnabledAtom } from '@/atoms/settings';
-import { FileIcon } from '@/components/icons/file-icons';
+import { DEFAULT_CONVERSATION_FONT_SIZE, inlineMathEnabledAtom } from '@/atoms/settings';
+import { MonochromeFileIcon } from '@/components/icons/file-icons';
+import { writeTextToClipboard } from '@/lib/clipboard';
 import {
   isMarkdownAgentFileHref,
   parseMarkdownAgentFileHref,
 } from '@/lib/markdown-agent-file-link';
 import { matchWholeFilePath, splitTextIntoFilePathSegments } from '@/lib/linkify-file-paths';
-import { remarkSingleDollarTextMath } from '@/lib/markdown-single-dollar-math';
+import {
+  normalizeTexMathDelimiters,
+  remarkSingleDollarTextMath,
+} from '@/lib/markdown-single-dollar-math';
 import { cn } from '@/lib/utils';
 import { usePrLinkInterceptor } from './pr-link-context';
 import {
@@ -48,16 +53,38 @@ import {
   useSessionSearchBlock,
 } from '@/components/sessions/session-search-context';
 import { findSessionSearchOccurrences } from '@/lib/session-chat-search';
-import { useResolvedTheme } from '../../theme-provider';
+import { useResolvedTheme, type ResolvedTheme } from '../../theme-provider';
 import type { ConversationFontSize } from '@/atoms/settings';
-import { useTaskImageUrl } from '@/hooks/use-task-image';
-import { createMarkdownMermaidConfig, createMarkdownMermaidPlugin } from './markdown-mermaid';
+import { MarkdownFencedCodeBlock } from './markdown-code-block';
+import { MarkdownDiffBlock } from './markdown-diff-block';
+import { MarkdownMermaidBlock } from './markdown-mermaid-block';
+import {
+  GitHubReferenceChip,
+  isGitHubReferenceLabel,
+  markdownLinkText,
+  parseGitHubReferenceUrl,
+} from './github-reference-link';
+import { MarkdownTable } from './markdown-table';
+import { MermaidDiagramViewer } from './mermaid-diagram-viewer';
+import { MermaidFullscreenButton, useMermaidDiagramCanvas } from './use-mermaid-diagram-canvas';
+import { SessionReadonlyContext } from './session-readonly-context';
+import type { MarkdownAgentFileLinkMenuItem } from '@/hooks/use-session-file-actions';
+import { ContextMenu } from '@/ui/armed-overlays';
+import { MarkdownFileImage, MarkdownFileResourcesContext } from './markdown-file-image';
+import { resolveMarkdownImagePath } from '@/lib/session-file-open-target';
 
 export { createMarkdownMermaidConfig } from './markdown-mermaid';
 
+/**
+ * Conversation surfaces provide this capability at their boundary. Rendering
+ * Markdown elsewhere (shared pages, file previews) deliberately has no native
+ * file-actions menu.
+ */
+export const AgentFileLinkContextMenuItemsContext = createContext<
+  ((href: string) => readonly MarkdownAgentFileLinkMenuItem[]) | undefined
+>(undefined);
+
 type MarkdownCodeProps = ComponentPropsWithoutRef<'code'> & {
-  inline?: boolean;
-  className?: string;
   node?: unknown;
 };
 
@@ -79,6 +106,7 @@ type MdastNode = {
   children?: MdastNode[];
   url?: string;
   title?: string | null;
+  data?: { hProperties?: Record<string, unknown> };
   position?: {
     start?: { offset?: number };
     end?: { offset?: number };
@@ -126,14 +154,11 @@ const transformMdastChildren = (tree: unknown, transform: MdastChildTransformer)
   walk(root);
 };
 
-// `!` prefixes are load-bearing: Streamdown wraps its output in a div with
-// `space-y-4` (which our `className="space-y-0"` swap below replaces). Either
-// way that compiles to `.space-y-N > :not([hidden]) ~ :not([hidden])` which
-// has specificity (0,5,0) per Chromium DevTools and wins against plain
-// `[&_h1]:mt-5` arbitrary variants — zeroing margin-top AND margin-bottom on
-// every block. `!` flips on `!important` so per-element margins survive.
 const MARKDOWN_BASE_CLASSNAME =
-  'markdown-renderer max-w-none text-foreground leading-[1.75] ' +
+  // Body text uses the contrast-capped reading color; headings and bold take
+  // the one step above it, so hierarchy reads by brightness (`--foreground-strong`).
+  'markdown-renderer max-w-none text-reading leading-[1.75] ' +
+  '[&_h1]:text-foreground-strong [&_h2]:text-foreground-strong [&_h3]:text-foreground-strong [&_h4]:text-foreground-strong [&_strong]:text-foreground-strong ' +
   '[&_p]:!mt-0 [&_p]:!mb-3 [&_p:has(+ul)]:!mb-2 [&_p:last-child]:!mb-0 [&_p:first-child]:!mt-0 ' +
   '[&_ul]:!my-2 [&_ul]:pl-3 [&_ul]:list-disc ' +
   '[&_ul:not(.contains-task-list)]:pl-0 [&_ul:not(.contains-task-list)]:list-none ' +
@@ -149,16 +174,13 @@ const MARKDOWN_BASE_CLASSNAME =
   // wide font. The 18px marker lane is intentionally narrower than some
   // glyph pairs; wrapping here drops the period beside the following item.
   "[&_ol>li]:before:absolute [&_ol>li]:before:left-0 [&_ol>li]:before:w-[18px] [&_ol>li]:before:whitespace-nowrap [&_ol>li]:before:text-right [&_ol>li]:before:content-[counter(list-item)'.'] " +
-  // Streamdown sets `[&>p]:inline` on every <li>, collapsing loose lists into
-  // single inline runs — so between-item spacing must come from the <li> box
-  // itself, not the inner <p>. `mt-2` on non-first items keeps list edges
-  // flush with the `ul`/`ol` margins.
-  '[&_li]:!my-0 [&_li]:!py-0 [&_li:not(:first-child)]:!mt-2 [&_ul>li:not(:first-child)]:!mt-1 [&_ol>li:not(:first-child)]:!mt-1 [&_li>ul]:!my-1 [&_li>ol]:!my-1 ' +
-  // Streamdown's default blockquote class adds `italic`; override it so quoted
-  // body text stays upright (explicit `*emphasis*` inside still renders italic
-  // via the descendant <em>'s own font-style). The `[&_blockquote]` descendant
-  // selector outranks Streamdown's plain `.italic` utility, so no `!` is needed.
-  '[&_blockquote]:!my-3 [&_blockquote]:border-l-2 [&_blockquote]:border-border [&_blockquote]:pl-3 [&_blockquote]:not-italic [&_blockquote]:text-muted-foreground ' +
+  // Loose-list paragraphs render inline so a loose list keeps the tight
+  // layout — between-item spacing must come from the <li> box itself, not the
+  // inner <p>. `mt-1` on non-first items keeps list edges flush with the
+  // `ul`/`ol` margins.
+  '[&_li>p]:inline [&_li]:!my-0 [&_li]:!py-0 [&_li:not(:first-child)]:!mt-1 [&_ul>li:not(:first-child)]:!mt-1 [&_ol>li:not(:first-child)]:!mt-1 [&_li>ul]:!my-1 [&_li>ol]:!my-1 ' +
+  '[&_blockquote]:!my-3 [&_blockquote]:border-l-2 [&_blockquote]:border-border [&_blockquote]:pl-3 [&_blockquote]:text-muted-foreground ' +
+  '[&_strong]:font-semibold ' +
   '[&_hr]:!my-4 [&_hr]:border-0 [&_hr]:border-t [&_hr]:border-border ' +
   '[&_h1]:!mt-6 [&_h1]:!mb-2 [&_h1]:font-semibold [&_h1]:tracking-tight ' +
   '[&_h2]:!mt-5 [&_h2]:!mb-2 [&_h2]:font-semibold [&_h2]:tracking-tight ' +
@@ -167,17 +189,34 @@ const MARKDOWN_BASE_CLASSNAME =
   '[&_h5]:!mt-3 [&_h5]:!mb-1.5 [&_h5]:font-semibold [&_h5]:uppercase [&_h5]:tracking-wide ' +
   '[&_h6]:!mt-3 [&_h6]:!mb-1.5 [&_h6]:font-semibold [&_h6]:uppercase [&_h6]:tracking-wide [&_h6]:text-muted-foreground ' +
   '[&_:is(h1,h2,h3,h4,h5,h6):first-child]:!mt-0 ' +
-  '[&_a]:underline [&_a]:underline-offset-2 [&_a]:decoration-muted-foreground/40 [&_a:hover]:decoration-muted-foreground ' +
+  // Color marks a link; the underline appears on hover only (a standing one
+  // made dense CJK prose read as crowded).
+  '[&_a]:no-underline [&_a]:underline-offset-2 [&_a]:decoration-current/60 [&_a:hover]:underline ' +
   '[&_.katex-display]:!my-5 [&_.katex-display]:overflow-x-auto [&_.katex-display]:overflow-y-hidden [&_.katex-display]:py-1 ' +
   '[&_[data-streamdown="mermaid-block"]]:!my-5 ' +
+  '[&_[data-streamdown="mermaid"]]:overflow-hidden ' +
   '[&_[data-streamdown="code-block"]]:!my-4 ' +
   '[&_table]:!my-0 [&_table]:w-full [&_table]:border-collapse [&_table]:text-[0.92em] [&_table]:leading-[1.5] ' +
-  '[&_th]:border-b [&_th]:border-border/70 [&_th]:bg-muted/45 [&_th]:px-2.5 [&_th]:py-1.5 [&_th]:text-left [&_th]:font-semibold [&_th]:text-foreground/80 ' +
-  '[&_td]:border-b [&_td]:border-border/45 [&_td]:px-2.5 [&_td]:py-1.5 [&_td]:align-top ' +
-  '[&_tbody_tr:nth-child(even)]:bg-muted/15 [&_tbody_tr:last-child_td]:border-b-0 ' +
-  '[&_:is(th,td):first-child]:w-px [&_:is(th,td):first-child]:whitespace-nowrap ' +
-  '[&_tbody_td:first-child]:font-medium [&_tbody_td:first-child]:text-foreground/75 ' +
-  '[&_table_code]:!bg-muted/55 [&_table_code]:!ring-0';
+  // Lines are foreground tints (the theme border melts into the canvas). No
+  // column or row is assumed to be a label: cells share one color and weight;
+  // only the header row, which Markdown always has, gets a faint band.
+  '[&_thead]:bg-muted/80 [&_:is(th,td)]:text-sm [&_th]:whitespace-nowrap ' +
+  '[&_th]:border-b [&_th]:border-foreground/[0.14] [&_th]:bg-foreground/[0.035] [&_th]:px-2.5 [&_th]:py-1.5 [&_th]:text-left [&_th]:font-normal [&_th]:align-top ' +
+  '[&_td]:border-b [&_td]:border-foreground/[0.08] [&_td]:px-2.5 [&_td]:py-1.5 [&_td]:align-top ' +
+  '[&_:is(th,td)+:is(th,td)]:border-l [&_:is(th,td)+:is(th,td)]:border-l-foreground/[0.08] ' +
+  '[&_tbody_tr:last-child_td]:border-b-0 ' +
+  '[&_table_code]:!bg-foreground/[0.08] [&_table_code]:!ring-0 dark:[&_table_code]:!bg-foreground/[0.14]';
+
+const CJK_HAN_PATTERN = /\p{Script=Han}/u;
+
+function markdownNodeText(node: ReactNode): string {
+  if (typeof node === 'string' || typeof node === 'number') return String(node);
+  if (Array.isArray(node)) return node.map(markdownNodeText).join('');
+  if (node && typeof node === 'object' && 'props' in node) {
+    return markdownNodeText((node as { props?: { children?: ReactNode } }).props?.children);
+  }
+  return '';
+}
 
 const MARKDOWN_SIZE_CLASSNAME =
   '[&_h1]:text-[length:var(--markdown-h1-font-size)] ' +
@@ -251,12 +290,21 @@ function MarkdownExternalLink({
 
 const AUTOLINK_PATTERN = /(https?:\/\/[^\s<]+|www\.[^\s<]+)/giu;
 
+// Both autolinkers end a bare URL at whitespace, but CJK prose is written
+// without one, so `见 https://example.com/a。然后` swallows the rest of the
+// sentence into the destination. Non-ASCII punctuation and separators
+// (，。、）「」…　) never appear unencoded in a URL, so end the URL there.
+// Non-ASCII letters still may (`/wiki/中文`), and symbols are left alone
+// because they are not Markdown punctuation for strong-closer purposes.
+const NON_ASCII_URL_BOUNDARY = /(?!\p{ASCII})[\p{P}\p{Z}]/u;
+
 const countChar = (value: string, char: string) =>
   Array.from(value).reduce((count, current) => count + (current === char ? 1 : 0), 0);
 
 const splitAutolinkTrailing = (value: string) => {
-  let url = value;
-  let trailing = '';
+  const boundary = value.search(NON_ASCII_URL_BOUNDARY);
+  let url = boundary >= 0 ? value.slice(0, boundary) : value;
+  let trailing = boundary >= 0 ? value.slice(boundary) : '';
 
   while (url.length > 0) {
     const last = url[url.length - 1];
@@ -266,7 +314,7 @@ const splitAutolinkTrailing = (value: string) => {
     if (last === ']' && countChar(url, ']') <= countChar(url, '[')) break;
     if (last === '}' && countChar(url, '}') <= countChar(url, '{')) break;
 
-    if (!/[\]})"'.,:;!?，。！？；：”’»›]+/u.test(last)) break;
+    if (!/[\]})"'.,:;!?]/u.test(last)) break;
 
     trailing = `${last}${trailing}`;
     url = url.slice(0, -1);
@@ -394,6 +442,20 @@ const isLiteralGfmAutolink = (source: string, link: MdastNode, linkText: MdastNo
   );
 };
 
+// The destination is the normalized form of the link text, so a tail cut from
+// the text may appear percent-encoded in the destination. Refuse the repair
+// when neither form matches rather than guess at a truncation point.
+const truncateAutolinkUrl = (url: string, tail: string) => {
+  if (url.endsWith(tail)) return url.slice(0, -tail.length);
+
+  const encodedTail = encodeURI(tail);
+  if (encodedTail !== tail && url.endsWith(encodedTail)) {
+    return url.slice(0, -encodedTail.length);
+  }
+
+  return undefined;
+};
+
 // GFM can consume a closing strong delimiter and the following inline markup
 // into an autolink. Repair that AST shape after GFM by truncating the already
 // normalized destination, while keeping ordinary URL and email autolinks.
@@ -438,7 +500,6 @@ const remarkRepairMalformedGfmAutolinks = function (this: MarkdownParser) {
 
     const suffix = linkText.value.slice(textCloser + 2);
     const suffixNodes = suffix ? parseInlineSuffix(suffix) : [];
-    if (!suffixNodes.some((suffixNode) => suffixNode.type !== 'text')) return undefined;
 
     return {
       href: link.url.slice(0, urlCloser),
@@ -500,8 +561,40 @@ const remarkRepairMalformedGfmAutolinks = function (this: MarkdownParser) {
     return { nodes: repaired, consumedSiblings: 1 };
   };
 
+  // Runs before the bold repair. Every boundary character is Markdown
+  // punctuation or whitespace, so a `**` that becomes text-final here was
+  // already a valid strong closer in the source.
+  const trimNonAsciiAutolinkTail = (
+    child: MdastNode,
+    source: string
+  ): MdastChildReplacement | undefined => {
+    if (child.type !== 'link' || typeof child.url !== 'string') return undefined;
+    if (child.children?.length !== 1) return undefined;
+
+    const linkText = child.children[0];
+    if (linkText?.type !== 'text' || typeof linkText.value !== 'string') return undefined;
+    if (!isLiteralGfmAutolink(source, child, linkText)) return undefined;
+
+    const boundary = linkText.value.search(NON_ASCII_URL_BOUNDARY);
+    if (boundary <= 0) return undefined;
+
+    const tail = linkText.value.slice(boundary);
+    const url = truncateAutolinkUrl(child.url, tail);
+    if (url === undefined) return undefined;
+
+    return {
+      nodes: [
+        // Positions stay on the original source span so the bold repair can
+        // still tell this apart from an explicit `[text](url)` link.
+        { ...child, url, children: [{ ...linkText, value: linkText.value.slice(0, boundary) }] },
+        ...parseInlineSuffix(tail),
+      ],
+    };
+  };
+
   return (tree: unknown, file: MarkdownFile) => {
     const source = file.toString();
+    transformMdastChildren(tree, (child) => trimNonAsciiAutolinkTail(child, source));
     transformMdastChildren(tree, (child, nextChild) =>
       tryRepairMalformedBoldAutolink(child, nextChild, source)
     );
@@ -568,280 +661,130 @@ const remarkLinkifyFilePaths = () => {
   };
 };
 
+const FENCE_OPEN_PATTERN = /^[ \t]*(`{3,}|~{3,})/u;
+const FENCE_CLOSE_PATTERN = /\n[\t >]*(`{3,}|~{3,})[ \t]*$/u;
+
+const isUnclosedFence = (raw: string) => {
+  const open = FENCE_OPEN_PATTERN.exec(raw)?.[1];
+  if (!open) return false;
+  const close = FENCE_CLOSE_PATTERN.exec(raw)?.[1];
+  return !close || close[0] !== open[0] || close.length < open.length;
+};
+
+const remarkMarkUnclosedFences = () => (tree: unknown, file: MarkdownFile) => {
+  const source = file.toString();
+  const walk = (node: MdastNode) => {
+    if (node.type === 'code') {
+      const start = node.position?.start?.offset;
+      const end = node.position?.end?.offset;
+      if (
+        typeof start === 'number' &&
+        typeof end === 'number' &&
+        isUnclosedFence(source.slice(start, end))
+      ) {
+        node.data = {
+          ...node.data,
+          hProperties: { ...node.data?.hProperties, dataIncomplete: true },
+        };
+      }
+    }
+    node.children?.forEach(walk);
+  };
+  if (typeof tree === 'object' && tree !== null) walk(tree as MdastNode);
+};
+
 const MARKDOWN_REMARK_PLUGINS = [
   remarkGfm,
   remarkRepairMalformedGfmAutolinks,
   remarkLinkifyPlainUrls,
   remarkLinkifyFilePaths,
+  remarkMarkUnclosedFences,
+  [remarkMath, { singleDollarTextMath: false }],
+] satisfies StreamdownProps['remarkPlugins'];
+const INLINE_MATH_REMARK_PLUGINS = [
+  ...MARKDOWN_REMARK_PLUGINS,
   remarkSingleDollarTextMath,
-];
+] satisfies StreamdownProps['remarkPlugins'];
 
-const MARKDOWN_MATH_PLUGIN = createMathPlugin();
+const KATEX_REHYPE_PLUGIN = [
+  rehypeKatex,
+  { errorColor: 'var(--color-muted-foreground)' },
+] satisfies NonNullable<StreamdownProps['rehypePlugins']>[number];
+const MARKDOWN_REHYPE_PLUGINS = [KATEX_REHYPE_PLUGIN];
+const HTML_MARKDOWN_REHYPE_PLUGINS = [rehypeRaw, rehypeSanitize, KATEX_REHYPE_PLUGIN];
 
-type ShikiHighlighter = Awaited<ReturnType<(typeof import('shiki/core'))['createHighlighterCore']>>;
-type MarkdownHighlightResult = NonNullable<ReturnType<CodeHighlighterPlugin['highlight']>>;
+const STREAMING_HANDOFF_DELAY_MS = 1000;
 
-const MARKDOWN_CODE_THEME_NAME = 'lody-css-variables';
-// Streamdown's type does not model registered custom theme names, but Shiki accepts
-// them after createHighlighterCore() registers the matching theme object.
-const MARKDOWN_CODE_THEME_INPUT = MARKDOWN_CODE_THEME_NAME as unknown as ThemeInput;
-const MARKDOWN_CODE_THEMES = [MARKDOWN_CODE_THEME_INPUT, MARKDOWN_CODE_THEME_INPUT] as const;
+// Remend reads `<q` in a formula such as `p<q` as an unfinished HTML tag and
+// drops the rest of the stream. Raw HTML is opt-in and sanitized, so tags are
+// left to the Markdown parser.
+const STREAMING_REMEND_OPTIONS = { htmlTags: false };
 
-const MARKDOWN_CODE_LANGUAGES = [
-  'typescript',
-  'tsx',
-  'javascript',
-  'jsx',
-  'json',
-  'bash',
-  'shellscript',
-  'markdown',
-  'diff',
-  'python',
-  'rust',
-  'go',
-  'yaml',
-  'html',
-  'css',
-] as const satisfies readonly BundledLanguage[];
+// The engine is loaded only for a turn that is streaming. Its bundle carries
+// lookbehind regex literals, a parse error in Safari < 16.4, so a failed load
+// falls back to rendering the stream statically instead of breaking the turn.
+const StreamingMarkdown = lazy<ComponentType<StreamdownProps>>(() =>
+  import('@lobehub/streamdown').then(
+    ({ Streamdown }) => ({ default: Streamdown }),
+    () => ({
+      default: ({
+        content,
+        components,
+        remarkPlugins,
+        rehypePlugins,
+        urlTransform,
+      }: StreamdownProps) => (
+        <Markdown
+          components={components}
+          remarkPlugins={remarkPlugins}
+          rehypePlugins={rehypePlugins}
+          urlTransform={urlTransform}
+        >
+          {content}
+        </Markdown>
+      ),
+    })
+  )
+);
 
-const MARKDOWN_CODE_LANGUAGE_ALIASES: Partial<Record<string, BundledLanguage>> = {
-  js: 'javascript',
-  ts: 'typescript',
-  md: 'markdown',
-  py: 'python',
-  rs: 'rust',
-  sh: 'shellscript',
-  shell: 'shellscript',
-  yml: 'yaml',
-};
+/** Matches a fenced ```mermaid block, so blocks without one skip the observer. */
+const MERMAID_FENCE_PATTERN = /^[ \t]{0,3}(?:`{3,}|~{3,})[ \t]*mermaid\b/mu;
 
-const MARKDOWN_CODE_LANGUAGE_SET = new Set<string>([
-  ...MARKDOWN_CODE_LANGUAGES,
-  ...Object.keys(MARKDOWN_CODE_LANGUAGE_ALIASES),
-]);
+const markdownUrlTransform: UrlTransform = (value) =>
+  isMarkdownAgentFileHref(value) ? value : defaultUrlTransform(value);
 
-const normalizeCodeLanguage = (language: BundledLanguage): BundledLanguage | null => {
-  const normalized = String(language).trim().toLowerCase();
-  if (!normalized) return null;
+type HastElement = NonNullable<ExtraProps['node']>;
 
-  const alias = MARKDOWN_CODE_LANGUAGE_ALIASES[normalized];
-  if (alias) return alias;
-
-  return MARKDOWN_CODE_LANGUAGE_SET.has(normalized) ? (normalized as BundledLanguage) : null;
-};
-
-const createPlainHighlightResult = (code: string): MarkdownHighlightResult => ({
-  bg: 'transparent',
-  fg: 'inherit',
-  tokens: code.split('\n').map((line) => [
-    {
-      color: 'inherit',
-      content: line,
-    },
-  ]),
-});
-
-// Tokenizing is pure over (language, code): the registered theme is Shiki's
-// CSS-variables theme, so the tokens carry `var(--shiki-*)` colors and do not
-// change with the app theme. Re-rendering a conversation therefore re-derived
-// identical tokens — a measurable cost on session switch, where every code
-// block in the newly mounted transcript is highlighted from scratch.
-//
-// Bounded twice over: by entry count and by total cached source length, because
-// a streaming turn feeds a new prefix of the same block on every chunk and
-// would otherwise fill the cache with strings nobody reads again. Insertion
-// order gives LRU: a hit is re-inserted at the end, eviction takes the front.
-const HIGHLIGHT_CACHE_MAX_ENTRIES = 256;
-const HIGHLIGHT_CACHE_MAX_TOTAL_CHARS = 1_000_000;
-/** Skip blocks large enough that caching them costs more than re-tokenizing. */
-const HIGHLIGHT_CACHE_MAX_CODE_CHARS = 20_000;
-
-const highlightCache = new Map<string, MarkdownHighlightResult>();
-let highlightCacheChars = 0;
-
-const readHighlightCache = (key: string): MarkdownHighlightResult | undefined => {
-  const cached = highlightCache.get(key);
-  if (cached === undefined) return undefined;
-  highlightCache.delete(key);
-  highlightCache.set(key, cached);
-  return cached;
-};
-
-const writeHighlightCache = (
-  key: string,
-  codeLength: number,
-  result: MarkdownHighlightResult
-): void => {
-  highlightCache.set(key, result);
-  highlightCacheChars += codeLength;
-  while (
-    highlightCache.size > HIGHLIGHT_CACHE_MAX_ENTRIES ||
-    highlightCacheChars > HIGHLIGHT_CACHE_MAX_TOTAL_CHARS
-  ) {
-    const oldestKey = highlightCache.keys().next().value;
-    if (oldestKey === undefined) break;
-    highlightCache.delete(oldestKey);
-    // The key is `${language}\0${code}`, so its length bounds the code length
-    // it contributed; close enough to keep the budget from drifting upward.
-    highlightCacheChars = Math.max(0, highlightCacheChars - oldestKey.length);
-  }
-};
-
-const highlightCode = (
-  highlighter: ShikiHighlighter,
-  options: HighlightOptions
-): MarkdownHighlightResult => {
-  const language = normalizeCodeLanguage(options.language);
-  if (!language) {
-    return createPlainHighlightResult(options.code);
-  }
-
-  const cacheable = options.code.length <= HIGHLIGHT_CACHE_MAX_CODE_CHARS;
-  const cacheKey = `${language}\0${options.code}`;
-  if (cacheable) {
-    const cached = readHighlightCache(cacheKey);
-    if (cached !== undefined) return cached;
-  }
-
-  try {
-    const result = highlighter.codeToTokens(options.code, {
-      lang: language,
-      themes: {
-        light: MARKDOWN_CODE_THEMES[0],
-        dark: MARKDOWN_CODE_THEMES[1],
-      },
-    });
-    if (cacheable) {
-      writeHighlightCache(cacheKey, options.code.length, result);
-    }
-    return result;
-  } catch {
-    return createPlainHighlightResult(options.code);
-  }
-};
-
-const createLazyShikiCodePlugin = (): CodeHighlighterPlugin => {
-  let highlighter: ShikiHighlighter | null = null;
-  let highlighterPromise: Promise<ShikiHighlighter> | null = null;
-
-  const loadHighlighter = async () => {
-    // @pierre/diffs already imports shiki's bundledLanguages catalog. Reuse it
-    // instead of a second shiki/langs/*.mjs graph (duplicate grammar chunks).
-    highlighterPromise ??= Promise.all([
-      import('shiki/core'),
-      import('shiki/engine/javascript'),
-      import('shiki'),
-    ]).then(
-      ([
-        { createCssVariablesTheme, createHighlighterCore },
-        { createJavaScriptRegexEngine },
-        shiki,
-      ]) =>
-        createHighlighterCore({
-          engine: createJavaScriptRegexEngine(),
-          langs: MARKDOWN_CODE_LANGUAGES.map((id) => {
-            const language = shiki.bundledLanguages[id];
-            if (!language) {
-              throw new Error(`Missing bundled shiki language: ${id}`);
-            }
-            return language;
-          }),
-          themes: [
-            createCssVariablesTheme({
-              name: MARKDOWN_CODE_THEME_NAME,
-              variablePrefix: '--lody-shiki-',
-            }),
-          ],
-        }).then((loadedHighlighter) => {
-          highlighter = loadedHighlighter;
-          return loadedHighlighter;
-        })
-    );
-
-    return highlighterPromise;
-  };
-
+const readCodeElement = (pre: HastElement | undefined) => {
+  const code = pre?.children[0];
+  if (code?.type !== 'element' || code.tagName !== 'code') return null;
+  const className = code.properties.className;
+  const language =
+    (Array.isArray(className) ? className : [])
+      .map(String)
+      .find((name) => name.startsWith('language-'))
+      ?.slice('language-'.length) ?? '';
   return {
-    name: 'shiki',
-    type: 'code-highlighter',
-    getSupportedLanguages: () => [...MARKDOWN_CODE_LANGUAGES],
-    getThemes: () => [...MARKDOWN_CODE_THEMES],
-    highlight: (options, callback) => {
-      if (highlighter) {
-        return highlightCode(highlighter, options);
-      }
-
-      void loadHighlighter()
-        .then((loadedHighlighter) => {
-          callback?.(highlightCode(loadedHighlighter, options));
-        })
-        .catch(() => {
-          callback?.(createPlainHighlightResult(options.code));
-        });
-
-      return null;
-    },
-    supportsLanguage: (language) => normalizeCodeLanguage(language) !== null,
+    code: code.children.map((child) => (child.type === 'text' ? child.value : '')).join(''),
+    language: language || 'text',
+    meta: (code.data as { meta?: string | null } | undefined)?.meta ?? undefined,
+    isIncomplete: code.properties.dataIncomplete === true,
   };
 };
 
-const MARKDOWN_CODE_PLUGIN = createLazyShikiCodePlugin();
-
-const MARKDOWN_MERMAID_PLUGIN = createMarkdownMermaidPlugin();
-
-const STREAMDOWN_PLUGINS = {
-  code: MARKDOWN_CODE_PLUGIN,
-  math: MARKDOWN_MATH_PLUGIN,
-  mermaid: MARKDOWN_MERMAID_PLUGIN,
-} satisfies PluginConfig;
-
-const STREAMDOWN_CONTROLS = {
-  code: {
-    copy: true,
-    download: false,
-  },
-  mermaid: {
-    copy: true,
-    download: true,
-    fullscreen: true,
-    panZoom: false,
-  },
-  table: false,
-} satisfies ControlsConfig;
-
-const writeTextToClipboard = async (text: string): Promise<boolean> => {
-  if (!text.trim()) return false;
-
-  try {
-    await navigator.clipboard.writeText(text);
-    return true;
-  } catch {
-    try {
-      const el = document.createElement('textarea');
-      el.value = text;
-      el.style.position = 'fixed';
-      el.style.top = '0';
-      el.style.left = '0';
-      el.style.width = '1px';
-      el.style.height = '1px';
-      el.style.opacity = '0';
-      document.body.appendChild(el);
-      el.focus();
-      el.select();
-      const ok = document.execCommand('copy');
-      document.body.removeChild(el);
-      return ok;
-    } catch {
-      return false;
-    }
+function MarkdownPre({
+  node,
+  theme,
+  ...props
+}: ComponentPropsWithoutRef<'pre'> & ExtraProps & { theme: ResolvedTheme }) {
+  const block = readCodeElement(node);
+  if (!block) return <pre {...props} />;
+  if (block.language === 'mermaid' && !block.isIncomplete) {
+    return <MarkdownMermaidBlock code={block.code} theme={theme} />;
   }
-};
-
-const markdownUrlTransform: UrlTransform = (value, key, node) =>
-  isMarkdownAgentFileHref(value) || (key === 'src' && parseTaskImageMarkdownUrl(value))
-    ? value
-    : defaultUrlTransform(value, key, node);
+  if (block.language === 'diff') return <MarkdownDiffBlock {...block} />;
+  return <MarkdownFencedCodeBlock {...block} />;
+}
 
 type MarkdownTableProps = ComponentPropsWithoutRef<'table'> & {
   node?: unknown;
@@ -853,16 +796,19 @@ const AgentFileLink = ({
   onFilePathClick,
   copyAgentFileLabel,
   openAgentFileLabel,
+  getContextMenuItems,
 }: {
   href: string;
   children: ReactNode;
   onFilePathClick?: (href: string) => void;
   copyAgentFileLabel: string;
   openAgentFileLabel: string;
+  getContextMenuItems?: (href: string) => readonly MarkdownAgentFileLinkMenuItem[];
 }) => {
   const [didCopy, setDidCopy] = useState(false);
   const hasOpenAction = Boolean(onFilePathClick);
   const iconPath = parseMarkdownAgentFileHref(href)?.filePath ?? href;
+  const contextMenuItems = getContextMenuItems?.(href) ?? [];
 
   const handleClick = useCallback(async () => {
     if (onFilePathClick) {
@@ -877,7 +823,7 @@ const AgentFileLink = ({
     window.setTimeout(() => setDidCopy(false), 1200);
   }, [href, onFilePathClick]);
 
-  return (
+  const link = (
     <button
       type="button"
       onClick={() => {
@@ -886,39 +832,116 @@ const AgentFileLink = ({
       title={href}
       aria-label={`${hasOpenAction ? openAgentFileLabel : copyAgentFileLabel}: ${href}`}
       className={cn(
-        'inline-flex max-w-full items-center gap-1 rounded-md border border-border/60 bg-muted/40 px-1.5 py-px align-[-0.15em] font-mono text-[0.92em] leading-tight text-foreground no-underline shadow-none transition-colors',
-        'hover:border-border hover:bg-muted focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2'
+        'm-0 inline-flex max-w-full items-baseline gap-1 rounded-sm border-0 bg-transparent p-0 align-baseline font-[inherit] leading-[inherit] text-markdown-link no-underline shadow-none transition-colors',
+        'hover:underline underline-offset-2 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2'
       )}
     >
-      <FileIcon filePath={iconPath} className="h-3.5 w-3.5 shrink-0" />
+      <MonochromeFileIcon
+        filePath={iconPath}
+        className="h-[1.38em] w-[1.38em] shrink-0 self-center"
+      />
       <span className="min-w-0 truncate">{children}</span>
       {!hasOpenAction ? (
         didCopy ? (
-          <Check className="h-3 w-3 shrink-0 text-emerald-600" />
+          <Check className="h-[0.85em] w-[0.85em] shrink-0 self-center" />
         ) : (
-          <Copy className="h-3 w-3 shrink-0 text-muted-foreground" />
+          <Copy className="h-[0.85em] w-[0.85em] shrink-0 self-center" />
         )
       ) : null}
     </button>
   );
+
+  if (contextMenuItems.length === 0) return link;
+
+  return (
+    <ContextMenu.Root>
+      <ContextMenu.Trigger>{link}</ContextMenu.Trigger>
+      <ContextMenu.Content className="min-w-[190px]">
+        {contextMenuItems.map((item) => {
+          const ItemIcon = item.icon;
+          if (item.kind === 'submenu') {
+            return (
+              <ContextMenu.Submenu key={item.id}>
+                <ContextMenu.SubmenuTrigger icon={<ItemIcon className="h-3.5 w-3.5" />}>
+                  {item.label}
+                </ContextMenu.SubmenuTrigger>
+                <ContextMenu.SubmenuContent className="min-w-[190px]">
+                  {item.items.map((child) => {
+                    const ChildIcon = child.icon;
+                    return (
+                      <ContextMenu.Item
+                        key={child.id}
+                        icon={<ChildIcon className="h-3.5 w-3.5" />}
+                        onClick={child.run}
+                      >
+                        {child.label}
+                      </ContextMenu.Item>
+                    );
+                  })}
+                </ContextMenu.SubmenuContent>
+              </ContextMenu.Submenu>
+            );
+          }
+          return (
+            <ContextMenu.Item
+              key={item.id}
+              icon={<ItemIcon className="h-3.5 w-3.5" />}
+              onClick={item.run}
+            >
+              {item.label}
+            </ContextMenu.Item>
+          );
+        })}
+      </ContextMenu.Content>
+    </ContextMenu.Root>
+  );
 };
+
+function isWorkspaceResourceHref(href: string): boolean {
+  try {
+    return (
+      isMarkdownAgentFileHref(href) ||
+      /\/(?:api\/)?workspaces\/|\/session-(?:images|files)\//i.test(decodeURIComponent(href))
+    );
+  } catch {
+    return true;
+  }
+}
 
 const createMarkdownComponents = ({
   copyAgentFileLabel,
   openAgentFileLabel,
   onAgentFileLinkClick,
+  getAgentFileLinkContextMenuItems,
+  readonly,
+  theme,
 }: {
   copyAgentFileLabel: string;
   openAgentFileLabel: string;
   onAgentFileLinkClick?: (href: string) => void;
+  getAgentFileLinkContextMenuItems?: (href: string) => readonly MarkdownAgentFileLinkMenuItem[];
+  readonly: boolean;
+  theme: ResolvedTheme;
 }): Components => ({
-  inlineCode: (props: MarkdownCodeProps) => {
-    const { className, children, style: _style, node: _node, inline: _inline, ...rest } = props;
+  p: ({ children, className, node: _node, ...props }) => (
+    <p
+      {...props}
+      className={cn(
+        className,
+        CJK_HAN_PATTERN.test(markdownNodeText(children)) && 'markdown-cjk-paragraph'
+      )}
+    >
+      {children}
+    </p>
+  ),
+  pre: (props) => <MarkdownPre {...props} theme={theme} />,
+  code: (props: MarkdownCodeProps) => {
+    const { className, children, style: _style, node: _node, ...rest } = props;
     return (
       <code
         className={cn(
-          'rounded-sm bg-code px-1 py-px font-mono text-[0.85em] text-code-foreground ring-1 ring-inset ring-border/50',
-          className
+          className,
+          'rounded-sm bg-foreground/[0.06] px-1 py-px font-mono text-[0.85em] text-reading ring-0 dark:bg-foreground/[0.07]'
         )}
         {...rest}
       >
@@ -926,19 +949,15 @@ const createMarkdownComponents = ({
       </code>
     );
   },
-  table: (props: MarkdownTableProps) => {
-    const { node: _node, ...rest } = props;
-    return (
-      <div
-        data-markdown-table
-        className="scrollbar-pro my-3 overflow-x-auto rounded-lg border border-border/70 bg-background"
-      >
-        <table {...rest} />
-      </div>
-    );
-  },
+  table: (props: MarkdownTableProps) => <MarkdownTable {...props} />,
   a: (props: MarkdownLinkProps) => {
     const { children, href, node: _node, rel, ...rest } = props;
+    if (!href) return <span>{children}</span>;
+    // Workspace resource links are display-only in a publication, not a second
+    // download API. Ordinary article/GitHub links remain explicit external navigation.
+    if (readonly && href && isWorkspaceResourceHref(href)) {
+      return <span>{children}</span>;
+    }
 
     if (isMarkdownAgentFileHref(href)) {
       return (
@@ -947,9 +966,29 @@ const createMarkdownComponents = ({
           onFilePathClick={onAgentFileLinkClick}
           copyAgentFileLabel={copyAgentFileLabel}
           openAgentFileLabel={openAgentFileLabel}
+          getContextMenuItems={getAgentFileLinkContextMenuItems}
         >
           {children}
         </AgentFileLink>
+      );
+    }
+
+    // A link that only names a GitHub pull request or issue renders as a small
+    // reference label; one with its own wording stays an ordinary link.
+    const githubReference = parseGitHubReferenceUrl(href);
+    if (githubReference && isGitHubReferenceLabel(markdownLinkText(children), githubReference)) {
+      return (
+        <MarkdownExternalLink
+          href={href}
+          rel={rel}
+          {...rest}
+          className={cn(
+            rest.className,
+            'markdown-reference-chip mx-[0.1em] inline-flex max-w-full items-center rounded-md px-[0.4em] align-[-0.12em] text-[0.92em] leading-[1.55] transition-colors'
+          )}
+        >
+          <GitHubReferenceChip reference={githubReference} />
+        </MarkdownExternalLink>
       );
     }
 
@@ -959,37 +998,109 @@ const createMarkdownComponents = ({
       </MarkdownExternalLink>
     );
   },
-  img: TaskMarkdownImage,
+  img: ConversationMarkdownImage,
   // <picture> just passes through its children (the <img> fallback);
   // <source> is suppressed since it's only meaningful inside a real browser <picture>.
   source: () => null,
   picture: (props: MarkdownPictureProps) => <>{props.children}</>,
 });
 
-function TaskMarkdownImage(props: MarkdownImageProps) {
-  const { node: _node, src, alt, ...rest } = props;
-  const taskImageId = src ? parseTaskImageMarkdownUrl(src) : null;
-  const tasksEnabled = useAtomValue(tasksFeatureEnabledAtom);
-  const resolvedUrl = useTaskImageUrl(taskImageId && tasksEnabled ? src : undefined);
+function ConversationMarkdownImage(props: MarkdownImageProps) {
+  const readonly = useContext(SessionReadonlyContext);
+  const resources = useContext(MarkdownFileResourcesContext);
+  // No workspace URI fetch is mounted for an anonymous publication.
+  // Typed share images are handled separately through the manifest attachment reader.
+  if (readonly) {
+    const inline =
+      typeof props.src === 'string' &&
+      /^data:image\/(?:png|jpeg|gif|webp);base64,[A-Za-z0-9+/=\s]+$/.test(props.src);
+    return inline ? (
+      <img
+        src={props.src}
+        alt={props.alt ?? ''}
+        className="my-2 max-h-[32rem] max-w-full rounded-md object-contain"
+      />
+    ) : (
+      <span
+        role="img"
+        aria-label={props.alt || 'Image'}
+        className="my-2 block text-sm text-muted-foreground"
+      >
+        {props.alt || 'Image'}
+      </span>
+    );
+  }
+  if (
+    resources &&
+    typeof props.src === 'string' &&
+    resolveMarkdownImagePath(resources.documentPath, props.src) !== null
+  ) {
+    return <MarkdownFileImage src={props.src} alt={props.alt} />;
+  }
+  return <SizedMarkdownImage {...props} />;
+}
 
-  if (taskImageId && !tasksEnabled) return null;
+type ImageOutcome = { width: number; height: number } | 'failed';
 
-  if (taskImageId && !resolvedUrl) {
+/**
+ * What each image source did the last time it mounted. Virtua unmounts rows
+ * outside the overscan, and an image without known dimensions renders at 0px
+ * until it loads, so every remount changed its row's height after mount and
+ * moved the conversation. Known sizes are reserved up front; a source that
+ * failed (an agent-local path the page cannot reach) renders its alt text.
+ */
+const imageOutcomes = new Map<string, ImageOutcome>();
+const IMAGE_OUTCOME_LIMIT = 500;
+
+function rememberImageOutcome(src: string, outcome: ImageOutcome): void {
+  imageOutcomes.delete(src);
+  imageOutcomes.set(src, outcome);
+  if (imageOutcomes.size > IMAGE_OUTCOME_LIMIT) {
+    const oldest = imageOutcomes.keys().next().value;
+    if (oldest !== undefined) imageOutcomes.delete(oldest);
+  }
+}
+
+function SizedMarkdownImage(props: MarkdownImageProps) {
+  const { node: _node, src, alt, onLoad, onError, ...rest } = props;
+  const key = typeof src === 'string' ? src : undefined;
+  const [outcome, setOutcome] = useState(() =>
+    key === undefined ? undefined : imageOutcomes.get(key)
+  );
+  if (outcome === 'failed') {
     return (
       <span
         role="img"
-        aria-label={alt || 'Task image'}
-        className="my-2 block h-24 w-full max-w-sm animate-pulse rounded-md bg-muted"
-      />
+        aria-label={alt || 'Image'}
+        className="my-2 block text-sm text-muted-foreground"
+      >
+        {alt || 'Image'}
+      </span>
     );
   }
-
   return (
     <img
       {...rest}
-      src={taskImageId ? resolvedUrl : src}
+      src={src}
       alt={alt ?? ''}
+      // With `height: auto`, these reserve the image's aspect ratio before it loads.
+      width={outcome?.width ?? rest.width}
+      height={outcome?.height ?? rest.height}
       className={cn('my-2 max-h-[32rem] max-w-full rounded-md object-contain', rest.className)}
+      onLoad={(event) => {
+        const image = event.currentTarget;
+        if (key !== undefined && image.naturalWidth > 0) {
+          rememberImageOutcome(key, { width: image.naturalWidth, height: image.naturalHeight });
+        }
+        onLoad?.(event);
+      }}
+      onError={(event) => {
+        if (key !== undefined) {
+          rememberImageOutcome(key, 'failed');
+          setOutcome('failed');
+        }
+        onError?.(event);
+      }}
     />
   );
 }
@@ -1009,6 +1120,9 @@ function normalizeMarkdownRendererSize(size: MarkdownRendererSize): Conversation
   return size;
 }
 
+/** A React-owned text node cut short by search marks, and how to restore it. */
+type SearchTextSplit = { node: Text; value: string; head: string; inserted: ChildNode[] };
+
 export const MarkdownRenderer = memo(function MarkdownRenderer({
   text,
   size = DEFAULT_CONVERSATION_FONT_SIZE,
@@ -1023,47 +1137,105 @@ export const MarkdownRenderer = memo(function MarkdownRenderer({
   className?: string;
   /** Enable raw HTML rendering (sanitized). Use for GitHub comment bodies. */
   allowHtml?: boolean;
-  /** Enables Streamdown's incremental animation while a turn is still streaming. */
+  /** Renders through the smoothing, fading stream engine while a turn is still streaming. */
   isStreaming?: boolean;
   onAgentFileLinkClick?: (href: string) => void;
   searchBlockId?: string;
 }) {
+  ({ text, size, allowHtml, isStreaming, searchBlockId } = useSelectionStableValue({
+    text,
+    size,
+    allowHtml,
+    isStreaming,
+    searchBlockId,
+  }));
   const { t } = useTranslation();
-  const resolvedTheme = useResolvedTheme();
+  const resolvedTheme = useSelectionStableValue(useResolvedTheme());
+  const readonly = useContext(SessionReadonlyContext);
+  const getAgentFileLinkContextMenuItems = useContext(AgentFileLinkContextMenuItemsContext);
   const containerRef = useRef<HTMLDivElement>(null);
-  const search = useSessionSearch();
-  const searchMatch = useSessionSearchBlock(searchBlockId ?? '');
-  const copyCodeLabel = t('common.copyCode', 'Copy code');
+  /** Text nodes split for search marks in this block, with what to undo. */
+  const searchSplitsRef = useRef<SearchTextSplit[]>([]);
+  const search = useSelectionStableValue(useSessionSearch());
+  const searchMatch = useSelectionStableValue(useSessionSearchBlock(searchBlockId ?? ''));
   const copyAgentFileLabel = t('sessions.copyAgentFilePath', 'Copy agent file path');
   const openAgentFileLabel = t('sessions.openAgentFile', 'Open agent file');
-  const components = useMemo(
+  const canvasLabel = t('sessions.diagram.canvas', 'Zoom and pan diagram');
+  const openDiagramLabel = t('sessions.diagramViewer.open', 'Open diagram');
+  const inlineMathEnabled = useAtomValue(inlineMathEnabledAtom);
+  // Both scans below re-run over the whole accumulated answer on every streamed
+  // delta. A substring test settles the common case before the line-anchored
+  // pattern runs.
+  const hasMermaidBlock = useMemo(
+    () => text.includes('mermaid') && MERMAID_FENCE_PATTERN.test(text),
+    [text]
+  );
+  const normalizedText = useMemo(
+    () => normalizeTexMathDelimiters(text, inlineMathEnabled),
+    [inlineMathEnabled, text]
+  );
+  const {
+    blocks: mermaidBlocks,
+    selection: diagramSelection,
+    closeDiagram,
+    openDiagram,
+    handleContainerClick,
+    handleContainerKeyDown,
+  } = useMermaidDiagramCanvas({
+    containerRef,
+    enabled: hasMermaidBlock,
+    canvasLabel,
+  });
+
+  const currentComponents = useMemo(
     () =>
       createMarkdownComponents({
         copyAgentFileLabel,
         openAgentFileLabel,
         onAgentFileLinkClick,
+        getAgentFileLinkContextMenuItems,
+        readonly: readonly !== null,
+        theme: resolvedTheme,
       }),
-    [copyAgentFileLabel, onAgentFileLinkClick, openAgentFileLabel]
+    [
+      copyAgentFileLabel,
+      getAgentFileLinkContextMenuItems,
+      onAgentFileLinkClick,
+      openAgentFileLabel,
+      readonly,
+      resolvedTheme,
+    ]
   );
 
-  const rehypePlugins = useMemo(() => (allowHtml ? [rehypeRaw, rehypeSanitize] : []), [allowHtml]);
-  const streamdownTranslations = useMemo(
-    () =>
-      ({
-        copied: t('common.copied', 'Copied'),
-        copyCode: copyCodeLabel,
-      }) satisfies Partial<StreamdownTranslations>,
-    [copyCodeLabel, t]
-  );
-  const mermaidOptions = useMemo(
-    () =>
-      ({
-        config: createMarkdownMermaidConfig(resolvedTheme),
-      }) satisfies MermaidOptions,
-    [resolvedTheme]
-  );
+  const components = useSelectionStableValue(currentComponents);
+  const remarkPlugins = inlineMathEnabled ? INLINE_MATH_REMARK_PLUGINS : MARKDOWN_REMARK_PLUGINS;
+  const rehypePlugins = allowHtml ? HTML_MARKDOWN_REHYPE_PLUGINS : MARKDOWN_REHYPE_PLUGINS;
   const normalizedSize = normalizeMarkdownRendererSize(size);
-  const streamdownKey = `${allowHtml ? 'html' : 'markdown'}-${resolvedTheme}`;
+  // The engine keeps revealing its buffered tail after the stream ends. Staying
+  // mounted briefly lets that reveal finish instead of jumping to the full text.
+  const [streamingRendererActive, setStreamingRendererActive] = useState(isStreaming);
+  if (isStreaming && !streamingRendererActive) {
+    setStreamingRendererActive(true);
+  }
+  useEffect(() => {
+    if (isStreaming || !streamingRendererActive) return undefined;
+    const timeout = window.setTimeout(
+      () => setStreamingRendererActive(false),
+      STREAMING_HANDOFF_DELAY_MS
+    );
+    return () => window.clearTimeout(timeout);
+  }, [isStreaming, streamingRendererActive]);
+
+  const staticMarkdown = (
+    <Markdown
+      components={components}
+      remarkPlugins={remarkPlugins}
+      rehypePlugins={rehypePlugins}
+      urlTransform={markdownUrlTransform}
+    >
+      {normalizedText}
+    </Markdown>
+  );
 
   useLayoutEffect(() => {
     const root = containerRef.current;
@@ -1071,23 +1243,17 @@ export const MarkdownRenderer = memo(function MarkdownRenderer({
       return undefined;
     }
 
-    root
-      .querySelectorAll<HTMLButtonElement>('[data-streamdown="code-block-copy-button"]')
-      .forEach((button) => button.setAttribute('aria-label', copyCodeLabel));
-
     const clearSearchHighlights = () => {
-      const existingMarks = root.querySelectorAll('mark[data-session-search-mark="true"]');
-      existingMarks.forEach((mark) => {
-        const parent = mark.parentNode;
-        if (!parent) {
-          return;
-        }
-        while (mark.firstChild) {
-          parent.insertBefore(mark.firstChild, mark);
-        }
-        parent.removeChild(mark);
-        parent.normalize();
-      });
+      // This effect re-runs on every streamed delta; a block without marks
+      // has nothing to undo.
+      const splits = searchSplitsRef.current;
+      if (!splits.length) return;
+      searchSplitsRef.current = [];
+      for (const { node, value, head, inserted } of splits) {
+        for (const child of inserted) child.remove();
+        // React may have rewritten the node since it was split; its text wins.
+        if (node.nodeValue === head) node.nodeValue = value;
+      }
     };
 
     clearSearchHighlights();
@@ -1158,8 +1324,18 @@ export const MarkdownRenderer = memo(function MarkdownRenderer({
         return;
       }
 
+      const parent = node.parentNode;
+      if (!parent) {
+        return;
+      }
+
+      // React owns `node` and inserts or removes its siblings relative to it,
+      // so it stays in place holding the text before the first match; marks
+      // and the remaining text follow it. Replacing it would leave React an
+      // anchor outside the DOM (`insertBefore` throws once a link arms).
+      const head = value.slice(0, Math.max(0, overlaps[0]!.start - start));
       const fragment = document.createDocumentFragment();
-      let localCursor = 0;
+      let localCursor = head.length;
 
       overlaps.forEach((match) => {
         const localStart = Math.max(0, match.start - start);
@@ -1185,44 +1361,61 @@ export const MarkdownRenderer = memo(function MarkdownRenderer({
         fragment.appendChild(document.createTextNode(value.slice(localCursor)));
       }
 
-      const parent = node.parentNode;
-      if (!parent) {
-        return;
-      }
-      parent.insertBefore(fragment, node);
-      parent.removeChild(node);
+      searchSplitsRef.current.push({
+        node,
+        value,
+        head,
+        inserted: [...fragment.childNodes],
+      });
+      node.nodeValue = head;
+      parent.insertBefore(fragment, node.nextSibling);
     });
 
     return clearSearchHighlights;
-  }, [copyCodeLabel, search?.isOpen, search?.query, searchBlockId, searchMatch, text]);
+  }, [search?.isOpen, search?.query, searchBlockId, searchMatch, text]);
 
   return (
-    <div
-      ref={containerRef}
-      data-search-block-id={searchBlockId}
-      className={cn(MARKDOWN_BASE_CLASSNAME, MARKDOWN_SIZE_CLASSNAME, className)}
-      style={markdownFontSizeStyle(normalizedSize)}
-    >
-      <Streamdown
-        // Streamdown's memo comparator does not include every rendering prop;
-        // remount when raw-HTML mode or Mermaid theme changes so sanitized
-        // rendering and diagram colors update correctly.
-        key={streamdownKey}
-        mode="streaming"
-        className="space-y-0"
-        controls={STREAMDOWN_CONTROLS}
-        isAnimating={isStreaming}
-        lineNumbers={false}
-        mermaid={mermaidOptions}
-        plugins={STREAMDOWN_PLUGINS}
-        remarkPlugins={MARKDOWN_REMARK_PLUGINS}
-        rehypePlugins={rehypePlugins}
-        components={components}
-        translations={streamdownTranslations}
-        urlTransform={markdownUrlTransform}
+    <>
+      <div
+        ref={containerRef}
+        data-search-block-id={searchBlockId}
+        className={cn(MARKDOWN_BASE_CLASSNAME, MARKDOWN_SIZE_CLASSNAME, className)}
+        style={markdownFontSizeStyle(normalizedSize)}
+        onClick={handleContainerClick}
+        onKeyDown={handleContainerKeyDown}
       >
-        {text}
-      </Streamdown>
-    </div>
+        {streamingRendererActive ? (
+          <Suspense fallback={staticMarkdown}>
+            <StreamingMarkdown
+              animateOnMount={false}
+              content={normalizedText}
+              remend={STREAMING_REMEND_OPTIONS}
+              components={components}
+              remarkPlugins={remarkPlugins}
+              rehypePlugins={rehypePlugins}
+              urlTransform={markdownUrlTransform}
+            />
+          </Suspense>
+        ) : (
+          staticMarkdown
+        )}
+        {/* Filled by portal into each diagram block's action bar, beside copy
+            and download: the button opens `MermaidDiagramViewer`. */}
+        {mermaidBlocks.map((block) =>
+          createPortal(
+            <MermaidFullscreenButton
+              label={openDiagramLabel}
+              onOpen={() => openDiagram(block.diagram)}
+            />,
+            block.actions,
+            block.id
+          )
+        )}
+      </div>
+      {/* A sibling of the markdown, not a child: a portal's events bubble
+          through the React tree, and inside the container the viewer's own
+          clicks would reach the delegated open handler above. */}
+      <MermaidDiagramViewer selection={diagramSelection} onClose={closeDiagram} />
+    </>
   );
 });

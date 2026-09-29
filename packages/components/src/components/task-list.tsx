@@ -23,7 +23,6 @@ import {
   GitPullRequest,
   GripVertical,
   Link2,
-  Loader2,
   LockKeyhole,
   Pencil,
   Pin,
@@ -31,6 +30,7 @@ import {
   Plus,
   Users,
 } from 'lucide-react';
+import { Spinner } from '@lody/ui/spinner';
 import {
   memo,
   useCallback,
@@ -43,14 +43,8 @@ import {
 } from 'react';
 import { useAtom } from 'jotai';
 import { useTranslation } from 'react-i18next';
-import { TooltipProvider } from '@/ui/tooltip';
-import {
-  ContextMenu,
-  ContextMenuContent,
-  ContextMenuItem,
-  ContextMenuSeparator,
-  ContextMenuTrigger,
-} from '@/ui/context-menu';
+import { Tooltip } from '@lody/ui/tooltip';
+import { ContextMenu } from '@lody/ui/context-menu';
 import type {
   LocalProjectHistoryProvider,
   MachineId,
@@ -70,6 +64,7 @@ import {
   SidebarRowArchiveButton,
   SidebarRowEndSlot,
   SidebarListSkeleton,
+  SidebarSessionTitleText,
   SessionMergeablePill,
 } from '@/components/sidebar-row-shared';
 import { SessionInfoHoverCard } from '@/components/session-info-hover-card';
@@ -591,7 +586,7 @@ const TaskGroupSection = memo(function TaskGroupSection({
                 <ChevronDown
                   className={cn(
                     'absolute left-0 top-1/2 -translate-y-1/2 h-4 w-4',
-                    'transition-[opacity,translate,scale] duration-150 ease-out',
+                    'transition-[opacity,translate,scale,rotate] duration-150 ease-out',
                     isMobile ? 'opacity-100' : 'opacity-0 group-hover:opacity-100',
                     group.collapsed ? '-rotate-90' : 'rotate-0'
                   )}
@@ -604,7 +599,7 @@ const TaskGroupSection = memo(function TaskGroupSection({
             <ChevronDown
               className={cn(
                 'h-3.5 w-3.5 shrink-0 text-current',
-                'transition-[opacity,translate,scale] duration-150 ease-out',
+                'transition-[opacity,translate,scale,rotate] duration-150 ease-out',
                 group.collapsed || isMobile ? 'opacity-100' : 'opacity-0 group-hover:opacity-100',
                 // Chats is a top-level sidebar section, so its collapsed chevron
                 // stays visible without hover.
@@ -724,7 +719,13 @@ const TaskGroupSection = memo(function TaskGroupSection({
                     )}
                   />
                 ) : (
-                  <span className={cn('truncate', extraClassName)}>{task.title}</span>
+                  <SidebarSessionTitleText
+                    sessionId={task.taskId}
+                    selected={showSelectedState}
+                    className={cn('truncate font-normal', extraClassName)}
+                  >
+                    {task.title}
+                  </SidebarSessionTitleText>
                 );
               const handleAnchorClick = useAnchor
                 ? (event: ReactMouseEvent<HTMLAnchorElement>) => {
@@ -777,7 +778,7 @@ const TaskGroupSection = memo(function TaskGroupSection({
                       !isMobile &&
                       'hover:bg-sidebar-hover hover:text-sidebar-hover-foreground',
                     showSelectedState &&
-                      'border-sidebar-foreground/10 bg-sidebar-foreground/10 text-sidebar-foreground hover:bg-sidebar-foreground/10',
+                      'bg-sidebar-selection text-sidebar-selection-foreground hover:bg-sidebar-selection',
                     // Keyboard-only focus ring. Plain :focus-within also matches
                     // after a mouse click (the overlay <a> keeps focus), which
                     // left a permanent inset ring on the selected row that read
@@ -819,9 +820,6 @@ const TaskGroupSection = memo(function TaskGroupSection({
                   ) : null}
                   <div className="flex min-w-0 items-center gap-1.5">
                     <SessionRowLeadingSlot
-                      isWaitingPermission={task.isWaitingPermission}
-                      isWorking={task.isWorking}
-                      hasUnreadMessages={task.hasUnreadMessages}
                       showMenuButton={hasMenuActions}
                       menuLabel={moreActionsLabel}
                     />
@@ -830,7 +828,7 @@ const TaskGroupSection = memo(function TaskGroupSection({
                         'min-w-0 flex-1 flex items-center gap-1 truncate text-sm',
                         showSelectedState
                           ? 'text-sidebar-selection-foreground'
-                          : 'text-sidebar-foreground dark:text-sidebar-foreground/75',
+                          : 'text-sidebar-foreground',
                         useAnchor && isEditingTitle && 'relative z-20'
                       )}
                       // Double-click to rename is scoped to the title only, so it can't
@@ -850,8 +848,12 @@ const TaskGroupSection = memo(function TaskGroupSection({
                       ) : null}
                       {renderTitle()}
                     </div>
-                    {/* Keep PR at the right edge, with All Changes totals immediately before it. */}
+                    {/* Keep PR at the right edge. Line totals stay in the hover card. */}
                     <SidebarRowEndSlot
+                      sessionId={task.taskId}
+                      isWaitingPermission={task.isWaitingPermission}
+                      isWorking={task.isWorking}
+                      hasUnreadMessages={task.hasUnreadMessages}
                       restIcon={
                         isChatTask ? (
                           <span className={cn('flex items-center gap-1.5', useAnchor && 'z-20')}>
@@ -862,7 +864,6 @@ const TaskGroupSection = memo(function TaskGroupSection({
                             {task.sharing ? <SessionSharingIndicator state={task.sharing} /> : null}
                           </span>
                         ) : hasPr ||
-                          hasChanges ||
                           showMergeablePill ||
                           isMobile ||
                           task.sharing?.visibility === 'private' ? (
@@ -878,16 +879,13 @@ const TaskGroupSection = memo(function TaskGroupSection({
                                 className="text-muted-foreground"
                               />
                             ) : null}
-                            {showMergeablePill ? (
-                              <SessionMergeablePill />
-                            ) : hasChanges && !isMergeable ? (
-                              <span className="flex items-center gap-1">
-                                <span className="text-code-added">+{task.addedLines}</span>
-                                <span className="text-code-removed">-{task.deletedLines}</span>
-                              </span>
-                            ) : null}
+                            {showMergeablePill ? <SessionMergeablePill /> : null}
                             {hasPr ? (
-                              <SessionPrIcon prStatus={prStatus} prCiState={task.prCiState} />
+                              <SessionPrIcon
+                                compact
+                                prStatus={prStatus}
+                                prCiState={task.prCiState}
+                              />
                             ) : null}
                             {task.sharing ? <SessionSharingIndicator state={task.sharing} /> : null}
                           </span>
@@ -909,13 +907,14 @@ const TaskGroupSection = memo(function TaskGroupSection({
               // Desktop repo rows get a hover info card wrapping the whole row/menu.
               const showInfoCard = !isMobile;
               const menuRow = hasMenuActions ? (
-                <ContextMenu key={task.taskId}>
-                  <ContextMenuTrigger asChild>{row}</ContextMenuTrigger>
-                  <ContextMenuContent className="min-w-[180px]">
+                <ContextMenu.Root key={task.taskId}>
+                  <ContextMenu.Trigger>{row}</ContextMenu.Trigger>
+                  <ContextMenu.Content className="min-w-[180px]">
                     {onOpenPullRequest && prUrl ? (
                       <>
-                        <ContextMenuItem
-                          onSelect={() => {
+                        <ContextMenu.Item
+                          icon={<GitPullRequest />}
+                          onClick={() => {
                             onOpenPullRequest({
                               taskId: task.taskId,
                               repoFullName: group.repoFullName,
@@ -924,76 +923,77 @@ const TaskGroupSection = memo(function TaskGroupSection({
                             });
                           }}
                         >
-                          <GitPullRequest />
                           {contextMenuLabels.openPr}
-                        </ContextMenuItem>
+                        </ContextMenu.Item>
                         {onRenameTask ||
                         onTogglePinTask ||
                         onArchiveTask ||
                         onCopySessionUrl ||
                         task.branchName ? (
-                          <ContextMenuSeparator />
+                          <ContextMenu.Separator />
                         ) : null}
                       </>
                     ) : null}
                     {onRenameTask ? (
-                      <ContextMenuItem
-                        onSelect={() => {
+                      <ContextMenu.Item
+                        icon={<Pencil />}
+                        onClick={() => {
                           beginRename(task.taskId, task.title);
                         }}
                       >
-                        <Pencil />
                         {contextMenuLabels.rename}
-                      </ContextMenuItem>
+                      </ContextMenu.Item>
                     ) : null}
                     {onTogglePinTask ? (
-                      <ContextMenuItem
-                        onSelect={() => {
+                      <ContextMenu.Item
+                        icon={task.isPinned ? <PinOff /> : <Pin />}
+                        onClick={() => {
                           onTogglePinTask(task.taskId, !task.isPinned);
                         }}
                       >
-                        {task.isPinned ? <PinOff /> : <Pin />}
                         {task.isPinned ? contextMenuLabels.unpin : contextMenuLabels.pin}
-                      </ContextMenuItem>
+                      </ContextMenu.Item>
                     ) : null}
                     {onArchiveTask ? (
-                      <ContextMenuItem
-                        onSelect={() => {
+                      <ContextMenu.Item
+                        icon={<Archive />}
+                        onClick={() => {
                           onArchiveTask(task.taskId);
                         }}
                       >
-                        <Archive />
                         {contextMenuLabels.archive}
-                      </ContextMenuItem>
+                      </ContextMenu.Item>
                     ) : null}
                     {(onRenameTask || onTogglePinTask || onArchiveTask) &&
                     (onCopySessionUrl || task.branchName) ? (
-                      <ContextMenuSeparator />
+                      <ContextMenu.Separator />
                     ) : null}
                     {onCopySessionUrl ? (
-                      <ContextMenuItem
-                        onSelect={() => {
+                      <ContextMenu.Item
+                        icon={<Link2 />}
+                        onClick={() => {
                           onCopySessionUrl(task.taskId);
                         }}
                       >
-                        <Link2 />
                         {contextMenuLabels.copyUrl}
-                      </ContextMenuItem>
+                      </ContextMenu.Item>
                     ) : null}
                     {shareMenuState ? (
-                      <ContextMenuItem
+                      <ContextMenu.Item
                         disabled={shareMenuState !== 'share'}
-                        onSelect={() => {
+                        icon={
+                          shareMenuState === 'share' ? (
+                            <Users />
+                          ) : shareMenuState === 'loading' ? (
+                            <Spinner />
+                          ) : (
+                            <LockKeyhole />
+                          )
+                        }
+                        onClick={() => {
                           onShareSessionWithTeam?.(task.taskId);
                         }}
                       >
-                        {shareMenuState === 'share' ? (
-                          <Users />
-                        ) : shareMenuState === 'loading' ? (
-                          <Loader2 className="animate-spin" />
-                        ) : (
-                          <LockKeyhole />
-                        )}
                         {shareMenuState === 'share'
                           ? contextMenuLabels.shareWithTeam
                           : shareMenuState === 'unregistered'
@@ -1001,20 +1001,20 @@ const TaskGroupSection = memo(function TaskGroupSection({
                             : shareMenuState === 'owner-only'
                               ? contextMenuLabels.onlyOwnerCanShare
                               : contextMenuLabels.loadingSharing}
-                      </ContextMenuItem>
+                      </ContextMenu.Item>
                     ) : null}
                     {task.branchName ? (
-                      <ContextMenuItem
-                        onSelect={() => {
+                      <ContextMenu.Item
+                        icon={<GitBranch />}
+                        onClick={() => {
                           void navigator.clipboard.writeText(task.branchName).catch(() => {});
                         }}
                       >
-                        <GitBranch />
                         {contextMenuLabels.copyBranch}
-                      </ContextMenuItem>
+                      </ContextMenu.Item>
                     ) : null}
-                  </ContextMenuContent>
-                </ContextMenu>
+                  </ContextMenu.Content>
+                </ContextMenu.Root>
               ) : (
                 row
               );
@@ -1318,7 +1318,7 @@ export const TaskList = memo(function TaskList({
   }
 
   return (
-    <TooltipProvider>
+    <Tooltip.Provider>
       <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={handleDragEnd}>
         <SortableContext items={repoIds} strategy={verticalListSortingStrategy}>
           <div className={cn('flex flex-col', className)}>
@@ -1391,6 +1391,6 @@ export const TaskList = memo(function TaskList({
           </div>
         </SortableContext>
       </DndContext>
-    </TooltipProvider>
+    </Tooltip.Provider>
   );
 });

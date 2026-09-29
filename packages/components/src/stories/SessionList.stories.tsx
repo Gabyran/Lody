@@ -128,6 +128,24 @@ function TaskListDemo({
           onToggleChatsCollapsed={() => setChatsCollapsed((prev) => !prev)}
           onArchiveSession={archiveTask}
           onRenameSession={renameTask}
+          onTogglePinSession={(sessionId, pinned) =>
+            setTaskState((prev) =>
+              prev.map((task) =>
+                task.sessionId === sessionId ? { ...task, isPinned: pinned } : task
+              )
+            )
+          }
+          onMarkSessionUnread={(sessionId) =>
+            setTaskState((prev) =>
+              prev.map((task) =>
+                task.sessionId === sessionId ? { ...task, hasUnreadMessages: true } : task
+              )
+            )
+          }
+          onCopySessionUrl={(sessionId) =>
+            void navigator.clipboard.writeText(`/demo/sessions/${sessionId}`).catch(() => {})
+          }
+          onOpenPullRequest={() => {}}
           onNew={createTask}
           onMoveRepo={(move) => setRepoState(move.nextRepos)}
           getSessionHref={(sessionId) => `/demo/sessions/${sessionId}`}
@@ -251,6 +269,21 @@ const DEFAULT_ARGS: SessionListProps = {
 
 export const Default: Story = {
   args: DEFAULT_ARGS,
+  render: (args) => <TaskListDemo {...args} />,
+};
+
+/**
+ * The desktop row context menu carrying every action: right-click a row (or its
+ * hover ⋯) on a repo session like "Browser notifications" — pin, mark unread,
+ * rename, copy link/branch, open PR and archive all render. zh_CN matches the
+ * shipping sidebar.
+ */
+export const RowContextMenu: Story = {
+  name: 'Row Context Menu',
+  args: DEFAULT_ARGS,
+  parameters: {
+    globals: { theme: 'light', locale: 'zh_CN' },
+  },
   render: (args) => <TaskListDemo {...args} />,
 };
 
@@ -662,7 +695,9 @@ export const AllDiffAndPrStates: Story = {
  * Sessions — own machine, own project, own lifecycle — not `parentSessionId`
  * child tabs. Covered here: an opener with several opened Sessions, a working
  * one, an unread one, the active one, and an orphan whose opener is not in this
- * list (archived / another scope) and therefore stays top-level.
+ * list (archived / another scope) and therefore stays top-level. The working and
+ * unread children keep their ├/└ and carry their status at the row's right edge,
+ * where it stands in for the diff / PR cluster.
  */
 const OPENED_SESSIONS_ARGS: SessionListProps = {
   selectedSessionId: 'mcp-opened-2',
@@ -726,10 +761,10 @@ export const OpenedSessionsLight: Story = {
 };
 
 /**
- * The opener itself is WORKING. Status outranks the tree at that node, so the
- * opener shows its spinner instead of the disclosure — the same rule an active
- * opened Session follows when it drops its ├/└. Folding is still reachable
- * from the row's context menu, which carries the identical toggle.
+ * The opener itself is WORKING. Its disclosure stays put and the spinner shows at
+ * the row's END slot, replacing the diff / PR metrics there — the same rule an
+ * active opened Session follows while keeping its ├/└. Nothing about the tree
+ * depends on activity any more.
  */
 export const OpenedSessionsActiveOpener: Story = {
   name: 'Opened Sessions (MCP) · Active opener',

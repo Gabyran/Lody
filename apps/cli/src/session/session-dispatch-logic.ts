@@ -9,11 +9,14 @@
  * See the class-level doc on `SessionDispatchWatcher` for the full behavioral design.
  */
 import {
+  resolveResumableAcpSessionId,
+  resolveSessionAcpTargetId as resolveDispatchAcpSessionId,
   extractPromptPreviewFromInputBlocks,
   historyItemsToInputBlocks,
   normalizeSessionInputBlocks,
   getLocalProjectHistoryProviderKey,
   resolveSessionHistoryStatus,
+  getPendingUserTurnActivationId,
   hasPendingUserTurnActivation,
   type MachineId,
   type SessionHistoryInput,
@@ -45,6 +48,17 @@ export type SessionWatchSnapshot = {
   hasAccessRetry: boolean;
 };
 
+export function findLastHistoryEntry(
+  history: SessionHistoryInput[],
+  turnId: string
+): SessionHistoryInput | undefined {
+  for (let index = history.length - 1; index >= 0; index--) {
+    const entry = history[index];
+    if (entry?.id === turnId) return entry;
+  }
+  return undefined;
+}
+
 /**
  * Whether an activation can still be explained by history that has not synced.
  *
@@ -56,8 +70,8 @@ export function isActivationAwaitingHistory(
   history: SessionHistoryInput[],
   pendingUserTurnId: string
 ): boolean {
-  const entry = history.find((item) => item.role === 'user' && item.id === pendingUserTurnId);
-  if (!entry) {
+  const entry = findLastHistoryEntry(history, pendingUserTurnId);
+  if (!entry || entry.role !== 'user') {
     return true;
   }
   const status = resolveSessionHistoryStatus(entry);
@@ -106,6 +120,7 @@ export function shouldWatchSession(snapshot: SessionWatchSnapshot): boolean {
   if (hasPendingUserTurnActivation(meta)) {
     return true;
   }
+  if (Object.keys(meta.steerTurnStatuses ?? {}).length > 0) return true;
 
   if ((meta.messageQueueUpdatedAt ?? 0) > (meta.messageQueueCheckedAt ?? 0)) {
     return true;
@@ -129,34 +144,6 @@ function isImportedAcpReplayUserTurn(entry: SessionHistoryInput, meta: SessionMe
     !!sourceAcpSessionId &&
     entry.id.startsWith(`${provider}:${sourceAcpSessionId}:turn:`)
   );
-}
-
-export function resolveResumableAcpSessionId(
-  meta: SessionMeta | undefined
-): SessionMeta['acpSessionId'] | undefined {
-  const acpSessionId = meta?.acpSessionId;
-  if (!meta || !acpSessionId) {
-    return undefined;
-  }
-  if (!meta.externalHistory) {
-    return acpSessionId;
-  }
-
-  const sourceAcpSessionId = meta.externalHistory.sourceAcpSessionId;
-  if (!sourceAcpSessionId) {
-    return undefined;
-  }
-  return acpSessionId === sourceAcpSessionId ? undefined : acpSessionId;
-}
-
-export function resolveDispatchAcpSessionId(
-  meta: SessionMeta | undefined
-): SessionMeta['acpSessionId'] | undefined {
-  const liveSessionId = resolveResumableAcpSessionId(meta);
-  if (liveSessionId || !meta?.externalHistory || meta.externalHistory.status === 'sync_conflict') {
-    return liveSessionId;
-  }
-  return meta.externalHistory.sourceAcpSessionId;
 }
 
 // ── Dispatch decision ───────────────────────────────────────────────────────
@@ -264,8 +251,8 @@ export function resolveSessionCancelAction(
  * 1. **New status field** (`entry.status`): 'pending', 'seen', or 'processing'.
  *    Lifecycle: `pending` → `seen` → `processing` → `handled`.
  *    `pending_apply` is guide intent and is deliberately not dispatched here,
- *    unless `latestUserMsgId` explicitly names it — that is a guide the agent
- *    refused, re-aimed at ordinary dispatch.
+ *    unless an exact-id refused-steer activation (or legacy latest pointer)
+ *    explicitly returns it to ordinary dispatch.
  *
  * 2. **Legacy read field** (`entry.read === false`): Older sessions without the
  *    `status` field.
@@ -287,13 +274,19 @@ export function findNextDispatchableUserTurn(
   history: SessionHistoryInput[],
   meta: SessionMeta
 ): SessionHistoryInput | null {
-  for (const entry of history) {
+  // Concurrent queue promotion and steering can insert the same turn twice.
+  // Match readTurn/updateEntry: only the last stored copy owns that identity.
+  const lastPositions = new Map(history.map((entry, index) => [entry.id, index]));
+  for (const [index, entry] of history.entries()) {
+    if (lastPositions.get(entry.id) !== index) continue;
     if (entry.role !== 'user') {
       continue;
     }
     if (isImportedAcpReplayUserTurn(entry, meta)) {
       continue;
     }
+    // Applied guidance is already consumed, including across a daemon restart.
+    if (entry.inputConfig?._lodyDeliveryKind === 'steer') continue;
     // Recovery already surfaced a delivery failure for this exact activation.
     // A history payload that arrives after the bounded wait must not resurrect
     // the failed turn when an unrelated signal opens the room later.
@@ -305,19 +298,22 @@ export function findNextDispatchableUserTurn(
 
     // Path 1: New status field — explicit lifecycle state
     if (typeof entry.status === 'string') {
+      // Prepared input is inert until the producer commits its dispatch
+      // pointer. History sync or stale status repair is not authorization.
+      if (entry.status === 'prepared') {
+        if (entry.id === getPendingUserTurnActivationId(meta)) return entry;
+        continue;
+      }
       if (entry.status === 'pending' || entry.status === 'seen' || entry.status === 'processing') {
         return entry;
       }
-      // `pending_apply` is steer intent, not a dispatch request — with one
-      // exception: a steer the agent refused gets the dispatch pointer re-aimed
-      // at it (`SessionExecutionService.requeueUndeliveredSteer`, or the Web
-      // client's own promotion). That pointer is a later and more explicit
-      // signal than the status, and honoring it here is what lets the message
-      // run after a restart even if the status flip never reached this machine.
+      // The activation can arrive before the history status change. Only a
+      // proven refusal (or a legacy producer promotion) authorizes that guide
+      // to run as an ordinary turn.
       if (
         entry.status === 'pending_apply' &&
-        entry.id === meta.latestUserMsgId &&
-        entry.id !== meta.lastHandledUserMsgId
+        (meta.steerTurnStatuses?.[entry.id] === 'pending' ||
+          (entry.id === meta.latestUserMsgId && entry.id !== meta.lastHandledUserMsgId))
       ) {
         return entry;
       }
@@ -359,3 +355,5 @@ export function resolveDispatchTurnInput(entry: SessionHistoryInput): DispatchTu
 
   return { inputBlocks, prompt };
 }
+
+export { resolveResumableAcpSessionId, resolveDispatchAcpSessionId };

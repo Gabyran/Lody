@@ -80,6 +80,14 @@ export function isGitHubUnauthorizedTokenError(error: unknown): boolean {
   return error instanceof GitHubClientTokenError && error.code === 'unauthorized';
 }
 
+/**
+ * A Convex action was sent but its result was lost during a reconnect. This is
+ * safe to retry for token minting because no GitHub operation has started yet.
+ */
+export function isGitHubOperationTokenConnectionLostError(error: unknown): boolean {
+  return error instanceof Error && error.message === 'Connection lost while action was in flight';
+}
+
 function normalizeExpiresAt(expiresAt: string | undefined, tokenSource: GitHubTokenSource) {
   if (expiresAt) {
     const parsed = Date.parse(expiresAt);
@@ -205,7 +213,8 @@ export async function getGitHubOperationToken(
 
   const requestGeneration = tokenCacheGeneration;
   const request = (async (): Promise<TokenEntry> => {
-    const result = await requireGitHubTokenPort().getOperationToken({
+    const fetchToken = async (): Promise<TokenEntry> => {
+      const result = await requireGitHubTokenPort().getOperationToken({
         workspaceId,
         repoFullName,
         operation,
@@ -214,16 +223,26 @@ export async function getGitHubOperationToken(
           : {}),
       });
 
-    if (!result.success) {
-      throw new GitHubClientTokenError(result.errorCode, result.errorMessage);
-    }
+      if (!result.success) {
+        throw new GitHubClientTokenError(result.errorCode, result.errorMessage);
+      }
 
-    const tokenSource: GitHubTokenSource = result.tokenSource === 'personal' ? 'personal' : 'app';
-    const entry: TokenEntry = {
-      token: result.token,
-      expiresAt: normalizeExpiresAt(result.expiresAt, tokenSource),
-      tokenSource,
+      const tokenSource: GitHubTokenSource = result.tokenSource === 'personal' ? 'personal' : 'app';
+      const entry: TokenEntry = {
+        token: result.token,
+        expiresAt: normalizeExpiresAt(result.expiresAt, tokenSource),
+        tokenSource,
+      };
+      return entry;
     };
+
+    let entry: TokenEntry;
+    try {
+      entry = await fetchToken();
+    } catch (error) {
+      if (!isGitHubOperationTokenConnectionLostError(error)) throw error;
+      entry = await fetchToken();
+    }
     if (requestGeneration === tokenCacheGeneration) {
       tokenCache.set(key, entry);
     }
@@ -263,19 +282,53 @@ export function invalidateGitHubTokensForWorkspace(workspaceId: string) {
  * On `GitHubAuthError` the cached token is invalidated, a fresh token is
  * fetched, and the call is retried exactly once.
  */
+async function verifyRepositoryIdentity(
+  token: string,
+  repoFullName: string,
+  repositoryId?: number
+): Promise<void> {
+  if (repositoryId === undefined) return;
+  const response = await fetch(`https://api.github.com/repos/${repoFullName}`, {
+    headers: { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json' },
+    redirect: 'error',
+    signal: AbortSignal.timeout(10_000),
+  });
+  if (response.status === 401) throw new GitHubAuthError();
+  if (!response.ok)
+    throw new GitHubClientTokenError(
+      'repository_identity_unavailable',
+      'Cannot verify this repository identity; no operation was attempted.'
+    );
+  const repository = (await response.json()) as { id?: number; full_name?: string };
+  if (
+    repository.id !== repositoryId ||
+    repository.full_name?.toLowerCase() !== repoFullName.toLowerCase()
+  ) {
+    throw new GitHubClientTokenError(
+      'repository_identity_changed',
+      'Repository name changed. Wait for GitHub synchronization and refresh before retrying.'
+    );
+  }
+}
+
 export async function withGitHubTokenRetry<T>(
   workspaceId: string,
   repoFullName: string,
-  fn: (token: string) => Promise<T>
+  fn: (token: string) => Promise<T>,
+  repositoryId?: number
 ): Promise<T> {
+  const run = async (token: string) => {
+    await verifyRepositoryIdentity(token, repoFullName, repositoryId);
+    return fn(token);
+  };
   const token = await getGitHubRepoToken(workspaceId, repoFullName);
   try {
-    return await fn(token);
+    return await run(token);
   } catch (error) {
     if (error instanceof GitHubAuthError) {
       invalidateGitHubRepoToken(workspaceId, repoFullName);
       const freshToken = await getGitHubRepoToken(workspaceId, repoFullName);
-      return fn(freshToken);
+      return run(freshToken);
     }
     throw error;
   }
@@ -285,11 +338,16 @@ export async function withGitHubOperationTokenRetry<T>(
   workspaceId: string,
   repoFullName: string,
   operation: GitHubOperation,
-  fn: (token: string) => Promise<T>
+  fn: (token: string) => Promise<T>,
+  repositoryId?: number
 ): Promise<T> {
+  const run = async (token: string) => {
+    await verifyRepositoryIdentity(token, repoFullName, repositoryId);
+    return fn(token);
+  };
   const entry = await getGitHubOperationToken(workspaceId, repoFullName, operation);
   try {
-    return await fn(entry.token);
+    return await run(entry.token);
   } catch (error) {
     if (entry.tokenSource === 'personal' && isGitHubPermissionFailure(error)) {
       throw new GitHubPersonalIdentityPermissionError(repoFullName);
@@ -300,7 +358,7 @@ export async function withGitHubOperationTokenRetry<T>(
       const freshEntry = await getGitHubOperationToken(workspaceId, repoFullName, operation, {
         ...(entry.tokenSource === 'personal' ? { invalidatedPersonalToken: entry.token } : {}),
       });
-      return fn(freshEntry.token);
+      return run(freshEntry.token);
     }
 
     throw error;

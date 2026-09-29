@@ -16,6 +16,8 @@ import type {
   SessionImagePayload,
   SessionFilePayload,
   SessionTurnInputConfig,
+  AcpCapabilityCacheEntry,
+  SessionGoalAction,
 } from '.';
 import type {
   PreviewCandidateReportRequest,
@@ -24,6 +26,8 @@ import type {
   SessionPreviewCreateResponse,
   SessionPreviewRevokeRequest,
   SessionPreviewRevokeResponse,
+  SessionPreviewStatusRequest,
+  SessionPreviewStatusResponse,
 } from './preview';
 import type { ProjectSkillsResult } from './acp/skills';
 import type { RpcSecretPublicKey } from './rpc-secret';
@@ -42,6 +46,8 @@ export type {
   SessionPreviewEndpointReleaseResponse,
   SessionPreviewRevokeRequest,
   SessionPreviewRevokeResponse,
+  SessionPreviewStatusRequest,
+  SessionPreviewStatusResponse,
 } from './preview';
 
 // ============================================
@@ -130,6 +136,8 @@ export interface SessionCancelRequest {
   workspaceId: WorkspaceId;
   /** Target assistant turn id. This is intentionally not the userTurnId. */
   turnId: string;
+  /** When present, cancel only this native subagent; never cancel the parent turn. */
+  subagentTaskId?: string;
 }
 
 export interface SessionCancelResponse {
@@ -158,7 +166,36 @@ export interface SessionSteerResponse {
   userTurnId: string;
   /** True only after adapter activation and CLI turn-ownership commit. */
   applied: boolean;
-  disposition: 'applied' | 'unsupported' | 'no-active-turn' | 'stale-turn' | 'busy' | 'error';
+  /** The daemon owns recovery; clients must not republish a dispatch pointer. */
+  recoveryOwned?: boolean;
+  disposition:
+    | 'applied'
+    | 'unsupported'
+    | 'no-active-turn'
+    | 'stale-turn'
+    | 'busy'
+    | 'delivery-unknown'
+    /** Proven undelivered, but durable promotion failed; clients may repair dispatch. */
+    | 'promotion-failed'
+    | 'error';
+  error?: string;
+}
+
+/**
+ * Answer to a goal control request.
+ *
+ * `accepted` means the machine took responsibility for the action, including
+ * when it is queued. `disposition` says how it reached the agent, which the
+ * caller cannot otherwise see: `applied` completed out of band, `turn_started`
+ * runs inside a prompt Lody just opened, and `queued` waits for the turn that
+ * currently owns the session's prompt slot.
+ */
+export interface SessionGoalResponse {
+  type: 'session/goal_response';
+  sessionId: SessionId;
+  action: SessionGoalAction;
+  accepted: boolean;
+  disposition: 'applied' | 'turn_started' | 'queued' | 'unsupported' | 'error';
   error?: string;
 }
 
@@ -215,6 +252,14 @@ export interface MachineStatusResponse {
   success: boolean;
   resources?: MachineResourceInfo;
   lifecycle?: MachineLifecycleCapability;
+  error?: string;
+}
+
+export interface MachinePreviewControlResponse {
+  type: 'machine/preview-control_response';
+  machineId: MachineId;
+  success: boolean;
+  runtimeNonce?: string;
   error?: string;
 }
 
@@ -294,6 +339,13 @@ export interface MachineAcpCapabilitiesRefreshRequest {
   machineId: MachineId;
   workspaceId: WorkspaceId;
   configId: AgentConfigId;
+  /**
+   * Start the agent even when the persisted entry still matches the launch
+   * inputs. Reserved for requests a user or a setup workflow made on purpose
+   * (Settings refresh, post-authentication verification, provider setup); the
+   * default path answers from the cache when it can.
+   */
+  force?: boolean;
 }
 
 export interface MachineAcpCapabilitiesRefreshResponse {
@@ -320,6 +372,8 @@ export interface MachineAcpCapabilitiesRefreshResponse {
     category?: string;
     optionCount: number;
   }>;
+  /** Complete persisted entry for immediate renderer convergence after the refresh RPC. */
+  capability?: AcpCapabilityCacheEntry;
   /** Available slash commands advertised by the agent. */
   availableCommands?: Array<{
     name: string;
@@ -444,6 +498,7 @@ export interface MachineAcpAuthenticationProgressMessage {
     | 'auth-methods'
     | 'authorization'
     | 'input-required'
+    | 'runtime-download'
     | 'output'
     | 'authenticated'
     | 'cancelled'
@@ -468,6 +523,10 @@ export interface MachineAcpAuthenticationProgressMessage {
   stream?: 'stdout' | 'stderr';
   output?: string;
   error?: string;
+  /** Managed runtime installed before the login process can spawn. */
+  runtimeName?: string;
+  runtimePhase?: 'downloading' | 'verifying' | 'extracting' | 'publishing' | 'complete';
+  runtimePercent?: number;
 }
 
 /**
@@ -719,7 +778,8 @@ export type LocalSessionControlRequest =
   | SessionFileSendLocalRequest
   | PreviewCandidateReportRequest
   | SessionPreviewCreateRequest
-  | SessionPreviewRevokeRequest;
+  | SessionPreviewRevokeRequest
+  | SessionPreviewStatusRequest;
 
 export type LocalSessionControlResponse =
   | SessionCreateAck
@@ -728,6 +788,7 @@ export type LocalSessionControlResponse =
   | SessionChatResponse
   | SessionCancelResponse
   | SessionSteerResponse
+  | SessionGoalResponse
   | MachineStatusResponse
   | MachinePingResponse
   | MachineRestartResponse
@@ -744,7 +805,8 @@ export type LocalSessionControlResponse =
   | SessionFileSendLocalResponse
   | PreviewCandidateReportResponse
   | SessionPreviewCreateResponse
-  | SessionPreviewRevokeResponse;
+  | SessionPreviewRevokeResponse
+  | SessionPreviewStatusResponse;
 
 export type LocalProjectFileListResult = {
   paths: string[];

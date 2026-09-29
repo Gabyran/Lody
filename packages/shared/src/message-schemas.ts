@@ -1,5 +1,14 @@
 import { z } from 'zod';
+import { SubagentTaskPayloadSchema } from './acp/claude-subagent-task';
 import {
+  isLodySubagentSnapshot,
+  isLodySubagentProgress,
+  type LodySubagentSnapshot,
+  type LodySubagentProgress,
+} from 'acp-extension-core';
+import {
+  PI_EXTENSION_PATH_MAX_LENGTH,
+  PI_EXTENSIONS_MAX_SELECTIONS,
   SESSION_FILE_MAX_COUNT,
   SESSION_FILE_MAX_SIZE_BYTES,
   SESSION_IMAGE_ALLOWED_MIME_TYPES,
@@ -9,10 +18,12 @@ import {
   type ACPSessionId,
   type SessionTurnInputConfig,
 } from './ai';
+import { SESSION_GOAL_ACTIONS } from './goal';
 import type { AgentRoleId, SessionId } from './ids';
+import type { ProjectRef } from './project';
 import { MAX_MESSAGE_TEXT_SPAN_MARK_LENGTH, MESSAGE_TEXT_SPAN_KINDS } from './message-text-spans';
 import { RpcSecretPublicKeySchema } from './rpc-secret';
-import { LodyOperationIdSchema } from './session-orchestration';
+import { LodyOperationIdSchema, LodyOperationCompletionSchema } from './session-orchestration';
 import { isSensitiveAcpConfigOptionId } from './session-preparation';
 import { normalizeMcpServerIdSelection } from './workspace-mcp';
 import {
@@ -75,6 +86,10 @@ export const BuiltinRuntimeOverridesSchema = z
     claudeCodeExecutable: z.string().optional(),
     kimiPath: z.string().optional(),
     grokPath: z.string().optional(),
+    piExtensions: z
+      .array(z.string().trim().min(1).max(PI_EXTENSION_PATH_MAX_LENGTH))
+      .max(PI_EXTENSIONS_MAX_SELECTIONS)
+      .optional(),
   })
   .strict();
 
@@ -354,19 +369,16 @@ export const SessionInputBlocksSchema = z
     }
   });
 
-export const ACPSessionConfigSchema = z
+export const ACPTurnConfigSchema = z
   .object({
     prompt: z.string(),
     inputBlocks: SessionInputBlocksSchema.optional(),
     cliType: AgentConfigCliTypeSchema,
     agentType: z.string().trim().min(1),
-    customAcp: CustomAcpLaunchSpecSchema.optional(),
-    runtimeOverrides: BuiltinRuntimeOverridesSchema.optional(),
     modeId: z.string().optional(),
     modelId: z.string().optional(),
     configOptionValues: AcpConfigOptionValuesSchema.optional(),
     mcpServerIds: z.array(z.string()).optional(),
-    taskToolsEnabled: z.boolean().optional(),
     agentRoleId: z.string().trim().min(1).nullable().optional(),
     agentRoleRevision: z.number().int().nonnegative().optional(),
     issuePRMentions: z.array(IssuePRMentionSchema).optional(),
@@ -375,26 +387,21 @@ export const ACPSessionConfigSchema = z
   })
   .passthrough();
 
-const LooseSessionTurnInputConfigSchema = z
-  .object({
-    prompt: z.string().optional(),
-    inputBlocks: SessionInputBlocksSchema.optional(),
-    cliType: AgentConfigCliTypeSchema.optional(),
-    agentType: z.string().trim().min(1).optional(),
-    customAcp: CustomAcpLaunchSpecSchema.optional(),
-    runtimeOverrides: BuiltinRuntimeOverridesSchema.optional(),
-    modeId: z.string().optional(),
-    modelId: z.string().optional(),
-    configOptionValues: AcpConfigOptionValuesSchema.optional(),
-    mcpServerIds: z.array(z.string()).optional(),
-    taskToolsEnabled: z.boolean().optional(),
-    agentRoleId: z.string().trim().min(1).nullable().optional(),
-    agentRoleRevision: z.number().int().nonnegative().optional(),
-    issuePRMentions: z.array(IssuePRMentionSchema).optional(),
-    resume: ACPSessionIdSchema.optional(),
-    chainDepth: z.number().int().nonnegative().optional(),
-  })
-  .passthrough();
+/** Provider launch fields join only the durable session config, never per-turn input. */
+export const ACPSessionConfigSchema = ACPTurnConfigSchema.extend({
+  customAcp: CustomAcpLaunchSpecSchema.optional(),
+  runtimeOverrides: BuiltinRuntimeOverridesSchema.optional(),
+});
+
+/** Local history provenance, not an additional ACP request option. */
+export const SessionHistoryDeliveryKindSchema = z.literal('steer');
+export type SessionHistoryDeliveryKind = z.infer<typeof SessionHistoryDeliveryKindSchema>;
+
+export const SessionHistoryInputConfigSchema = ACPTurnConfigSchema.partial()
+  .extend({ _lodyDeliveryKind: SessionHistoryDeliveryKindSchema.optional() })
+  .strip();
+
+const LooseSessionTurnInputConfigSchema = SessionHistoryInputConfigSchema.passthrough();
 
 const trimOptionalString = (value: unknown): string | undefined => {
   if (typeof value !== 'string') {
@@ -449,16 +456,6 @@ export const normalizeSessionTurnInputConfig = (
     normalized.agentType = agentType;
   }
 
-  const customAcp = maybeParseField(CustomAcpLaunchSpecSchema, record.customAcp);
-  if (customAcp) {
-    normalized.customAcp = customAcp;
-  }
-
-  const runtimeOverrides = maybeParseField(BuiltinRuntimeOverridesSchema, record.runtimeOverrides);
-  if (runtimeOverrides) {
-    normalized.runtimeOverrides = runtimeOverrides;
-  }
-
   const modeId = trimOptionalString(record.modeId);
   if (modeId) {
     normalized.modeId = modeId;
@@ -480,11 +477,6 @@ export const normalizeSessionTurnInputConfig = (
   const mcpServerIds = normalizeMcpServerIdSelection(record.mcpServerIds);
   if (mcpServerIds) {
     normalized.mcpServerIds = mcpServerIds;
-  }
-
-  const taskToolsEnabled = maybeParseField(z.boolean(), record.taskToolsEnabled);
-  if (taskToolsEnabled !== undefined) {
-    normalized.taskToolsEnabled = taskToolsEnabled;
   }
 
   if (record.agentRoleId === null) {
@@ -520,6 +512,11 @@ export const normalizeSessionTurnInputConfig = (
   const chainDepth = maybeParseField(z.number().int().nonnegative(), record.chainDepth);
   if (chainDepth !== undefined) {
     normalized.chainDepth = chainDepth;
+  }
+
+  const deliveryKind = maybeParseField(SessionHistoryDeliveryKindSchema, record._lodyDeliveryKind);
+  if (deliveryKind !== undefined) {
+    normalized._lodyDeliveryKind = deliveryKind;
   }
 
   const looseParsed = LooseSessionTurnInputConfigSchema.safeParse(record);
@@ -635,6 +632,7 @@ export const SessionCancelRequestSchema = z
     machineId: MachineIdSchema,
     workspaceId: WorkspaceIdSchema,
     turnId: z.string(),
+    subagentTaskId: z.string().trim().min(1).optional(),
   })
   .strict();
 
@@ -672,14 +670,28 @@ export const SessionSteerResponseSchema = z
     sessionId: SessionIdSchema,
     userTurnId: z.string().trim().min(1),
     applied: z.boolean(),
+    recoveryOwned: z.boolean().optional(),
     disposition: z.enum([
       'applied',
       'unsupported',
       'no-active-turn',
       'stale-turn',
       'busy',
+      'delivery-unknown',
+      'promotion-failed',
       'error',
     ]),
+    error: z.string().optional(),
+  })
+  .strict();
+
+export const SessionGoalResponseSchema = z
+  .object({
+    type: z.literal('session/goal_response'),
+    sessionId: SessionIdSchema,
+    action: z.enum(SESSION_GOAL_ACTIONS),
+    accepted: z.boolean(),
+    disposition: z.enum(['applied', 'turn_started', 'queued', 'unsupported', 'error']),
     error: z.string().optional(),
   })
   .strict();
@@ -922,7 +934,6 @@ export const SessionPreparationRunConfigSchema = z
       .array(z.string())
       .transform((ids) => normalizeMcpServerIdSelection(ids) ?? [])
       .optional(),
-    taskToolsEnabled: z.boolean().optional(),
   })
   .strict();
 
@@ -988,7 +999,8 @@ export const PermissionOptionSchema = z.object({
   optionId: z.string(),
   name: z.string(),
   description: z.string().optional(),
-  kind: z.enum(['allow_once', 'allow_always', 'deny', 'reject_once']).optional(),
+  kind: z.enum(['allow_once', 'allow_always', 'deny', 'reject_once', 'reject_always']).optional(),
+  _meta: PermissionMetaSchema.optional(),
 });
 
 export const RequestPermissionRequestSchema = z.object({
@@ -1087,6 +1099,16 @@ export const MachineStatusResponseSchema = z
   })
   .strict();
 
+export const MachinePreviewControlResponseSchema = z
+  .object({
+    type: z.literal('machine/preview-control_response'),
+    machineId: MachineIdSchema,
+    success: z.boolean(),
+    runtimeNonce: z.string().uuid().optional(),
+    error: z.string().optional(),
+  })
+  .strict();
+
 export const MachinePingRequestSchema = z
   .object({
     type: z.literal('machine/ping'),
@@ -1179,6 +1201,57 @@ const AcpModelSchema = z
     modelId: z.string(),
     name: z.string().optional(),
     description: z.string().optional(),
+  })
+  .strict();
+
+const AcpConfigOptionValueSummarySchema = z
+  .object({
+    value: z.string(),
+    name: z.string(),
+    description: z.string().optional(),
+    group: z.string().optional(),
+  })
+  .strict();
+
+const AcpConfigOptionSummarySchema = z
+  .object({
+    id: z.string(),
+    name: z.string(),
+    description: z.string().optional(),
+    category: z.string().optional(),
+    type: z.enum(['select', 'boolean']),
+    currentValue: AcpConfigOptionValueSchema,
+    options: z.array(AcpConfigOptionValueSummarySchema),
+  })
+  .strict();
+
+const AcpCapabilityCacheEntrySchema = z
+  .object({
+    cliType: AgentConfigCliTypeSchema,
+    agentType: z.string().trim().min(1),
+    cacheVersion: z.number().optional(),
+    provenance: z.literal('runtime').optional(),
+    sourceVersion: z.string().optional(),
+    modes: z.array(AcpModeSchema),
+    models: z.array(AcpModelSchema),
+    configOptions: z.array(AcpConfigOptionSummarySchema).optional(),
+    modelReasoningEfforts: z.record(z.string(), z.array(z.string())).optional(),
+    availableCommands: z
+      .array(
+        z
+          .object({
+            name: z.string(),
+            description: z.string().optional(),
+          })
+          .strict()
+      )
+      .optional(),
+    sessionFork: z.boolean().optional(),
+    acknowledgedSteer: z.boolean().optional(),
+    sessionTitle: z.boolean().optional(),
+    goalActions: z.array(z.enum(SESSION_GOAL_ACTIONS)).optional(),
+    sessionForkWorktree: z.boolean().optional(),
+    fetchedAt: z.number(),
   })
   .strict();
 
@@ -1290,6 +1363,7 @@ export const MachineAcpCapabilitiesRefreshRequestSchema = z
     machineId: MachineIdSchema,
     workspaceId: WorkspaceIdSchema,
     configId: AgentConfigIdSchema,
+    force: z.boolean().optional(),
   })
   .strict();
 
@@ -1313,6 +1387,7 @@ export const MachineAcpCapabilitiesRefreshResponseSchema = z
         })
       )
       .optional(),
+    capability: AcpCapabilityCacheEntrySchema.optional(),
     availableCommands: z
       .array(
         z.object({
@@ -1395,6 +1470,7 @@ export const MachineAcpAuthenticationProgressMessageSchema = z
       'auth-methods',
       'authorization',
       'input-required',
+      'runtime-download',
       'output',
       'authenticated',
       'cancelled',
@@ -1425,6 +1501,11 @@ export const MachineAcpAuthenticationProgressMessageSchema = z
     stream: z.enum(['stdout', 'stderr']).optional(),
     output: z.string().max(16_384).optional(),
     error: z.string().max(65_536).optional(),
+    runtimeName: z.string().trim().min(1).max(ACP_AUTH_ID_MAX_LENGTH).optional(),
+    runtimePhase: z
+      .enum(['downloading', 'verifying', 'extracting', 'publishing', 'complete'])
+      .optional(),
+    runtimePercent: z.number().min(0).max(100).optional(),
   })
   .strict()
   .superRefine((value, context) => {
@@ -1433,6 +1514,13 @@ export const MachineAcpAuthenticationProgressMessageSchema = z
         code: 'custom',
         path: ['authorizationUrl'],
         message: 'authorizationUrl is required for authorization progress',
+      });
+    }
+    if (value.status === 'runtime-download' && (!value.runtimeName || !value.runtimePhase)) {
+      context.addIssue({
+        code: 'custom',
+        path: ['runtimeName'],
+        message: 'runtime-download progress requires a runtime name and phase',
       });
     }
     if (
@@ -1725,9 +1813,7 @@ const PreviewCandidateSourceSchema = z
 
 const PreviewErrorCodeSchema = z.enum([
   'host_not_loopback',
-  'host_not_private',
   'host_prohibited',
-  'target_resolution_failed',
   'target_changed',
   'user_confirmation_required',
   'invalid_port',
@@ -1737,15 +1823,11 @@ const PreviewErrorCodeSchema = z.enum([
   'session_archived',
   'port_not_listening',
   'local_server_unreachable',
-  'process_not_owned_by_session',
   'preview_already_active',
   'resource_limit_exceeded',
-  'preview_expired',
-  'preview_idle_timeout',
   'grant_denied',
   'tunnel_not_configured',
   'tunnel_creation_failed',
-  'cloud_authorization_failed',
   'internal_error',
 ]);
 
@@ -1782,47 +1864,19 @@ const PreviewConnectionErrorSchema = z
   })
   .strict();
 
-const PreviewResourceLimitsSchema = z
+export const PreviewConnectionSchema = z
   .object({
-    maxRequestBodyBytes: z.number().int().positive(),
-    maxResponseBodyBytes: z.number().int().positive(),
-    maxRequestDurationMs: z.number().int().positive(),
-  })
-  .strict();
-
-const PreviewResourceUsageSchema = z
-  .object({
-    httpRequestCount: z.number().int().nonnegative().optional(),
-    webSocketOpenCount: z.number().int().nonnegative().optional(),
-    requestBytesIn: z.number().int().nonnegative().optional(),
-    responseBytesOut: z.number().int().nonnegative().optional(),
-    limitExceededCount: z.number().int().nonnegative().optional(),
-    lastLimitExceededAt: z.number().int().nonnegative().optional(),
-    lastCloseReason: z.string().optional(),
-  })
-  .strict();
-
-const PreviewConnectionSchema = z
-  .object({
-    status: z.enum(['idle', 'creating', 'active', 'failed', 'revoked', 'expired']),
-    grantId: z.string().optional(),
+    status: z.enum(['creating', 'active', 'closed', 'failed']),
+    endpointId: z.string().optional(),
     publicUrl: z.string().url().optional(),
-    tunnelId: z.string().optional(),
     target: PreviewTargetSchema.optional(),
-    viewerScope: z
-      .object({ type: z.literal('workspace') })
-      .strict()
-      .optional(),
     approvedByUserId: z.string().optional(),
     createdAt: z.number().int().nonnegative().optional(),
     updatedAt: z.number().int().nonnegative().optional(),
-    leaseExpiresAt: z.number().int().nonnegative().optional(),
     idleTimeoutMs: z.number().int().positive().optional(),
-    lastActiveAt: z.number().int().nonnegative().optional(),
-    revokedAt: z.number().int().nonnegative().optional(),
-    revokeReason: z.string().optional(),
-    resourceLimits: PreviewResourceLimitsSchema.optional(),
-    resourceUsage: PreviewResourceUsageSchema.optional(),
+    closedReason: z
+      .enum(['idle_timeout', 'revoked', 'session_ended', 'replaced', 'runtime_lost'])
+      .optional(),
     error: PreviewConnectionErrorSchema.optional(),
   })
   .strict();
@@ -1830,7 +1884,7 @@ const PreviewConnectionSchema = z
 const PreviewEndpointSchema = z
   .object({
     endpointId: z.string().trim().min(1),
-    kind: z.enum(['local-proxy', 'cloud-gateway']),
+    kind: z.enum(['local-proxy', 'quick-tunnel']),
     viewerUrl: z.string().url(),
     shareUrl: z.string().url().optional(),
     target: PreviewTargetSchema,
@@ -1878,13 +1932,13 @@ export const SessionPreviewCreateRequestSchema = z
     approval: z
       .object({
         source: z.enum(['browser_address', 'share_action']),
-        targetClass: z.enum(['loopback', 'private_lan']),
+        targetClass: z.literal('loopback'),
         target: PreviewTargetSchema,
         confirmedByUserId: z.string().trim().min(1),
         confirmedAt: z.number().int().nonnegative(),
       })
       .strict(),
-    replaceExisting: z.boolean().optional(),
+    restart: z.boolean().optional(),
   })
   .strict();
 
@@ -1894,6 +1948,29 @@ export const SessionPreviewCreateResponseSchema = z
     sessionId: SessionIdSchema,
     success: z.boolean(),
     connection: PreviewConnectionSchema.optional(),
+    error: PreviewErrorCodeSchema.optional(),
+    message: z.string().optional(),
+  })
+  .strict();
+
+export const SessionPreviewStatusRequestSchema = z
+  .object({
+    type: z.literal('session/preview-status'),
+    machineId: MachineIdSchema,
+    workspaceId: WorkspaceIdSchema,
+    sessionId: SessionIdSchema,
+    requestedByUserId: z.string().trim().min(1),
+    renewEndpointId: z.string().trim().min(1).optional(),
+  })
+  .strict();
+
+export const SessionPreviewStatusResponseSchema = z
+  .object({
+    type: z.literal('session/preview-status_response'),
+    sessionId: SessionIdSchema,
+    success: z.boolean(),
+    connection: PreviewConnectionSchema.optional(),
+    expiresAt: z.number().int().nonnegative().optional(),
     error: PreviewErrorCodeSchema.optional(),
     message: z.string().optional(),
   })
@@ -1963,6 +2040,7 @@ export const LocalSessionControlRequestSchema = z.discriminatedUnion('type', [
   PreviewCandidateReportRequestSchema,
   SessionPreviewCreateRequestSchema,
   SessionPreviewRevokeRequestSchema,
+  SessionPreviewStatusRequestSchema,
 ]);
 
 export const LocalSessionControlResponseSchema = z.discriminatedUnion('type', [
@@ -1972,6 +2050,7 @@ export const LocalSessionControlResponseSchema = z.discriminatedUnion('type', [
   SessionChatResponseSchema,
   SessionCancelResponseSchema,
   SessionSteerResponseSchema,
+  SessionGoalResponseSchema,
   MachineStatusResponseSchema,
   MachinePingResponseSchema,
   MachineRestartResponseSchema,
@@ -1989,6 +2068,7 @@ export const LocalSessionControlResponseSchema = z.discriminatedUnion('type', [
   PreviewCandidateReportResponseSchema,
   SessionPreviewCreateResponseSchema,
   SessionPreviewRevokeResponseSchema,
+  SessionPreviewStatusResponseSchema,
 ]);
 
 export const LocalProjectAddRequestSchema = z
@@ -2172,8 +2252,9 @@ export const LocalProjectSetWorktreeCleanupRequestSchema = z
   })
   .strict();
 
-const LocalProjectHistoryProviderSchema = z
+export const LocalProjectHistoryProviderSchema = z
   .object({
+    agentConfigId: AgentConfigIdSchema.refine((id) => id.trim().length > 0).optional(),
     cliType: AgentConfigCliTypeSchema,
     agentType: z.string().trim().min(1),
   })
@@ -2898,7 +2979,7 @@ const TerminalExitStatusSchema = z
   })
   .loose();
 
-const StandardToolContentSchema = z.discriminatedUnion('type', [
+const KnownStandardToolContentSchema = z.discriminatedUnion('type', [
   z
     .object({
       type: z.literal('text'),
@@ -2939,7 +3020,24 @@ const StandardToolContentSchema = z.discriminatedUnion('type', [
     .loose(),
 ]);
 
-export const ToolCallContentSchema = z.union([
+// ACP extension blocks remain opaque JSON. Known discriminators must still pass
+// their own schema; malformed known blocks cannot fall through as extensions.
+const unknownProtocolBlock = (known: z.ZodUnion) => {
+  const types = new Set(
+    known.options.flatMap((option) =>
+      option instanceof z.ZodObject && option.shape.type instanceof z.ZodLiteral
+        ? [...option.shape.type.values]
+        : []
+    )
+  );
+  return z.object({ type: z.string().refine((type) => !types.has(type)) }).catchall(z.json());
+};
+const StandardToolContentSchema = z.union([
+  KnownStandardToolContentSchema,
+  unknownProtocolBlock(KnownStandardToolContentSchema),
+]);
+
+const KnownToolCallContentSchema = z.union([
   // Legacy blocks used by older history entries
   z
     .object({
@@ -3000,16 +3098,31 @@ export const ToolCallContentSchema = z.union([
     })
     .loose(),
 ]);
+export const ToolCallContentSchema = z.union([
+  KnownToolCallContentSchema,
+  unknownProtocolBlock(KnownToolCallContentSchema),
+]);
 
-export const ToolCallLocationSchema = z.object({
-  path: z.string(),
-  startLine: z.number().optional(),
-  endLine: z.number().optional(),
-});
+export const ToolCallLocationSchema = z
+  .object({
+    path: z.string(),
+    line: z.number().nullable().optional(),
+    _meta: PermissionMetaSchema.optional(),
+    startLine: z.number().optional(),
+    endLine: z.number().optional(),
+    startColumn: z.number().optional(),
+    endColumn: z.number().optional(),
+  })
+  .catchall(z.json());
 
 export const AvailableCommandSchema = z.object({
   name: z.string(),
   description: z.string().optional(),
+  input: z
+    .object({ hint: z.string(), _meta: PermissionMetaSchema.optional() })
+    .nullable()
+    .optional(),
+  _meta: PermissionMetaSchema.optional(),
 });
 
 export const PermissionRequestInfoSchema = z.object({
@@ -3058,6 +3171,61 @@ export const TaskProposalMetaSchema = z.object({
   proposedBy: MessageItemActorSchema.optional(),
 });
 
+const proposalTimeOfDay = {
+  hour: z.number().int().min(0).max(23),
+  minute: z.number().int().min(0).max(59),
+  timeZone: z.string().min(1).max(100).optional(),
+};
+export const ScheduleProposalRuleSchema = z.discriminatedUnion('kind', [
+  z.object({ kind: z.literal('manual') }).strict(),
+  z.object({ kind: z.literal('minutes'), every: z.number().int().min(1).max(59) }).strict(),
+  z.object({ kind: z.literal('hours'), every: z.number().int().min(1).max(23) }).strict(),
+  z.object({ kind: z.literal('daily'), ...proposalTimeOfDay }).strict(),
+  z.object({ kind: z.literal('weekdays'), ...proposalTimeOfDay }).strict(),
+  z
+    .object({
+      kind: z.literal('weekly'),
+      weekdays: z.array(z.number().int().min(0).max(6)).min(1).max(7),
+      ...proposalTimeOfDay,
+    })
+    .strict(),
+  z
+    .object({
+      kind: z.literal('monthly'),
+      days: z.array(z.number().int().min(1).max(31)).min(1).max(31),
+      ...proposalTimeOfDay,
+    })
+    .strict(),
+  z.object({ kind: z.literal('once'), at: z.string().datetime({ offset: true }) }).strict(),
+]);
+
+export const ScheduleProposalDestinationSchema = z.discriminatedUnion('kind', [
+  z.object({ kind: z.literal('new_session') }).strict(),
+  z.object({ kind: z.literal('own_session') }).strict(),
+  z.object({ kind: z.literal('existing_session'), sessionId: z.string().min(1) }).strict(),
+]);
+
+export const ScheduleProposalTargetSchema = z
+  .object({
+    agentConfigId: z.string().min(1).optional(),
+    agentRoleId: z.string().min(1).optional(),
+    machineId: z.string().min(1).optional(),
+    project: ProjectRefSchema.transform((value) => value as ProjectRef).optional(),
+  })
+  .strict();
+
+export const ScheduleProposalMetaSchema = z.object({
+  proposalId: z.string().trim().min(1),
+  title: z.string().trim().min(1).max(200),
+  prompt: z.string().min(1).max(32768),
+  rule: ScheduleProposalRuleSchema,
+  destination: ScheduleProposalDestinationSchema.optional(),
+  target: ScheduleProposalTargetSchema.optional(),
+  outcome: z.enum(['created', 'dismissed']).optional(),
+  scheduleId: z.string().optional(),
+  proposedBy: MessageItemActorSchema.optional(),
+});
+
 // Reason codes for chat_failed system notice
 export const ChatFailedReasonSchema = z.enum([
   'session_archived',
@@ -3095,12 +3263,72 @@ export const ChatFailedMetaSchema = z.object({
   message: z.string().optional(),
 });
 
+export const ToolCallMessageSchema = z.object({
+  type: z.literal('tool_call'),
+  _meta: PermissionMetaSchema.optional(),
+  toolCallId: z.string(),
+  title: z.string().nullable().optional(),
+  status: ToolCallStatusSchema,
+  kind: ToolKindSchema.optional(),
+  content: z.array(ToolCallContentSchema).optional(),
+  locations: z.array(ToolCallLocationSchema).optional(),
+  rawInput: z.record(z.string(), z.unknown()).optional(),
+  rawOutput: z.record(z.string(), z.unknown()).optional(),
+  activityKind: z.enum(['context_compaction', 'codex_retry']).optional(),
+  // Canonical tool name, when the agent published one (ACP `title` is human-facing).
+  toolName: z.string().optional(),
+  // IANA timezone of the machine that ran a scheduling tool (cron is local-time to it).
+  schedulingTimeZone: z.string().optional(),
+  // Epoch ms when a scheduling tool call was first persisted (true creation moment;
+  // turn-level timestamps are not a safe proxy — see `recordedAtMs` in ai.ts).
+  recordedAtMs: z.number().optional(),
+  permissionRequest: PermissionRequestInfoSchema.optional(),
+});
+
 // Non-system notice MessageContent discriminated union
+const SubagentItemIdentityShape = {
+  nativeTurnId: z.string().optional(),
+  messageId: z.string().optional(),
+};
 export const NonSystemNoticeMessageContentSchema = z.discriminatedUnion('type', [
   z.object({
     type: z.literal('text'),
     text: z.string(),
+    spans: z.array(MessageTextSpanSchema).optional(),
   }),
+  SubagentTaskPayloadSchema.extend({
+    type: z.literal('subagent_task'),
+    run: z
+      .object({
+        sessionId: z.string().min(1),
+        snapshot: z.custom<LodySubagentSnapshot>(isLodySubagentSnapshot),
+        progress: z.custom<LodySubagentProgress>(isLodySubagentProgress).optional(),
+        items: z.array(
+          z.discriminatedUnion('type', [
+            z.object({
+              ...SubagentItemIdentityShape,
+              type: z.literal('text'),
+              text: z.string(),
+              spans: z.array(MessageTextSpanSchema).optional(),
+            }),
+            z.object({
+              ...SubagentItemIdentityShape,
+              type: z.literal('thought'),
+              text: z.string(),
+            }),
+            z.object({
+              ...SubagentItemIdentityShape,
+              type: z.literal('plan'),
+              entries: z.array(PlanEntrySchema),
+            }),
+            ToolCallMessageSchema.extend(SubagentItemIdentityShape),
+          ])
+        ),
+      })
+      .optional(),
+  }),
+  SessionCommentReferenceInputBlockSchema,
+  SessionVisualAnnotationReferenceInputBlockSchema,
   SessionImageInputBlockSchema,
   SessionImageGroupContentSchema,
   SessionFileBlockObjectSchema,
@@ -3139,23 +3367,7 @@ export const NonSystemNoticeMessageContentSchema = z.discriminatedUnion('type', 
     createdAt: z.number().optional(),
     updatedAt: z.number().optional(),
   }),
-  z.object({
-    type: z.literal('tool_call'),
-    toolCallId: z.string(),
-    title: z.string().nullable().optional(),
-    status: ToolCallStatusSchema,
-    kind: ToolKindSchema.optional(),
-    content: z.array(ToolCallContentSchema).optional(),
-    locations: z.array(ToolCallLocationSchema).optional(),
-    rawInput: z.record(z.string(), z.unknown()).optional(),
-    rawOutput: z.record(z.string(), z.unknown()).optional(),
-    activityKind: z.enum(['context_compaction', 'codex_retry']).optional(),
-    // Canonical tool name, when the agent published one (ACP `title` is human-facing).
-    toolName: z.string().optional(),
-    // IANA timezone of the machine that ran a scheduling tool (cron is local-time to it).
-    schedulingTimeZone: z.string().optional(),
-    permissionRequest: PermissionRequestInfoSchema.optional(),
-  }),
+  ToolCallMessageSchema,
   z.object({
     type: z.literal('available_commands'),
     commands: z.array(AvailableCommandSchema),
@@ -3170,13 +3382,18 @@ export const NonSystemNoticeMessageContentSchema = z.discriminatedUnion('type', 
       'session_chat',
       'session_chat_many',
     ]),
-    completion: z.unknown(),
+    progressMessageId: z.string().trim().min(1).optional(),
+    completion: LodyOperationCompletionSchema,
     continuation: z
       .object({
-        status: z.literal('not_started'),
+        status: z.enum(['not_started', 'uncertain']),
         reason: z
           .object({
-            code: z.literal('CONFIGURATION_UNAVAILABLE'),
+            code: z.enum([
+              'CONFIGURATION_UNAVAILABLE',
+              'DELIVERY_ATTEMPTS_EXHAUSTED',
+              'DELIVERY_EXECUTION_UNCERTAIN',
+            ]),
             message: z.string(),
           })
           .strict(),
@@ -3184,9 +3401,34 @@ export const NonSystemNoticeMessageContentSchema = z.discriminatedUnion('type', 
       .strict()
       .optional(),
   }),
+  z.object({
+    type: z.literal('operation_progress'),
+    operationId: LodyOperationIdSchema,
+    operationKind: z.enum(['session_create', 'session_create_many']),
+    items: z.array(
+      z
+        .object({
+          target: z
+            .object({
+              sessionId: SessionIdSchema,
+              userTurnId: z.string().trim().min(1),
+            })
+            .strict(),
+          label: z.string().optional(),
+          status: z.enum(['created', 'running', 'succeeded', 'failed', 'cancelled']),
+        })
+        .strict()
+    ),
+  }),
 ]);
 
 // System notice message content schema
+export const SessionForkOriginMetaSchema = z.object({
+  sourceSessionId: SessionIdSchema,
+  sourceTurnId: z.string(),
+  sourceTitle: z.string(),
+});
+
 export const SystemNoticeSchema = z.discriminatedUnion('name', [
   z.object({
     type: z.literal('system_notice'),
@@ -3207,6 +3449,16 @@ export const SystemNoticeSchema = z.discriminatedUnion('name', [
     type: z.literal('system_notice'),
     name: z.literal('task_proposal'),
     meta: TaskProposalMetaSchema.optional(),
+  }),
+  z.object({
+    type: z.literal('system_notice'),
+    name: z.literal('schedule_proposal'),
+    meta: ScheduleProposalMetaSchema.optional(),
+  }),
+  z.object({
+    type: z.literal('system_notice'),
+    name: z.literal('session_fork_origin'),
+    meta: SessionForkOriginMetaSchema.optional(),
   }),
 ]);
 
@@ -3230,11 +3482,11 @@ export const WorktreeScriptContentSchema = z.object({
 });
 
 // MessageContent union
-export const MessageContentSchema = z.union([
-  NonSystemNoticeMessageContentSchema,
-  SystemNoticeSchema,
-  WorktreeScriptContentSchema,
-]);
+export const MessageContentSchema = z
+  .union([NonSystemNoticeMessageContentSchema, SystemNoticeSchema, WorktreeScriptContentSchema])
+  .superRefine((item, ctx) => {
+    if (item.type === 'file') refineSessionFileBlock(item, ctx);
+  });
 
 export const MessageContentArraySchema = z.array(MessageContentSchema);
 
@@ -3550,7 +3802,7 @@ function normalizeLegacySessionProject(message: UnknownRecord): UnknownRecord {
  * - `cliType: 'builtin'`
  * - `agentType: 'claude' | 'codex'`
  */
-function normalizeLegacyAcpSessionConfig(value: unknown): unknown {
+export function normalizeLegacyAcpSessionConfig(value: unknown): unknown {
   if (!isRecord(value)) {
     return value;
   }

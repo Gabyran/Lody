@@ -1,48 +1,36 @@
-import { Loader2 } from 'lucide-react';
+import { Spinner } from '@lody/ui/spinner';
+import { BootShell } from '@/components/boot-shell';
 import { cn } from '@/lib/utils';
-
-/**
- * Holds the indicator at opacity 0 for 300ms, then fades it in.
- *
- * A route-chunk fallback has to paint `bg-background` on frame one — that is
- * what keeps a lazy layout from showing the bare `<body>` canvas — but most
- * chunk loads settle well under 300ms, and a spinner that appears and vanishes
- * inside that window reads worse than the quiet canvas it replaced. The delay
- * is CSS, not React state, so the deferral costs no timer and no re-render.
- *
- * All four of `animate-in`, `fade-in`, `delay-300` and `fill-mode-both` are
- * required, and dropping any one of them fails SILENTLY — `fade-in` is what
- * sets the animation's `from` opacity to 0, and `fill-mode-both` is what
- * applies that `from` state during the delay, so without either the indicator
- * simply animates from fully visible and nothing is ever deferred. Under
- * `prefers-reduced-motion: reduce` the global reset in `tailwind/index.css`
- * collapses the duration but leaves the delay, so the indicator appears after
- * 300ms without the fade, which is the intended degradation.
- */
-const DEFERRED_INDICATOR_CLASS = 'animate-in fade-in duration-300 delay-300 fill-mode-both ease-out';
 
 export function LoadingPlaceholder({
   title = 'Loading',
   description = '',
   variant = 'viewport',
-  deferIndicator = false,
 }: {
   title?: string;
   description?: string;
   /**
-   * `viewport` is reserved for boot/auth gates where no application shell is
-   * safe to show yet. `content` fills an already-mounted workspace pane so the
+   * `boot` is for the boot/auth gates between the window's first frame and the
+   * workspace layout: it continues the boot shell painted by `index.html`, with
+   * this copy under the mark. `viewport` fills the viewport where that frame is
+   * not continued. `content` fills an already-mounted workspace pane so the
    * sidebar and workspace identity remain stable during scoped synchronization.
    */
-  variant?: 'viewport' | 'content';
-  /**
-   * Paints the surface immediately but fades the spinner and copy in after a
-   * short delay. Use it wherever the wait is usually imperceptible — a lazy
-   * route chunk — and keep it off where the wait is known to be real (signing
-   * in, loading workspaces), because there the label is the point.
-   */
-  deferIndicator?: boolean;
+  variant?: 'boot' | 'viewport' | 'content';
 }) {
+  if (variant === 'boot') {
+    return (
+      <BootShell
+        status={
+          <>
+            <div className="lody-boot-shell__status-title">{title}</div>
+            {description ? <div>{description}</div> : null}
+          </>
+        }
+      />
+    );
+  }
+
   return (
     <div
       className={cn(
@@ -52,14 +40,11 @@ export function LoadingPlaceholder({
       data-loading-placeholder-scope={variant}
     >
       <div
-        className={cn(
-          'flex max-w-sm flex-col items-center gap-3 text-center',
-          deferIndicator && DEFERRED_INDICATOR_CLASS
-        )}
+        className="flex max-w-sm flex-col items-center gap-3 text-center"
         role="status"
         aria-live="polite"
       >
-        <Loader2 className="h-5 w-5 animate-spin" aria-hidden />
+        <Spinner className="h-5 w-5" aria-hidden />
         <div className="space-y-1">
           <div className="text-sm font-medium text-foreground">{title}</div>
           {description ? (

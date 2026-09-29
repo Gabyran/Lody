@@ -18,7 +18,7 @@ import {
   MIMO_TOKEN_PLAN_CREDENTIAL_MODE_ID,
   MINIMAX_CLAUDE_PRESET_ID,
 } from '@/components/settings/agent-config-dialog';
-import { Dialog, DialogContent, DialogDescription, DialogTitle } from '@/ui/dialog';
+import { Dialog } from '@/ui/dialog';
 
 const machineId = 'machine-story' as MachineId;
 const existingConfigId = 'cfg-claude' as AgentConfigId;
@@ -99,16 +99,16 @@ function CreateWrapper() {
 
 function NestedCreateWrapper() {
   const [settingsOpen, setSettingsOpen] = useState(true);
-  const [providerOpen, setProviderOpen] = useState(true);
+  const [providerOpen, setProviderOpen] = useState(false);
 
   return (
-    <Dialog open={settingsOpen} onOpenChange={setSettingsOpen}>
-      <DialogContent
+    <Dialog.Root open={settingsOpen} onOpenChange={setSettingsOpen}>
+      <Dialog.Content
         noAnimation
         className="h-[min(90vh,950px)] w-[84vw] max-w-[1100px] overflow-hidden p-0 sm:p-0"
       >
-        <DialogTitle className="sr-only">Settings</DialogTitle>
-        <DialogDescription className="sr-only">Nested provider dialog preview</DialogDescription>
+        <Dialog.Title className="sr-only">Settings</Dialog.Title>
+        <Dialog.Description className="sr-only">Nested provider dialog preview</Dialog.Description>
         <div className="flex h-full">
           <aside className="w-56 border-r border-border bg-background p-4">
             <div className="rounded-lg bg-secondary px-3 py-2 text-sm font-medium">Agents</div>
@@ -116,19 +116,25 @@ function NestedCreateWrapper() {
           <main className="flex-1 bg-background p-8">
             <h2 className="text-xl font-semibold">Agent Provider</h2>
             <div className="mt-4 h-24 rounded-lg border border-border bg-card" />
+            <button
+              type="button"
+              className="mt-6 rounded-md bg-primary px-3 py-1.5 text-sm text-primary-foreground"
+              onClick={() => setProviderOpen(true)}
+            >
+              New provider
+            </button>
           </main>
         </div>
         <AgentConfigDialog
           open={providerOpen}
           onOpenChange={setProviderOpen}
-          nestedInDialog
           mode={{ kind: 'create' }}
           machine={makeMachineWithClaudeCaps()}
           onSubmit={async () => {}}
           onRefreshCapabilities={refreshCapabilities}
         />
-      </DialogContent>
-    </Dialog>
+      </Dialog.Content>
+    </Dialog.Root>
   );
 }
 
@@ -321,6 +327,64 @@ function GlmPresetWrapper({ credentialModeId }: { credentialModeId?: string } = 
   );
 }
 
+function PiExtensionsWrapper({
+  supported = true,
+  scanError = false,
+}: {
+  supported?: boolean;
+  scanError?: boolean;
+}) {
+  const [open, setOpen] = useState(true);
+  return (
+    <AgentConfigDialog
+      open={open}
+      onOpenChange={setOpen}
+      mode={{
+        kind: 'edit',
+        config: {
+          ...existingConfig,
+          name: 'Pi',
+          agentType: 'pi',
+          runtimeOverrides: { piExtensions: ['/fixture/custom/provider.ts'] },
+        },
+      }}
+      machine={{
+        ...makeMachineWithClaudeCaps(),
+        protocolCapabilities: supported ? { piExtensions: 1 } : {},
+      }}
+      onSubmit={async () => {}}
+      onRefreshCapabilities={async (args) => ({
+        ...(await refreshCapabilities(args)),
+        agentType: 'pi',
+      })}
+      onScanPiExtensions={async () =>
+        scanError
+          ? { success: false, error: 'Synthetic scan failure' }
+          : {
+              success: true,
+              discovery: {
+                version: 1,
+                agentDir: '/fixture/pi/agent',
+                warnings: [],
+                extensions: [
+                  {
+                    path: '/fixture/pi/agent/extensions/provider.ts',
+                    name: 'Provider extension',
+                    source: 'directory',
+                  },
+                  {
+                    path: '/fixture/pi/agent/npm/node_modules/example-tools/index.js',
+                    name: 'Example tools',
+                    source: 'package',
+                  },
+                ],
+              },
+            }
+      }
+    />
+  );
+}
+
 const meta = {
   title: 'Settings/AgentConfigDialog',
   parameters: { layout: 'fullscreen' },
@@ -329,6 +393,12 @@ const meta = {
 
 export default meta;
 type Story = StoryObj<typeof meta>;
+
+export const PiExtensions: Story = { render: () => <PiExtensionsWrapper /> };
+export const PiExtensionsUnsupported: Story = {
+  render: () => <PiExtensionsWrapper supported={false} />,
+};
+export const PiExtensionsScanError: Story = { render: () => <PiExtensionsWrapper scanError /> };
 
 export const Create: Story = {
   render: () => <CreateWrapper />,

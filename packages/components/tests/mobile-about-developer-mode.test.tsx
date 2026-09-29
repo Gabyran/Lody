@@ -9,7 +9,8 @@ import {
   developerModeEnabledAtom,
   inboxBetaEnabledAtom,
   inboxFeatureEnabledAtom,
-  tasksBetaEnabledAtom,
+  promptShortcutsBetaEnabledAtom,
+  promptShortcutsFeatureEnabledAtom,
 } from '../src/atoms/settings';
 import { MobileAboutSettings } from '../src/components/mobile/mobile-about-settings';
 import { initI18n } from '../src/i18n';
@@ -17,6 +18,15 @@ import { initI18n } from '../src/i18n';
 (
   globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean }
 ).IS_REACT_ACT_ENVIRONMENT = true;
+
+class TestPointerEvent extends MouseEvent {
+  readonly pointerType: string;
+
+  constructor(type: string, init: MouseEventInit & { pointerType?: string } = {}) {
+    super(type, init);
+    this.pointerType = init.pointerType ?? '';
+  }
+}
 
 let container: HTMLDivElement;
 let root: Root;
@@ -49,6 +59,10 @@ function switchLabelled(label: string): HTMLButtonElement | null {
 }
 
 beforeEach(async () => {
+  Object.defineProperty(globalThis, 'PointerEvent', {
+    configurable: true,
+    value: TestPointerEvent,
+  });
   localStorage.clear();
   await initI18n();
   container = document.createElement('div');
@@ -86,41 +100,40 @@ describe('MobileAboutSettings developer mode', () => {
 
     // Revealed, but not enabled: the beta section stays away.
     expect(switchLabelled('Developer mode')).not.toBeNull();
-    expect(switchLabelled('Tasks')).toBeNull();
     expect(switchLabelled('Inbox')).toBeNull();
+    expect(switchLabelled('Prompt Shortcuts')).toBeNull();
 
     act(() => switchLabelled('Developer mode')?.click());
 
     expect(store.get(developerModeEnabledAtom)).toBe(true);
-    expect(switchLabelled('Tasks')).not.toBeNull();
     expect(switchLabelled('Inbox')).not.toBeNull();
+    expect(switchLabelled('Prompt Shortcuts')).not.toBeNull();
   });
 
-  it('turns the Tasks beta on from mobile, which is the whole point of this surface', () => {
-    const store = createStore();
-    store.set(developerModeEnabledAtom, true);
-    render(store);
+  it.each([
+    ['Inbox', inboxBetaEnabledAtom, inboxFeatureEnabledAtom],
+    ['Prompt Shortcuts', promptShortcutsBetaEnabledAtom, promptShortcutsFeatureEnabledAtom],
+  ] as const)(
+    'enables %s only after its beta switch is enabled',
+    (label, betaAtom, featureAtom) => {
+      const store = createStore();
+      store.set(developerModeEnabledAtom, true);
+      render(store);
 
-    const tasks = switchLabelled('Tasks');
-    expect(tasks).not.toBeNull();
-    act(() => tasks?.click());
+      expect(store.get(featureAtom)).toBe(false);
+      const toggle = switchLabelled(label);
+      expect(toggle).not.toBeNull();
+      act(() => toggle?.click());
 
-    expect(store.get(tasksBetaEnabledAtom)).toBe(true);
-  });
+      expect(store.get(betaAtom)).toBe(true);
+      expect(store.get(featureAtom)).toBe(true);
+      expect(toggle?.getAttribute('aria-checked')).toBe('true');
 
-  it('enables the mobile Inbox gate only after its beta switch is enabled', () => {
-    const store = createStore();
-    store.set(developerModeEnabledAtom, true);
-    render(store);
-
-    expect(store.get(inboxFeatureEnabledAtom)).toBe(false);
-    const inbox = switchLabelled('Inbox');
-    expect(inbox).not.toBeNull();
-    act(() => inbox?.click());
-
-    expect(store.get(inboxBetaEnabledAtom)).toBe(true);
-    expect(store.get(inboxFeatureEnabledAtom)).toBe(true);
-  });
+      act(() => toggle?.click());
+      expect(store.get(betaAtom)).toBe(false);
+      expect(store.get(featureAtom)).toBe(false);
+    }
+  );
 
   it('re-hides the switch when Developer mode is turned off, so the reveal must be earned again', () => {
     const store = createStore();
@@ -132,24 +145,32 @@ describe('MobileAboutSettings developer mode', () => {
 
     expect(store.get(developerModeEnabledAtom)).toBe(false);
     expect(switchLabelled('Developer mode')).toBeNull();
-    expect(switchLabelled('Tasks')).toBeNull();
     expect(switchLabelled('Inbox')).toBeNull();
+    expect(switchLabelled('Prompt Shortcuts')).toBeNull();
     expect(store.get(inboxFeatureEnabledAtom)).toBe(false);
   });
 
   it('keeps beta opt-ins when Developer mode goes off', () => {
     const store = createStore();
     store.set(developerModeEnabledAtom, true);
-    store.set(tasksBetaEnabledAtom, true);
     store.set(inboxBetaEnabledAtom, true);
+    store.set(promptShortcutsBetaEnabledAtom, true);
     render(store);
 
     act(() => switchLabelled('Developer mode')?.click());
 
     // Same rule as desktop: each gate is a conjunction, so the features
-    // disappear, but both choices survive for when Developer mode comes back.
-    expect(store.get(tasksBetaEnabledAtom)).toBe(true);
+    // disappear, but the choice survives for when Developer mode comes back.
     expect(store.get(inboxBetaEnabledAtom)).toBe(true);
     expect(store.get(inboxFeatureEnabledAtom)).toBe(false);
+    expect(store.get(promptShortcutsBetaEnabledAtom)).toBe(true);
+    expect(store.get(promptShortcutsFeatureEnabledAtom)).toBe(false);
+    expect(switchLabelled('Prompt Shortcuts')).toBeNull();
+
+    for (let i = 0; i < 7; i += 1) act(() => revealRow().click());
+    act(() => switchLabelled('Developer mode')?.click());
+
+    expect(store.get(promptShortcutsFeatureEnabledAtom)).toBe(true);
+    expect(switchLabelled('Prompt Shortcuts')?.getAttribute('aria-checked')).toBe('true');
   });
 });

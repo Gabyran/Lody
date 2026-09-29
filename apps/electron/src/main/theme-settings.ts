@@ -9,11 +9,12 @@ type ThemeSettingsSchema = {
  * The theme the renderer last committed, mirrored into the main process.
  *
  * The renderer owns theme state in its own `localStorage`, which main cannot
- * read — and the window's `backgroundColor`, the Windows caption overlay, and
- * the pre-paint `.dark` class all have to be decided before any renderer code
- * runs. Without this mirror they can only follow the OS appearance, so a user
- * on an explicit dark theme under a light system opens a white window and
- * watches it turn black once React mounts.
+ * read — and the window's `backgroundColor` and the Windows caption overlay
+ * have to be decided before any renderer code runs. (The `.dark` class itself
+ * is applied by the boot script in `index.html`, which CAN read that storage.)
+ * Without this mirror the native frame can only follow the OS appearance, so a
+ * user on an explicit dark theme under a light system gets a white window
+ * frame and caption buttons around a dark page.
  *
  * A preview (hovering a theme in Settings) deliberately does not land here:
  * only a committed choice describes how the next launch should look.

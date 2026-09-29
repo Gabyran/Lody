@@ -3,6 +3,7 @@ import { describe, expect, expectTypeOf, it } from 'vitest';
 import {
   MessageContentSchema,
   normalizeSessionTurnInputConfig,
+  SessionHistoryInputConfigSchema,
   LocalProjectControlRequestSchema,
   LocalProjectControlResponseSchema,
   LocalSessionControlResponseSchema,
@@ -16,6 +17,7 @@ import {
   safeParseServerReceiveMessage,
   safeParseServerToMachine,
   MachineAcpCapabilitiesRefreshRequestSchema,
+  MachineAcpCapabilitiesRefreshResponseSchema,
   ServerToClientSchema,
   SessionCancelRequestSchema,
   SessionChatRequestSchema,
@@ -26,7 +28,7 @@ import {
   SessionIdSchema,
   SessionImagePayloadSchema,
 } from '../src/message-schemas';
-import type { SessionImagePayload } from '../src/ai';
+import { ACP_CAPABILITY_CACHE_VERSION, type SessionImagePayload } from '../src/ai';
 import { ACP_AUTHENTICATION_FORM_MAX_BYTES } from '../src/acp-authentication-limits';
 import type { SessionId } from '../src/ids';
 
@@ -188,6 +190,26 @@ describe('message-schemas session steer', () => {
         type: 'session/steer_response',
         sessionId: 'session-1',
         userTurnId: 'user-2',
+        applied: false,
+        disposition: 'delivery-unknown',
+      }).success
+    ).toBe(true);
+    expect(
+      SessionSteerResponseSchema.safeParse({
+        type: 'session/steer_response',
+        sessionId: 'session-1',
+        userTurnId: 'user-2',
+        applied: false,
+        disposition: 'promotion-failed',
+        recoveryOwned: true,
+        error: 'Activation write failed',
+      }).success
+    ).toBe(true);
+    expect(
+      SessionSteerResponseSchema.safeParse({
+        type: 'session/steer_response',
+        sessionId: 'session-1',
+        userTurnId: 'user-2',
         accepted: true,
         disposition: 'accepted',
       }).success
@@ -241,6 +263,14 @@ describe('message-schemas image upload response', () => {
 });
 
 describe('message-schemas machine ACP capabilities refresh', () => {
+  it('validates bounded explicit Pi extension selections', () => {
+    expect(BuiltinRuntimeOverridesSchema.parse({ piExtensions: [' /fixture/plugin.ts '] })).toEqual(
+      { piExtensions: ['/fixture/plugin.ts'] }
+    );
+    for (const piExtensions of [[''], [false], 'plugin', Array(33).fill('/fixture/plugin.ts')]) {
+      expect(BuiltinRuntimeOverridesSchema.safeParse({ piExtensions }).success).toBe(false);
+    }
+  });
   it('accepts builtin Kimi runtime fields', () => {
     expect(CliTypeSchema.safeParse('kimi').success).toBe(true);
     expect(CliTypeSchema.safeParse('grok').success).toBe(true);
@@ -267,6 +297,51 @@ describe('message-schemas machine ACP capabilities refresh', () => {
         runtimeOverrides: { kimiPath: '/tmp/untrusted-kimi' },
       }).success
     ).toBe(false);
+  });
+
+  it('preserves the complete capability used to converge the renderer after refresh', () => {
+    const response = {
+      type: 'machine/acp-capabilities-refresh_response',
+      machineId: 'machine-1',
+      configId: 'config-1',
+      cliType: 'registry',
+      agentType: 'deepseek',
+      success: true,
+      capability: {
+        cliType: 'registry',
+        agentType: 'deepseek',
+        cacheVersion: ACP_CAPABILITY_CACHE_VERSION,
+        provenance: 'runtime',
+        sourceVersion: 'registry:deepseek:test',
+        modes: [],
+        models: [{ modelId: 'kimi-k3', name: 'Kimi K3' }],
+        configOptions: [
+          {
+            id: 'model',
+            name: 'Model',
+            category: 'model',
+            type: 'select',
+            currentValue: 'kimi-k3',
+            options: [{ value: 'kimi-k3', name: 'Kimi K3' }],
+          },
+          {
+            id: 'reasoning_effort',
+            name: 'Thinking',
+            category: 'thought_level',
+            type: 'select',
+            currentValue: 'max',
+            options: ['low', 'high', 'max'].map((value) => ({ value, name: value })),
+          },
+        ],
+        modelReasoningEfforts: { 'kimi-k3': ['low', 'high', 'max'] },
+        sessionFork: false,
+        fetchedAt: 1,
+      },
+    };
+
+    expect(MachineAcpCapabilitiesRefreshResponseSchema.parse(response).capability).toEqual(
+      response.capability
+    );
   });
 });
 
@@ -362,6 +437,16 @@ describe('message-schemas machine ACP authentication', () => {
         content: { code: 'one-time-code', account: 'work' },
       }),
     };
+    const runtimeDownloadProgress = {
+      type: 'machine/acp-authentication-progress',
+      machineId: 'machine-1',
+      requestId: 'auth-1',
+      agentType: 'codex',
+      status: 'runtime-download',
+      runtimeName: 'codex',
+      runtimePhase: 'downloading',
+      runtimePercent: 42,
+    };
 
     expect(MachineAcpAuthenticateRequestSchema.safeParse(request).success).toBe(true);
     expect(MachineAcpAuthenticateRequestSchema.safeParse(forgedStart).success).toBe(false);
@@ -385,6 +470,28 @@ describe('message-schemas machine ACP authentication', () => {
     expect(MachineAcpAuthenticationProgressMessageSchema.safeParse(formProgress).success).toBe(
       true
     );
+    expect(
+      MachineAcpAuthenticationProgressMessageSchema.safeParse(runtimeDownloadProgress).success
+    ).toBe(true);
+    // runtime-download progress requires the runtime identity it reports on.
+    expect(
+      MachineAcpAuthenticationProgressMessageSchema.safeParse({
+        ...runtimeDownloadProgress,
+        runtimeName: undefined,
+      }).success
+    ).toBe(false);
+    expect(
+      MachineAcpAuthenticationProgressMessageSchema.safeParse({
+        ...runtimeDownloadProgress,
+        runtimePhase: undefined,
+      }).success
+    ).toBe(false);
+    expect(
+      MachineAcpAuthenticationProgressMessageSchema.safeParse({
+        ...runtimeDownloadProgress,
+        runtimePercent: 101,
+      }).success
+    ).toBe(false);
     expect(MachineAcpAuthenticateResponseSchema.safeParse(response).success).toBe(true);
     expect(LocalSessionControlResponseSchema.safeParse(response).success).toBe(true);
     expect(safeParseLocalSessionControlRequest(JSON.stringify(request)).success).toBe(true);
@@ -849,7 +956,6 @@ describe('normalizeSessionTurnInputConfig', () => {
       },
       resume: 'acp-1',
       inputBlocks: [{ type: 'text', text: 'hello' }],
-      taskToolsEnabled: false,
       issuePRMentions: 'invalid',
     });
 
@@ -863,7 +969,33 @@ describe('normalizeSessionTurnInputConfig', () => {
       },
       resume: 'acp-1',
       inputBlocks: [{ type: 'text', text: 'hello' }],
-      taskToolsEnabled: false,
+    });
+  });
+
+  it('drops provider launch fields from turn input', () => {
+    const injected = {
+      prompt: 'hello',
+      cliType: 'builtin',
+      agentType: 'pi',
+      modelId: 'pi',
+      customAcp: { command: '/tmp/injected-acp' },
+      runtimeOverrides: { piExtensions: ['/tmp/injected.ts'] },
+    };
+
+    expect(normalizeSessionTurnInputConfig(injected)).toEqual({
+      prompt: 'hello',
+      cliType: 'builtin',
+      agentType: 'pi',
+      modelId: 'pi',
+    });
+
+    const stored = SessionHistoryInputConfigSchema.safeParse(injected);
+    expect(stored.success).toBe(true);
+    expect(stored.data).toEqual({
+      prompt: 'hello',
+      cliType: 'builtin',
+      agentType: 'pi',
+      modelId: 'pi',
     });
   });
 });

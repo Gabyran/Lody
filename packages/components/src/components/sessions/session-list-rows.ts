@@ -1,3 +1,4 @@
+import { sessionHasUnreadMessages } from '@/lib/session-read-receipt';
 import type {
   LocalProjectHistoryProvider,
   MachineId,
@@ -172,13 +173,6 @@ export function getEffectiveLatestMessageAt(
   return maxMs;
 }
 
-function sessionHasUnreadMessages(session: SessionMeta): boolean {
-  const lastMessageAt = parseTimestamp(session.lastMessageAt);
-  if (lastMessageAt === null) return false;
-  const lastReadAt = parseTimestamp(session.lastReadAt);
-  return lastReadAt === null || lastMessageAt > lastReadAt;
-}
-
 export type EffectiveSessionActivitySummary = {
   isWorking: boolean;
   isWaitingPermission: boolean;
@@ -237,7 +231,21 @@ type LatestPullRequestInfo = {
   readiness: SessionPullRequestReadiness | null;
 };
 
+// Every sidebar list rebuilds all rows whenever any session changes (a running
+// agent updates its meta constantly). Session metas keep their identity while
+// unchanged, and this is a pure function of one, so memoize per object.
+const latestPullRequestInfoBySession = new WeakMap<SessionMeta, LatestPullRequestInfo>();
+
 export function getLatestPullRequestInfo(session: SessionMeta): LatestPullRequestInfo {
+  let info = latestPullRequestInfoBySession.get(session);
+  if (!info) {
+    info = computeLatestPullRequestInfo(session);
+    latestPullRequestInfoBySession.set(session, info);
+  }
+  return info;
+}
+
+function computeLatestPullRequestInfo(session: SessionMeta): LatestPullRequestInfo {
   const pullRequests = session.pullRequests ?? [];
   if (!pullRequests.length) {
     return { url: null, number: null, status: null, ciState: null, readiness: null };
@@ -288,10 +296,7 @@ export function mapSessionMetaToSessionListRow(
       ? session.lastMessageAt
       : normalizeString(typeof session.lastMessageAt === 'string' ? session.lastMessageAt : '') ||
         session.createdAt;
-  const lastMessageAt = parseTimestamp(session.lastMessageAt);
-  const lastReadAt = parseTimestamp(session.lastReadAt);
-  const hasUnreadMessages =
-    lastMessageAt !== null && (lastReadAt === null || lastMessageAt > lastReadAt);
+  const hasUnreadMessages = sessionHasUnreadMessages(session);
 
   // A session is offline if we have online machine tracking and its machine is not in the set
   const isOffline = onlineMachineIds ? !onlineMachineIds.has(session.machineId) : false;

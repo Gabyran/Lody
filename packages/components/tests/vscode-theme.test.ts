@@ -343,11 +343,15 @@ describe('VSCode theme adapter', () => {
         extensionId: 'raunofreiberg.vesper',
         extensionVersion: '0.0.40',
       },
+      // Lody's deep-sea palette: graphite surfaces, a faint cool cast on the
+      // grays, and jellyfish cyan in place of the orange accent. Orange that
+      // means "warning" stays amber.
       colors: {
-        'button.background': '#FFC799',
-        'editor.background': '#101010',
-        'editor.foreground': '#FFFFFF',
-        'sideBar.background': '#161616',
+        'button.background': '#7CC4E8',
+        'editorWarning.foreground': '#FFC799',
+        'editor.background': '#131416',
+        'editor.foreground': '#FEFFFF',
+        'sideBar.background': '#191A1D',
       },
     });
     if (!vesper) {
@@ -356,8 +360,8 @@ describe('VSCode theme adapter', () => {
     expect(vesper.tokenColors.length).toBeGreaterThan(20);
     expect(toShikiTheme(vesper, 'vesper-test')).toMatchObject({
       name: 'vesper-test',
-      fg: '#FFFFFF',
-      bg: '#101010',
+      fg: '#FEFFFF',
+      bg: '#131416',
     });
     await expect(getBundledVSCodeThemeById('vesper')).resolves.toEqual(vesper);
     await expect(getBundledVSCodeThemeById('missing-theme')).resolves.toBeUndefined();
@@ -370,7 +374,7 @@ describe('VSCode theme adapter', () => {
       id: 'vesper',
       label: 'Vesper',
       colors: {
-        'editor.background': '#101010',
+        'editor.background': '#131416',
       },
     });
     expect(getCachedBundledVSCodeThemeById('vesper')).toBe(vesper);
@@ -482,13 +486,13 @@ describe('VSCode theme adapter', () => {
     const vars = createLodyThemeCssVariables(light);
     const backgroundL = lightnessOf(vars['--background']);
 
-    // Secondary text clears a readable gap; the composer field + panels recess
-    // below the page background. These come straight from the theme (no runtime
-    // floor), so a regression in lody-light.json is caught here.
+    // Secondary text clears a readable gap; recessed chips sit below the gray
+    // canvas. These come straight from the theme (no runtime floor), so a
+    // regression in lody-light.json is caught here.
     expect(backgroundL - lightnessOf(vars['--muted-foreground'])).toBeGreaterThanOrEqual(46);
-    expect(backgroundL - lightnessOf(vars['--input'])).toBeGreaterThanOrEqual(7);
-    expect(backgroundL - lightnessOf(vars['--muted'])).toBeGreaterThanOrEqual(4);
-    expect(backgroundL - lightnessOf(vars['--border'])).toBeGreaterThanOrEqual(8);
+    expect(backgroundL - lightnessOf(vars['--input'])).toBeGreaterThanOrEqual(2);
+    expect(backgroundL - lightnessOf(vars['--muted'])).toBeGreaterThanOrEqual(2);
+    expect(backgroundL - lightnessOf(vars['--border'])).toBeGreaterThanOrEqual(4);
 
     // …but an editable control does NOT recess: a gray field on a light canvas
     // reads as disabled. It sits on the page color and is delimited by
@@ -545,10 +549,35 @@ describe('VSCode theme adapter', () => {
         hexColorToHslChannel(sidebarBorderColor)
       );
       if (theme.type === 'light' || theme.type === 'hcLight') {
+        // Light conversation canvas is the brighter pane so attention stays
+        // there; the sidebar sits a clearly darker step.
         expect(sidebarBrightness, theme.id).toBeLessThan(editorBrightness);
+        expect(editorBrightness - sidebarBrightness, theme.id).toBeGreaterThanOrEqual(14);
       } else {
         expect(sidebarBrightness, theme.id).toBeGreaterThan(editorBrightness);
       }
+    }
+  });
+
+  it('keeps sidebar hover visibly distinct from the sidebar surface', async () => {
+    const themes = (await resolveBundledVSCodeThemes()).filter((theme) =>
+      isSelectableBundledVSCodeThemeId(theme.id)
+    );
+
+    for (const theme of themes) {
+      const variables = createLodyThemeCssVariables(theme);
+      const background = hslChannelToRgb(variables['--sidebar-background']);
+      const hover = hslChannelToRgb(variables['--sidebar-hover']);
+      const distance = Math.hypot(
+        hover.r - background.r,
+        hover.g - background.g,
+        hover.b - background.b
+      );
+
+      // Chrome like workspace / settings / archive / filter must read as
+      // hovered; 20 RGB units matches the selection floor so light mode
+      // does not wash the fill into the sidebar.
+      expect(distance, theme.id).toBeGreaterThanOrEqual(20);
     }
   });
 

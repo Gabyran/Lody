@@ -1,5 +1,38 @@
 import { describe, expect, it } from 'vitest';
-import { resolveSessionFileOpenTarget } from '../src/lib/session-file-open-target';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+import {
+  resolveMarkdownImagePath,
+  resolveSessionFileOpenTarget,
+} from '../src/lib/session-file-open-target';
+
+describe('Markdown image paths', () => {
+  it.each([
+    ['docs/guide.md', '../images/a%20b.png?v=1#preview', 'images/a b.png'],
+    ['docs/guide.md', './中文.png', 'docs/中文.png'],
+    ['README.md', '../outside.png', '../outside.png'],
+    ['/tmp/report/doc.md', '../plot.png', '/tmp/plot.png'],
+    ['C:\\repo\\docs\\guide.md', '..\\images\\plot.png', 'C:/repo/images/plot.png'],
+    ['docs/a.md', '/tmp/plot.png', '/tmp/plot.png'],
+    ['docs/a.md', 'C:/other/plot.png', 'C:/other/plot.png'],
+    ['docs/report%20v2.md', 'plot%2520v2.png', 'docs/plot%20v2.png'],
+    ['docs/a.md', 'plot%23draft.png', 'docs/plot#draft.png'],
+    ['docs/a.md', './plot:30.png', 'docs/plot:30.png'],
+  ])('resolves %s + %s on the owning machine', (document, src, expected) => {
+    expect(resolveMarkdownImagePath(document, src)).toBe(expected);
+  });
+  it.each([
+    'https://example.org/a.png',
+    '//example.org/a.png',
+    'data:image/png;base64,AA==',
+    'javascript:alert(1)',
+    '#anchor',
+    'file:///etc/image.png',
+  ])('does not treat %s as a relative filesystem path', (src) => {
+    expect(resolveMarkdownImagePath('docs/a.md', src)).toBeNull();
+  });
+});
 
 const WORKSPACE = '/Users/dev/project';
 
@@ -13,7 +46,10 @@ describe('resolveSessionFileOpenTarget', () => {
       ['percent-encoding in the name', 'docs/report%20v2.md'],
       ['a percent sign in the name', 'assets/100%25.png'],
       ['a colon and digits at the end', 'logs/2024:30.txt'],
-      ['a `worktrees/<uuid>/` segment of its own', 'fixtures/worktrees/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee/case.txt'],
+      [
+        'a `worktrees/<uuid>/` segment of its own',
+        'fixtures/worktrees/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee/case.txt',
+      ],
       ['a hash in the name', 'notes/draft#2.md'],
       ['a leading space', ' notes.md'],
     ] as const;
@@ -43,6 +79,92 @@ describe('resolveSessionFileOpenTarget', () => {
   });
 
   describe('an href an agent wrote', () => {
+    const otherWorktree = '/tmp/worktrees/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
+
+    it('reads the linked local file instead of a same-named file in the current workspace', async () => {
+      const root = await mkdtemp(path.join(tmpdir(), 'lody-file-link-'));
+      try {
+        const workspacePath = path.join(root, 'current');
+        const linkedRoot = path.join(root, 'worktrees', 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee');
+        await mkdir(workspacePath, { recursive: true });
+        await mkdir(linkedRoot, { recursive: true });
+        await writeFile(path.join(workspacePath, 'report.md'), 'wrong workspace');
+        const linkedFile = path.join(linkedRoot, 'report.md');
+        await writeFile(linkedFile, 'linked artifact');
+        const target = resolveSessionFileOpenTarget({
+          rawPath: `${linkedFile}:12`,
+          pathKind: 'markdown-href',
+          workspacePath,
+          preserveWorktreePath: true,
+        });
+        expect(await readFile(path.resolve(workspacePath, target.filePath), 'utf8')).toBe(
+          'linked artifact'
+        );
+        await rm(linkedFile);
+        await expect(
+          readFile(path.resolve(workspacePath, target.filePath), 'utf8')
+        ).rejects.toMatchObject({ code: 'ENOENT' });
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    });
+
+    it.each([WORKSPACE, null])(
+      'preserves another local worktree with workspace %s',
+      (workspacePath) => {
+        expect(
+          resolveSessionFileOpenTarget({
+            rawPath: `${otherWorktree}/report%20v2.md#L12-L15`,
+            pathKind: 'markdown-href',
+            workspacePath,
+            preserveWorktreePath: true,
+          })
+        ).toEqual({
+          filePath: `${otherWorktree}/report v2.md`,
+          startLine: 12,
+          endLine: 15,
+          fromMarkdownLink: true,
+          lineSuffixFormat: 'github',
+        });
+      }
+    );
+
+    it('keeps portable worktree mapping for nonlocal opens', () => {
+      expect(
+        resolveSessionFileOpenTarget({
+          rawPath: `${otherWorktree}/report.md:12`,
+          pathKind: 'markdown-href',
+          workspacePath: WORKSPACE,
+        })
+      ).toMatchObject({ filePath: 'report.md', startLine: 12 });
+    });
+
+    it.each([
+      `../worktrees/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee/report.md`,
+      `C:/worktrees/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee/report.md`,
+      `\\\\server\\worktrees\\aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee\\report.md`,
+    ])('preserves the local target %s', (rawPath) => {
+      expect(
+        resolveSessionFileOpenTarget({
+          rawPath,
+          pathKind: 'markdown-href',
+          workspacePath: WORKSPACE,
+          preserveWorktreePath: true,
+        }).filePath
+      ).toBe(rawPath.replace(/\\/g, '/'));
+    });
+
+    it('still shares the indexed identity for the current local workspace', () => {
+      expect(
+        resolveSessionFileOpenTarget({
+          rawPath: `${otherWorktree}/src/app.ts:12`,
+          pathKind: 'markdown-href',
+          workspacePath: otherWorktree,
+          preserveWorktreePath: true,
+        })
+      ).toMatchObject({ filePath: 'src/app.ts', startLine: 12 });
+    });
+
     it('splits a trailing line suffix off the path', () => {
       expect(
         resolveSessionFileOpenTarget({

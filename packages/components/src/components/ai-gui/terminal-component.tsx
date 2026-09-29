@@ -33,7 +33,7 @@ export { prepareTerminalPreview } from './terminal-preview';
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === 'object' && value !== null && !Array.isArray(value);
 
-const renderAnsiToReactNodes = ({
+export const renderAnsiToReactNodes = ({
   value,
   terminalTheme,
 }: {
@@ -183,7 +183,7 @@ export const TerminalComponent = memo(function TerminalComponent({
               type="button"
               className={cn(
                 CONVERSATION_PANEL_HEADER_CLASS,
-                'w-full text-left transition-colors hover:bg-muted',
+                'w-full text-left transition-colors hover:bg-hover',
                 bodyVisible ? CONVERSATION_PANEL_HEADER_RULE_CLASS : null
               )}
               onClick={onHeaderClick}

@@ -1,11 +1,12 @@
 import { useEffect, useRef, useState } from 'react';
 import type { LocalProjectWorktreeCleanupPreflightResult } from '@lody/shared';
 import { useTranslation } from 'react-i18next';
-import { Loader2, X } from 'lucide-react';
+import { X } from 'lucide-react';
+import { Spinner } from '@lody/ui/spinner';
 
 import { Drawer, DrawerClose, DrawerContent, DrawerDescription, DrawerTitle } from '@/ui/drawer';
-import { Button } from '@/ui/button';
-import { Checkbox } from '@/ui/checkbox';
+import { Button } from '@lody/ui/button';
+import { Checkbox } from '@lody/ui/checkbox';
 import { cn } from '@/lib/utils';
 
 export type MobileRemoveLocalProjectSheetProps = {
@@ -197,7 +198,7 @@ export function MobileRemoveLocalProjectSheet({
                   className="mt-0.5"
                   checked={cleanupWorktrees}
                   disabled={!canCleanupWorktrees || isRemoving}
-                  onCheckedChange={(checked) => void handleCleanupChange(checked === true)}
+                  onCheckedChange={(checked) => void handleCleanupChange(checked)}
                 />
                 <span>
                   <span className="block font-medium text-foreground">
@@ -265,7 +266,7 @@ export function MobileRemoveLocalProjectSheet({
           >
             <Button
               type="button"
-              variant="outline"
+              variant="secondary"
               className="flex-1"
               onClick={() => onOpenChange(false)}
               disabled={isRemoving}
@@ -281,7 +282,7 @@ export function MobileRemoveLocalProjectSheet({
             >
               {isRemoving ? (
                 <>
-                  <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
+                  <Spinner className="mr-1.5 h-3.5 w-3.5" />
                   {t('common.processing', 'Processing...')}
                 </>
               ) : (

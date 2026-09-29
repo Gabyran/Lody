@@ -1,23 +1,38 @@
-import { useId, useState, type ReactNode } from 'react';
+import { useId, useState, type CSSProperties, type ReactEventHandler, type ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
-import type { TFunction } from 'i18next';
+import type { SessionRowOpenedByTreeSlot } from './session-row-leading-slot';
+export {
+  SessionRowLeadingSlot,
+  buildSessionRowOpenedByTreeSlot,
+  type SessionRowOpenedByTreeSlot,
+} from './session-row-leading-slot';
 import {
   Check,
   ChevronDown,
+  CircleAlert,
   CircleDot,
   CornerLeftUp,
   Github,
   Hand,
-  Loader2,
-  MoreHorizontal,
   X,
   type LucideIcon,
 } from 'lucide-react';
+import { useAtomValue } from 'jotai';
+import { useWorkingHandOver, WorkingStatusMark } from '@/ui/working-status-mark';
+import {
+  sessionSendStatusAtomFamily,
+  sessionUnsentNewConversationAtomFamily,
+} from '@/atoms/session-send-status';
+import type { SessionSendState } from '@/lib/session-send-status';
+import { formatFileSize } from '@/lib/session-file-presentation';
 import type { PrStatus, SessionPullRequestCiState } from '@lody/shared';
 import { cn } from '@/lib/utils';
-import { Tooltip, TooltipContent, TooltipTrigger } from '@/ui/tooltip';
-import { ContextMenuItem, ContextMenuSeparator } from '@/ui/context-menu';
-import { Skeleton } from '@/ui/skeleton';
+import { Tooltip } from '@lody/ui/tooltip';
+import * as stylex from '@stylexjs/stylex';
+import { Badge } from '@lody/ui/badge';
+import { mergeableBadgeTheme } from './sidebar-mergeable-badge.stylex';
+import { ContextMenu } from '@lody/ui/context-menu';
+import { Skeleton } from '@lody/ui/skeleton';
 import { PR_STATUS_META } from '@/components/sessions/pull-request-badge';
 import { SidebarConfirmArchiveButton } from '@/components/sidebar-confirm-archive-button';
 import { CachedAvatarImg } from '@/components/cached-avatar-img';
@@ -31,18 +46,24 @@ import { getGitHubOwnerAvatarUrl } from '@/lib/github-avatar';
  * flat Updated list in `sidebar-updated-task-list.tsx`) render the same anatomy,
  * so the pieces live here once instead of being copied three times.
  *
- * Row anatomy: `[① status/tree affordance | more][② author avatar? + title][③ diff/mergeable?][worktree?][④ PR icon? | archive]`.
+ * Row anatomy: `[① tree affordance | more][② author avatar? + title][③ status | mergeable? + worktree? + PR icon? | archive]`.
  * The author avatar (`SessionRowAuthorAvatar`) only appears in team ("All Tasks") scope on a
  * multi-member workspace; otherwise the title owns the leading edge of slot ②. The leading slot
  * stays reserved even when empty (the ⋯ menu button reveals there on hover). A local worktree
  * session shows a faint worktree glyph (`SessionRowWorktreeIndicator`) inside the metric cluster,
- * between the line diff and the PR icon (taking the PR's right-edge spot when there is no PR);
+ * immediately before the PR icon (taking the PR's right-edge spot when there is no PR);
  * GitHub sessions are always worktrees so they never show it. The full
  * repo / folder / worktree session-type detail still lives in the desktop hover info card
- * (`session-info-hover-card.tsx`). At rest, PR status
- * owns the right edge when present and line diff sits immediately before it. Without
- * PR status, line diff owns the right edge. Archive replaces the trailing content on
- * hover, so the row's rightmost metric never shifts.
+ * (`session-info-hover-card.tsx`).
+ *
+ * The END slot (③) is the row's single status channel: working / waiting / unread
+ * REPLACES the whole resting metric cluster there, so an active row reads
+ * `[title][status]` and nothing else competes with it. Only a resting row shows
+ * metrics, where PR status owns the right edge when present. Line totals stay
+ * off the row (hover card only). Archive replaces the trailing content on hover, so the
+ * row's rightmost mark never shifts. The leading slot (①) is therefore free to
+ * ALWAYS draw the opened-by tree: a running or unread child keeps its ├/└ and an
+ * active opener keeps its disclosure.
  */
 export type SidebarRowKind = 'github' | 'local' | 'chat';
 
@@ -51,9 +72,8 @@ type PrCiVerdict = 'success' | 'failure' | 'pending' | 'expected';
 /**
  * PR + CI use the original 14px PR / 10px verdict-slot geometry. The circular
  * mask removes the PR stroke beneath the verdict without painting a
- * sidebar-colored backdrop, so the cutout stays transparent on hover and
- * selected-row surfaces. The base keeps its PR-status tone; only the verdict
- * uses the CI-state tone. Running uses a static dot and a tighter cutout.
+ * sidebar-colored backdrop. The info bar ContextChip uses this same
+ * `SessionPrIcon`. Running uses a static dot and a tighter cutout.
  */
 function MaskedPrCiIcon({
   BaseIcon,
@@ -113,40 +133,151 @@ function MaskedPrCiIcon({
   );
 }
 
+const SEND_RING_RADIUS = 4.25;
+const SEND_RING_CIRCUMFERENCE = 2 * Math.PI * SEND_RING_RADIUS;
+const SEND_RING_SHIMMER_LENGTH = 5;
+
 /**
- * ① The 14px status slot at the row's leading edge. Single-slot priority:
- * `waitingPermission > isWorking > hasUnread > empty`. The PR status now lives in
- * the end slot (④), not here, so a resting GitHub row's leading slot is empty
- * unless it is working / unread — but the slot is always reserved so the ⋯ menu
- * button can reveal there on hover without shifting the row.
+ * A local message still uploading: a thin ring that fills with the bytes sent,
+ * with a faint highlight sweeping along the filled arc so a ring waiting on the
+ * next progress report never reads as a frozen spinner. Without a measurable
+ * size the same ring turns with a quarter arc. The turn rides an HTML wrapper,
+ * like `@lody/ui`'s Spinner: a rotating svg does not composite at DPR≠1.
  */
-function SessionRowIndicator({
+export function SessionSendProgressRing({ progress }: { progress?: number }) {
+  const known = typeof progress === 'number';
+  const filled = known ? Math.min(100, Math.max(4, progress)) : 25;
+  const maskId = `session-send-ring-${useId().replace(/:/g, '')}`;
+  const arc = {
+    cx: '6',
+    cy: '6',
+    r: SEND_RING_RADIUS,
+    strokeWidth: 1.5,
+    strokeLinecap: 'round' as const,
+    strokeDasharray: SEND_RING_CIRCUMFERENCE,
+    strokeDashoffset: SEND_RING_CIRCUMFERENCE * (1 - filled / 100),
+    transform: 'rotate(-90 6 6)',
+  };
+  return (
+    <span
+      className={cn(
+        'flex h-3 w-3 text-primary',
+        !known && 'animate-spin [animation-duration:1.2s] motion-reduce:animate-none'
+      )}
+      data-session-send-ring={known ? 'determinate' : 'indeterminate'}
+    >
+      <svg viewBox="0 0 12 12" className="h-full w-full" fill="none" aria-hidden="true">
+        <circle
+          cx="6"
+          cy="6"
+          r={SEND_RING_RADIUS}
+          stroke="currentColor"
+          strokeOpacity={0.22}
+          strokeWidth={1.5}
+        />
+        <circle
+          {...arc}
+          stroke="currentColor"
+          className="transition-[stroke-dashoffset] duration-300 ease-out motion-reduce:transition-none"
+        />
+        {known ? (
+          <>
+            <mask id={maskId} maskUnits="userSpaceOnUse" x="0" y="0" width="12" height="12">
+              <circle {...arc} stroke="white" />
+            </mask>
+            <circle
+              cx="6"
+              cy="6"
+              r={SEND_RING_RADIUS}
+              stroke="white"
+              strokeOpacity={0.65}
+              strokeWidth={2}
+              strokeLinecap="round"
+              strokeDasharray={`${SEND_RING_SHIMMER_LENGTH} ${SEND_RING_CIRCUMFERENCE}`}
+              transform="rotate(-90 6 6)"
+              mask={`url(#${maskId})`}
+              className="motion-reduce:hidden"
+              data-session-send-shimmer=""
+            >
+              <animate
+                attributeName="stroke-dashoffset"
+                from={SEND_RING_SHIMMER_LENGTH}
+                to={-SEND_RING_CIRCUMFERENCE}
+                dur="1.8s"
+                repeatCount="indefinite"
+              />
+            </circle>
+          </>
+        ) : null}
+      </svg>
+    </span>
+  );
+}
+
+/**
+ * ③ The 14px status mark, rendered at the row's TRAILING edge inside
+ * {@link SidebarRowEndSlot}. Single-mark priority:
+ * `sendFailed > waitingPermission > isWorking > sending > hasUnread`. A failed
+ * local send outranks everything because nothing else will retry it; an upload
+ * in progress yields to the agent's own activity. Returns `null` when the
+ * session is idle and read, which is what lets the end slot fall back to its
+ * resting metric cluster (diff / worktree / PR) — a row shows one or the other,
+ * never both.
+ *
+ * It lives at the end rather than at the leading edge so the opened-by tree can
+ * own the leading slot unconditionally: before this, an active child had to drop
+ * its ├/└ connectors and the nesting silently disappeared exactly on the rows a
+ * user watches most.
+ */
+export function SessionRowStatusIndicator({
   isWaitingPermission,
   isWorking,
   hasUnreadMessages,
+  sendState,
+  sendProgress,
+  sendLabel,
 }: {
   isWaitingPermission?: boolean;
   isWorking?: boolean;
   hasUnreadMessages?: boolean;
+  /** Renderer-local send journal state for this session. */
+  sendState?: SessionSendState | null;
+  /** 0–100; omitted when the upload has no measurable size. */
+  sendProgress?: number;
+  /** Spoken name of the send mark ("Sending · 12.4 MB / 38.0 MB"). */
+  sendLabel?: string;
 }) {
   let icon: ReactNode = null;
+  let label: string | undefined;
 
-  if (isWaitingPermission) {
+  if (sendState === 'failed') {
+    icon = <CircleAlert className="h-3 w-3 text-destructive" strokeWidth={2.25} />;
+    label = sendLabel;
+  } else if (isWaitingPermission === true) {
     icon = <Hand className="h-3 w-3 text-status-warning" />;
-  } else if (isWorking) {
+  } else if (isWorking !== true && sendState === 'sending') {
+    icon = <SessionSendProgressRing progress={sendProgress} />;
+    label = sendLabel;
+  } else if (isWorking === true || hasUnreadMessages === true) {
+    // Working grid, the working → unread "done" transition, and the unread dot
+    // are one component so it stays mounted across that change and can see it.
     icon = (
-      <Loader2
-        data-session-working-spinner=""
-        className="h-3 w-3 shrink-0 animate-spin text-primary will-change-transform"
+      <WorkingStatusMark
+        working={isWorking === true}
+        unread={hasUnreadMessages === true}
+        className="text-primary"
       />
     );
-  } else if (hasUnreadMessages) {
-    icon = <span className="h-2 w-2 rounded-full bg-primary" />;
   }
+
+  if (!icon) return null;
 
   return (
     <div
       data-session-row-indicator=""
+      data-session-send-state={sendState ?? undefined}
+      role={label ? 'img' : undefined}
+      aria-label={label}
       className="flex h-3.5 w-3.5 shrink-0 items-center justify-center"
     >
       {icon}
@@ -154,22 +285,90 @@ function SessionRowIndicator({
   );
 }
 
+/** True when {@link SessionRowStatusIndicator} would draw a mark for this row. */
+function hasSessionRowStatus({
+  isWaitingPermission,
+  isWorking,
+  hasUnreadMessages,
+  sendState,
+}: SessionRowStatusFlags): boolean {
+  return Boolean(isWaitingPermission || isWorking || hasUnreadMessages || sendState);
+}
+
+/**
+ * The spoken name of a row's send mark. Sizes are shown only while bytes are
+ * measurable; a text-only message is simply "Sending".
+ */
+function useSessionSendLabel(
+  status: { state: SessionSendState; sentBytes: number; totalBytes: number } | null
+) {
+  const { t } = useTranslation();
+  if (!status) return undefined;
+  if (status.state === 'failed') return t('sessions.sendStatus.failed');
+  if (status.totalBytes <= 0) return t('sessions.sendStatus.sendingWithoutSize');
+  return t('sessions.sendStatus.sending', {
+    sent: formatFileSize(status.sentBytes),
+    total: formatFileSize(status.totalBytes),
+  });
+}
+
+/**
+ * True while a new conversation's first message is not in history yet. The row
+ * title reads muted until then; the conversation exists only on this device.
+ */
+export function useSessionUnsentNewConversation(sessionId: string | undefined): boolean {
+  return useAtomValue(sessionUnsentNewConversationAtomFamily(sessionId ?? ''));
+}
+
+/** Title colour for a row whose conversation has not been sent yet. */
+export const SIDEBAR_UNSENT_TITLE_CLASS = 'text-sidebar-foreground-muted';
+
+/** A row title span that mutes itself while its conversation is unsent. */
+export function SidebarSessionTitleText({
+  sessionId,
+  selected,
+  className,
+  children,
+}: {
+  sessionId: string;
+  selected: boolean;
+  className?: string;
+  children: ReactNode;
+}) {
+  const isUnsent = useSessionUnsentNewConversation(sessionId);
+  return (
+    <span className={cn(className, isUnsent && !selected && SIDEBAR_UNSENT_TITLE_CLASS)}>
+      {children}
+    </span>
+  );
+}
+
 /**
  * ③ The PR status icon shown in the final slot (colored, non-interactive —
- * opening the PR is handled by the row context menu + info card). Sized to match
- * the Archive button that replaces it on hover.
+ * opening the PR is handled by the row context menu + info card). Sidebar rows
+ * pass `compact` so the mark stays below the title's weight; the info bar and
+ * mobile row keep the full 14px size.
  *
  * The mobile conversation row (`mobile/mobile-project-screen.tsx`) renders this
  * same component at the end of its own metric cluster, so PR status tone and the
  * CI verdict badge read identically on both platforms.
  */
+/** A filter, not opacity: the mark keeps its full lightness, only its hue is muted. */
+const SIDEBAR_PR_ICON_COMPACT_CLASS = 'saturate-[0.55]';
+
 export function SessionPrIcon({
   prStatus,
   prCiState,
+  compact = false,
   className,
 }: {
   prStatus: PrStatus;
   prCiState?: SessionPullRequestCiState | null;
+  /**
+   * Sidebar rows: a 12px mark (14px with a CI verdict) at reduced saturation, so
+   * the GitHub status hues stay readable without outshining the titles.
+   */
+  compact?: boolean;
   className?: string;
 }) {
   const meta = PR_STATUS_META[prStatus] ?? PR_STATUS_META.open;
@@ -200,32 +399,50 @@ export function SessionPrIcon({
         VerdictIcon={VerdictIcon}
         baseToneClassName={meta.iconColorClassName}
         verdict={verdict}
-        className={className}
+        className={cn(
+          compact && SIDEBAR_PR_ICON_COMPACT_CLASS,
+          compact && 'h-3.5 w-3.5',
+          prStatus === 'merged' && 'translate-x-px',
+          className
+        )}
       />
     );
   }
   return (
     <BaseIcon
-      className={cn('h-3.5 w-3.5 shrink-0', meta.iconColorClassName, className)}
+      className={cn(
+        compact ? ['h-3 w-3', SIDEBAR_PR_ICON_COMPACT_CLASS] : 'h-3.5 w-3.5',
+        'shrink-0',
+        meta.iconColorClassName,
+        className
+      )}
       strokeWidth={2.25}
       aria-hidden="true"
     />
   );
 }
 
+const styles = stylex.create({
+  contents: { display: 'contents' },
+});
+
 /**
  * Passive readiness marker for an inactive session row. It intentionally owns
  * the former diff-stat slot: once a PR is ready, the next useful sidebar fact
- * is that it can be merged, not how many lines it changes.
+ * is that it can be merged, not how many lines it changes. It is the one
+ * status in the row meant to be noticed: a success Badge whose word is the
+ * success colour itself (`sidebar-mergeable-badge.stylex.ts`), while the PR
+ * icons beside it stay desaturated.
  */
 export function SessionMergeablePill() {
   const { t } = useTranslation();
   return (
-    <span
-      data-session-mergeable-pill=""
-      className="inline-flex h-5 shrink-0 items-center rounded-full border border-status-success/45 bg-status-success/[0.06] px-1.5 text-[10px] font-medium leading-none tracking-[0.01em] text-status-success"
-    >
-      {t('sessions.pr.mergeable', 'Mergeable')}
+    // The theme sits on a layout-less wrapper: a Badge reads its tokens from
+    // whatever holds it.
+    <span {...stylex.props(styles.contents, mergeableBadgeTheme)}>
+      <Badge tone="success" data-session-mergeable-pill="">
+        {t('sessions.pr.mergeable', 'Mergeable')}
+      </Badge>
     </span>
   );
 }
@@ -243,18 +460,12 @@ export function SessionRowAuthorAvatar({
   author?: { name?: string | null; image?: string | null } | null;
 }) {
   if (!author) return null;
-  return (
-    <UserAvatar
-      user={author}
-      className="h-[18px] w-[18px] shrink-0"
-      fallbackClassName="text-[9px] font-medium"
-    />
-  );
+  return <UserAvatar user={author} size="small" className="shrink-0" />;
 }
 
 /**
  * A faint worktree glyph shown inside the end slot's metric cluster, sitting to
- * the LEFT of the PR icon and to the RIGHT of the line diff — so a worktree
+ * the LEFT of the PR icon — so a worktree
  * session with a PR reads `[diff][worktree][PR]`, and one without a PR keeps the
  * glyph at the right edge where the PR icon would otherwise be. It marks a
  * session running in an isolated git worktree, reusing the same glyph the
@@ -272,70 +483,17 @@ export function SessionRowWorktreeIndicator({ isWorktree }: { isWorktree?: boole
   if (!isWorktree) return null;
   const label = t('sessions.infoCard.worktree', 'Worktree');
   return (
-    <Tooltip>
-      <TooltipTrigger asChild>
-        <span className="inline-flex shrink-0 items-center text-sidebar-foreground-muted/45">
-          <WorktreeIcon className="h-3.5 w-3.5" aria-label={label} />
-        </span>
-      </TooltipTrigger>
-      <TooltipContent>{label}</TooltipContent>
-    </Tooltip>
+    <Tooltip.Root>
+      <Tooltip.Trigger
+        render={
+          <span className="inline-flex shrink-0 items-center text-sidebar-foreground-muted/45">
+            <WorktreeIcon className="h-3 w-3" aria-label={label} />
+          </span>
+        }
+      />
+      <Tooltip.Content>{label}</Tooltip.Content>
+    </Tooltip.Root>
   );
-}
-
-/**
- * Tree state for the shared leading slot. The opener keeps the 14px slot; a
- * child widens it to 26px (12px title indent). Idle children draw ├/└; an
- * active child shows only status at the same 7px node as ⋯. A working opener
- * likewise shows the status spinner instead of its disclosure — loading
- * outranks folding.
- */
-export type SessionRowOpenedByTreeSlot =
-  | {
-      kind: 'opener';
-      expanded: boolean;
-      label: string;
-      onToggle: () => void;
-    }
-  | {
-      kind: 'child';
-      isLastChild: boolean;
-    };
-
-const TREE_CHILD_SLOT_CLASS = 'w-[26px] justify-start';
-const TREE_CONTROL_LEFT_CLASS = 'left-[7px]';
-const TREE_LINE_CLASS = 'bg-sidebar-foreground/20';
-/** Cover row padding/border from the 14px slot, plus 1px for list `gap-px`. */
-const TREE_TRUNK_FROM_PREV_CLASS = '-top-2';
-const TREE_TRUNK_INTO_NEXT_CLASS = '-bottom-[9px]';
-
-/**
- * Maps one {@link OpenedBySessionTreeNode} to the leading slot's tree state.
- * Every session list renders the same three cases (opener with a disclosure,
- * nested child with a connector, plain flat row), so the mapping — including
- * the disclosure's i18n label — lives here rather than in each list.
- *
- * `onToggle` absent means the caller cannot fold, so an opener degrades to a
- * plain row rather than showing a dead control.
- */
-export function buildSessionRowOpenedByTreeSlot(
-  node: { depth: 0 | 1; childCount: number; expanded: boolean; isLastChild: boolean },
-  t: TFunction,
-  onToggle?: () => void
-): SessionRowOpenedByTreeSlot | undefined {
-  if (node.childCount > 0 && onToggle) {
-    return {
-      kind: 'opener',
-      expanded: node.expanded,
-      label: node.expanded
-        ? t('sessions.openedBy.collapse', 'Hide opened sessions')
-        : t('sessions.openedBy.expand', 'Show {{count}} opened sessions', {
-            count: node.childCount,
-          }),
-      onToggle,
-    };
-  }
-  return node.depth === 1 ? { kind: 'child', isLastChild: node.isLastChild } : undefined;
 }
 
 /**
@@ -351,198 +509,45 @@ export function SessionRowOpenedByMenuItems({
   opener,
   goToOpener,
   goToOpenerLabel,
-  separateToggle = true,
 }: {
   opener?: Extract<SessionRowOpenedByTreeSlot, { kind: 'opener' }> | null;
   /** Omitted when this row has no opener, or the surface cannot navigate. */
   goToOpener?: () => void;
   goToOpenerLabel: string;
-  /** False when nothing follows the toggle in this menu. */
-  separateToggle?: boolean;
 }) {
   return (
     <>
+      {goToOpener ? (
+        <ContextMenu.Item icon={<CornerLeftUp />} onClick={goToOpener}>
+          {goToOpenerLabel}
+        </ContextMenu.Item>
+      ) : null}
       {opener ? (
-        <>
-          <ContextMenuItem onSelect={opener.onToggle}>
+        <ContextMenu.Item
+          icon={
             <ChevronDown
               className={cn('transition-transform', opener.expanded ? 'rotate-0' : '-rotate-90')}
             />
-            {opener.label}
-          </ContextMenuItem>
-          {separateToggle ? <ContextMenuSeparator /> : null}
-        </>
-      ) : null}
-      {goToOpener ? (
-        <>
-          <ContextMenuItem onSelect={goToOpener}>
-            <CornerLeftUp />
-            {goToOpenerLabel}
-          </ContextMenuItem>
-          <ContextMenuSeparator />
-        </>
+          }
+          onClick={opener.onToggle}
+        >
+          {opener.label}
+        </ContextMenu.Item>
       ) : null}
     </>
   );
 }
 
 /**
- * ① Status, opened-by tree affordance, and the hover ⋯ button share one spot.
- * ⋯ synthesizes `contextmenu` so there is no second menu. Hover fades the rest
- * state (disclosure, ├/└, or status) without moving the title.
- *
- * A working opener swaps its disclosure for the status spinner — loading
- * outranks folding, so the collapse toggle moves to the row's context menu
- * while the session is active.
+ * The container of a sidebar session-row list. A workspace sidebar can mount
+ * hundreds of rows (244 in one "Chats" group, 94% of the page's DOM) while a
+ * dozen are visible. `content-visibility: auto` lets the browser skip style,
+ * layout and paint for rows scrolled out of the sidebar: a full-app restyle
+ * measured 25ms before and 8.6ms after. Rows must keep drawing inside their own
+ * box (focus rings are `ring-inset`), because the property also applies paint
+ * containment. The rule lives in `tailwind/index.css` (`sidebar-row-list`).
  */
-export function SessionRowLeadingSlot({
-  isWaitingPermission,
-  isWorking,
-  hasUnreadMessages,
-  showMenuButton,
-  menuLabel,
-  openedByTree,
-  /** Fade the status while hovering (e.g. 'group-hover/row:opacity-0' for named groups). */
-  fadeClassName = 'group-hover:opacity-0 group-data-[menu-open]:opacity-0',
-  /** Disable an opener disclosure while its ⋯ replacement is active. */
-  restPointerClassName = 'group-hover:pointer-events-none group-data-[menu-open]:pointer-events-none',
-  /** Reveal the ⋯ button while hovering. */
-  revealClassName = 'group-hover:opacity-100 group-hover:pointer-events-auto group-data-[menu-open]:opacity-100 group-data-[menu-open]:pointer-events-auto',
-}: {
-  isWaitingPermission?: boolean;
-  isWorking?: boolean;
-  hasUnreadMessages?: boolean;
-  showMenuButton?: boolean;
-  menuLabel: string;
-  openedByTree?: SessionRowOpenedByTreeSlot;
-  fadeClassName?: string;
-  restPointerClassName?: string;
-  revealClassName?: string;
-}) {
-  const childTree = openedByTree?.kind === 'child' ? openedByTree : null;
-  const isTreeChild = childTree !== null;
-  const hasActivity = Boolean(isWaitingPermission || isWorking || hasUnreadMessages);
-  const showChildConnectors = childTree !== null && !hasActivity;
-  /* Status outranks the tree on BOTH sides of the relationship: an active
-     child drops its ├/└ and an active opener drops its disclosure, because one
-     node can only say one thing and "this session needs you" beats "this
-     session has children". Folding stays reachable the same way it always is
-     on a busy row — hover swaps in ⋯, whose menu carries the same toggle.
-
-     Gated on the whole activity set, not just `isWorking`: the disclosure
-     branch REPLACES the indicator, so an unread or waiting-permission opener
-     would otherwise render a chevron and silently drop its own status mark. */
-  const openerTree = openedByTree?.kind === 'opener' && !hasActivity ? openedByTree : null;
-  const restClassName = showMenuButton
-    ? cn('transition-opacity duration-100', fadeClassName)
-    : undefined;
-  const controlLeftClassName = isTreeChild ? TREE_CONTROL_LEFT_CLASS : 'left-1/2';
-
-  return (
-    <div
-      data-session-row-leading-slot=""
-      className={cn(
-        'relative flex h-3.5 shrink-0 items-center',
-        isTreeChild ? TREE_CHILD_SLOT_CLASS : 'w-3.5 justify-center'
-      )}
-    >
-      {openerTree ? (
-        <button
-          type="button"
-          data-session-opened-by-toggle=""
-          aria-label={openerTree.label}
-          aria-expanded={openerTree.expanded}
-          title={openerTree.label}
-          onClick={(event) => {
-            event.preventDefault();
-            event.stopPropagation();
-            openerTree.onToggle();
-          }}
-          className={cn(
-            'relative z-20 flex h-3.5 w-3.5 items-center justify-center rounded-sm',
-            'text-sidebar-foreground-muted transition-[opacity,color] duration-100',
-            'hover:text-sidebar-foreground focus-visible:outline-hidden',
-            showMenuButton && cn(restClassName, restPointerClassName)
-          )}
-        >
-          <ChevronDown
-            className={cn(
-              'h-3.5 w-3.5 transition-transform duration-150 ease-out',
-              openerTree.expanded ? 'rotate-0' : '-rotate-90'
-            )}
-            aria-hidden="true"
-          />
-        </button>
-      ) : showChildConnectors ? (
-        <div className={cn('absolute inset-0', restClassName)}>
-          <span
-            aria-hidden="true"
-            data-session-tree-connector="trunk"
-            className={cn(
-              'absolute w-px',
-              TREE_LINE_CLASS,
-              TREE_CONTROL_LEFT_CLASS,
-              TREE_TRUNK_FROM_PREV_CLASS,
-              childTree.isLastChild ? 'bottom-1/2' : TREE_TRUNK_INTO_NEXT_CLASS
-            )}
-          />
-          <span
-            aria-hidden="true"
-            data-session-tree-connector="elbow"
-            className={cn(
-              'absolute top-1/2 h-px w-[13px]',
-              TREE_LINE_CLASS,
-              TREE_CONTROL_LEFT_CLASS
-            )}
-          />
-        </div>
-      ) : (
-        <div className={restClassName}>
-          <SessionRowIndicator
-            isWaitingPermission={isWaitingPermission}
-            isWorking={isWorking}
-            hasUnreadMessages={hasUnreadMessages}
-          />
-        </div>
-      )}
-      {showMenuButton ? (
-        <button
-          type="button"
-          aria-label={menuLabel}
-          onClick={(event) => {
-            // Open the row's existing right-click menu from a left click on ⋯.
-            event.preventDefault();
-            event.stopPropagation();
-            const rect = event.currentTarget.getBoundingClientRect();
-            event.currentTarget.dispatchEvent(
-              new MouseEvent('contextmenu', {
-                bubbles: true,
-                cancelable: true,
-                clientX: Math.round(rect.left),
-                clientY: Math.round(rect.bottom),
-              })
-            );
-          }}
-          className={cn(
-            // Overlay a 20px hit target centered on the 14px status slot so the ⋯
-            // gets a visible rounded hover chip (it reads as clickable) without
-            // the tiny status-slot footprint clipping the background.
-            'absolute top-1/2 z-20 flex h-5 w-5 -translate-x-1/2 -translate-y-1/2 items-center justify-center rounded-md opacity-0 pointer-events-none',
-            controlLeftClassName,
-            'text-sidebar-foreground-muted transition-[opacity,color,background-color] duration-100',
-            'hover:bg-sidebar-foreground/15 hover:text-sidebar-foreground',
-            // The trigger itself stays pressed-looking while its menu is open,
-            // not just the row around it.
-            'group-data-[menu-open]:bg-sidebar-foreground/15 group-data-[menu-open]:text-sidebar-foreground',
-            revealClassName
-          )}
-        >
-          <MoreHorizontal className="relative -top-px h-3.5 w-3.5" />
-        </button>
-      ) : null}
-    </div>
-  );
-}
+export const SIDEBAR_ROW_LIST_CLASS = 'flex flex-col gap-px sidebar-row-list';
 
 /**
  * Marks one flat-list row with opened-by tree depth. `gutter={false}` leaves
@@ -591,47 +596,92 @@ export function SidebarRowArchiveButton({
   revealClassName?: string;
 }) {
   return (
-    <Tooltip delayDuration={500}>
-      <TooltipTrigger asChild>
-        <SidebarConfirmArchiveButton
-          label={label}
-          confirmLabel={confirmLabel}
-          className={cn(
-            'absolute right-0 top-0 z-20 opacity-0 pointer-events-none',
-            revealClassName
-          )}
-          onConfirm={onConfirm}
-        />
-      </TooltipTrigger>
-      <TooltipContent side="top">{label}</TooltipContent>
-    </Tooltip>
+    <Tooltip.Root>
+      <Tooltip.Trigger
+        delay={500}
+        render={
+          <SidebarConfirmArchiveButton
+            label={label}
+            confirmLabel={confirmLabel}
+            className={cn(
+              'absolute right-0 top-0 z-20 opacity-0 pointer-events-none',
+              revealClassName
+            )}
+            onConfirm={onConfirm}
+          />
+        }
+      />
+      <Tooltip.Content side="top">{label}</Tooltip.Content>
+    </Tooltip.Root>
   );
 }
 
 /**
- * ③ The final slot at the row's right edge. Its resting content can be a compact
- * line diff, time, or an icon. Archive is absolutely overlaid on hover, so a wide
- * diff never causes layout movement. When the rest content is absent but Archive is
- * available, it still reserves the action's 20px hit target.
+ * ③ The final slot at the row's right edge, and the row's ONE status channel.
+ *
+ * A working / waiting / unread session shows only its status mark here: the
+ * resting content (`Mergeable`, worktree glyph, PR icon, time) is
+ * dropped for as long as the status lasts. That is deliberate — the status is the
+ * fact the user is watching, the metrics are still one hover away in the desktop
+ * info card, and collapsing them keeps the right edge to a single 14px mark
+ * instead of a cluster that competes with it and eats the title.
+ *
+ * Archive is absolutely overlaid on hover, so a wide rest cluster never causes
+ * layout movement. When the rest content is absent but Archive is available, it still
+ * reserves the action's 20px hit target.
  */
 export function SidebarRowEndSlot({
+  sessionId,
+  isWaitingPermission,
+  isWorking,
+  hasUnreadMessages,
   restIcon,
   archive,
   /** Fade the rest icon while hovering (match the row's group, e.g. 'group-hover/row:opacity-0'). */
-  fadeClassName = 'group-hover:opacity-0',
+  fadeClassName = 'group-hover:opacity-0 group-data-[menu-open]:opacity-0',
 }: {
+  /**
+   * Reads this session's local send status here, in the leaf, so upload
+   * progress re-renders only the slot and never the memoized row around it.
+   */
+  sessionId?: string;
+  isWaitingPermission?: boolean;
+  isWorking?: boolean;
+  hasUnreadMessages?: boolean;
   restIcon?: ReactNode;
   archive?: ReactNode;
   fadeClassName?: string;
 }) {
-  const hasRest = Boolean(restIcon);
+  // The end slot outlives the status mark, so the hand-over hold lives here.
+  const drawWorking = useWorkingHandOver(isWorking === true, hasUnreadMessages === true);
+  const sendStatus = useAtomValue(sessionSendStatusAtomFamily(sessionId ?? ''));
+  const sendLabel = useSessionSendLabel(sendStatus);
+  const restContent = hasSessionRowStatus({
+    isWaitingPermission,
+    isWorking: drawWorking,
+    hasUnreadMessages,
+    sendState: sendStatus?.state,
+  }) ? (
+    <SessionRowStatusIndicator
+      isWaitingPermission={isWaitingPermission}
+      isWorking={drawWorking}
+      hasUnreadMessages={hasUnreadMessages}
+      sendState={sendStatus?.state}
+      sendProgress={sendStatus && sendStatus.totalBytes > 0 ? sendStatus.progress : undefined}
+      sendLabel={sendLabel}
+    />
+  ) : (
+    restIcon
+  );
+  const hasRest = Boolean(restContent);
   // Reserve the action hit target whenever something can occupy it; otherwise the
-  // slot sizes to its resting content (for example, a +/- line diff).
+  // slot sizes to its resting content (for example, a PR icon).
   const reserve = hasRest || Boolean(archive);
   return (
     // pointer-events-none so the resting PR icon area still passes clicks through to
     // the row's navigation; the Archive button re-enables pointer events on hover.
     <div
+      data-session-row-end-slot=""
       className={cn(
         'relative flex h-5 shrink-0 items-center justify-center pointer-events-none',
         reserve ? 'min-w-5' : 'w-0'
@@ -641,11 +691,184 @@ export function SidebarRowEndSlot({
         <span
           className={cn('flex', archive && cn('transition-opacity duration-100', fadeClassName))}
         >
-          {restIcon}
+          {restContent}
         </span>
       ) : null}
       {archive}
     </div>
+  );
+}
+
+type SessionRowStatusFlags = {
+  isWaitingPermission?: boolean;
+  isWorking?: boolean;
+  hasUnreadMessages?: boolean;
+  sendState?: SessionSendState | null;
+};
+
+/**
+ * What a folded group hides, counted by the mark each hidden row would draw:
+ * a row counts once, under its own priority
+ * (`failed > waiting > working > sending > unread`), so the numbers add up to
+ * the rows that are asking for attention.
+ */
+export type SidebarGroupActivity = {
+  failed: number;
+  waiting: number;
+  working: number;
+  sending: number;
+  unread: number;
+};
+
+export const EMPTY_SIDEBAR_GROUP_ACTIVITY: SidebarGroupActivity = Object.freeze({
+  failed: 0,
+  waiting: 0,
+  working: 0,
+  sending: 0,
+  unread: 0,
+});
+
+/**
+ * Joins each row with the local send state of its session. Group summaries take
+ * the progress-free `sessionSendStatesAtom` map, so a layout-level group
+ * re-renders on send start, failure and completion, never on upload progress.
+ */
+export function withSessionSendStates<Row extends SessionRowStatusFlags>(
+  rows: Iterable<Row>,
+  getSessionId: (row: Row) => string,
+  sendStates: Readonly<Record<string, SessionSendState>>
+): Row[] {
+  const joined: Row[] = [];
+  for (const row of rows) {
+    const sendState = sendStates[getSessionId(row)];
+    joined.push(sendState ? { ...row, sendState } : row);
+  }
+  return joined;
+}
+
+export function summarizeSidebarGroupActivity(
+  rows: Iterable<SessionRowStatusFlags>
+): SidebarGroupActivity {
+  let failed = 0;
+  let waiting = 0;
+  let working = 0;
+  let sending = 0;
+  let unread = 0;
+  for (const row of rows) {
+    if (row.sendState === 'failed') failed += 1;
+    else if (row.isWaitingPermission) waiting += 1;
+    else if (row.isWorking) working += 1;
+    else if (row.sendState === 'sending') sending += 1;
+    else if (row.hasUnreadMessages) unread += 1;
+  }
+  if (!failed && !waiting && !working && !sending && !unread) return EMPTY_SIDEBAR_GROUP_ACTIVITY;
+  return { failed, waiting, working, sending, unread };
+}
+
+export function hasSidebarGroupActivity(activity: SidebarGroupActivity | null | undefined) {
+  return Boolean(
+    activity &&
+    (activity.failed || activity.waiting || activity.working || activity.sending || activity.unread)
+  );
+}
+
+/** "1 not sent · 1 waiting for approval · 2 working · 1 sending · 3 unread", omitting zeros. */
+export function useSidebarGroupActivityDescription(
+  activity: SidebarGroupActivity | null | undefined
+): string | null {
+  const { t } = useTranslation();
+  if (!activity || !hasSidebarGroupActivity(activity)) return null;
+  const parts: string[] = [];
+  if (activity.failed) {
+    parts.push(t('sidebar.groupActivity.failed', { count: activity.failed }));
+  }
+  if (activity.waiting) {
+    parts.push(
+      t('sidebar.groupActivity.waiting', '{{count}} waiting for approval', {
+        count: activity.waiting,
+      })
+    );
+  }
+  if (activity.working) {
+    parts.push(
+      t('sidebar.groupActivity.working', '{{count}} working', { count: activity.working })
+    );
+  }
+  if (activity.sending) {
+    parts.push(t('sidebar.groupActivity.sending', { count: activity.sending }));
+  }
+  if (activity.unread) {
+    parts.push(t('sidebar.groupActivity.unread', '{{count}} unread', { count: activity.unread }));
+  }
+  return parts.join(' · ');
+}
+
+/**
+ * The status a FOLDED group (project, repo, machine, section) draws for the
+ * Sessions it hides: the one 14px mark a row would draw, in the same trailing
+ * column as the rows, chosen by the rows' own priority. Folding therefore never
+ * hides that something is waiting on the user, running, or finished unread —
+ * and an expanded group draws nothing, because its rows already say it.
+ *
+ * One mark, never a count or a stack: the glance answers "does anything in
+ * here need me?", the hover (`description`) answers "how much?", and expanding
+ * answers "which?". The mark stays mounted across status changes and runs the
+ * same working → unread hand-over as a row, so the group plays the done
+ * transition when its last running Session finishes.
+ *
+ * Pass `describe={false}` when the header already owns a hover surface (the
+ * project path tooltip, the machine card) and put the description there: two
+ * hover surfaces on one header open together.
+ */
+export function SidebarGroupActivityMark({
+  activity,
+  describe = true,
+}: {
+  activity: SidebarGroupActivity | null | undefined;
+  describe?: boolean;
+}) {
+  const description = useSidebarGroupActivityDescription(activity);
+  const isWaitingPermission = (activity?.waiting ?? 0) > 0;
+  const hasUnreadMessages = (activity?.unread ?? 0) > 0;
+  const drawWorking = useWorkingHandOver((activity?.working ?? 0) > 0, hasUnreadMessages);
+  const sendState: SessionSendState | null = activity?.failed
+    ? 'failed'
+    : activity?.sending
+      ? 'sending'
+      : null;
+  const hasStatus = hasSessionRowStatus({
+    isWaitingPermission,
+    isWorking: drawWorking,
+    hasUnreadMessages,
+    sendState,
+  });
+  // Keep the slot mounted while empty so the hand-over state survives.
+  const mark = (
+    <span
+      data-sidebar-group-activity=""
+      role={hasStatus && description ? 'img' : undefined}
+      aria-label={hasStatus && description ? description : undefined}
+      className={cn(
+        'relative flex h-5 shrink-0 items-center justify-center',
+        hasStatus ? 'w-5' : 'w-0'
+      )}
+    >
+      {hasStatus ? (
+        <SessionRowStatusIndicator
+          isWaitingPermission={isWaitingPermission}
+          isWorking={drawWorking}
+          hasUnreadMessages={hasUnreadMessages}
+          sendState={sendState}
+        />
+      ) : null}
+    </span>
+  );
+  if (!describe || !hasStatus || !description) return mark;
+  return (
+    <Tooltip.Root>
+      <Tooltip.Trigger delay={300} render={mark} />
+      <Tooltip.Content side="right">{description}</Tooltip.Content>
+    </Tooltip.Root>
   );
 }
 
@@ -659,15 +882,21 @@ export function SidebarRowEndSlot({
 export function GitHubOwnerIcon({
   repoFullName,
   className,
+  style,
+  crossOrigin,
+  onImageLoad,
 }: {
   repoFullName: string | null;
   className?: string;
+  style?: CSSProperties;
+  crossOrigin?: 'anonymous' | 'use-credentials' | '';
+  onImageLoad?: ReactEventHandler<HTMLImageElement>;
 }) {
   const ownerHandle = repoFullName ? (repoFullName.split('/')[0] ?? '').trim() : '';
   const [failed, setFailed] = useState(false);
 
   if (!ownerHandle || failed) {
-    return <Github className={className} aria-hidden="true" />;
+    return <Github className={className} style={style} aria-hidden="true" />;
   }
   return (
     <CachedAvatarImg
@@ -675,6 +904,9 @@ export function GitHubOwnerIcon({
       alt=""
       aria-hidden="true"
       className={cn('rounded-sm object-cover', className)}
+      style={style}
+      crossOrigin={crossOrigin}
+      onLoad={onImageLoad}
       onError={() => setFailed(true)}
     />
   );
@@ -682,13 +914,28 @@ export function GitHubOwnerIcon({
 
 // Shared section-header metrics. Every sidebar organize mode (Workspace local
 // project / GitHub Worktrees sections and the flat Updated list) uses these so
-// section labels read identically (13px medium, muted — full muted token, not a
-// further /55 fade: that made "Pinned"/"Chats" and the filter icon nearly
-// illegible on light sidebars).
+// section labels read identically (0.9em medium, in the sidebar row color — not
+// brighter than the session titles under them, and not a further /55 fade: that
+// made "Pinned"/"Chats" and the filter icon nearly illegible on light sidebars).
+/**
+ * Top-level group label (a machine, GitHub Worktrees, Chats). Projects and
+ * repos sit flush below it, so the header is told apart by type alone: about
+ * 11.5px bold, faint, a 26px row with no hover fill, above 14px regular rows
+ * with a hover fill. Every group label uses exactly this class — one size
+ * (from the interface font size, not the parent's `em`), one color — so the
+ * groups read as one consistent layer.
+ */
+export const SIDEBAR_GROUP_LABEL_COLOR_CLASS = 'text-sidebar-foreground-muted/70';
+export const SIDEBAR_GROUP_LABEL_CLASS = cn(
+  'text-[length:calc(var(--ui-font-size,14px)*0.82)] font-bold tracking-[0.01em]',
+  SIDEBAR_GROUP_LABEL_COLOR_CLASS
+);
+
 const SECTION_HEADER_BUTTON_CLASS = cn(
-  'relative flex h-7 min-w-0 flex-1 select-none items-center gap-1.5 rounded-md px-2 text-left',
+  'relative flex h-[26px] min-w-0 flex-1 select-none items-center gap-1.5 rounded-md px-2 text-left',
   'border border-transparent bg-transparent',
-  'text-[13px] font-medium text-sidebar-foreground-muted transition-colors',
+  SIDEBAR_GROUP_LABEL_CLASS,
+  'transition-colors',
   // The outer row paints the focus ring; suppress the global :focus-visible
   // box-shadow here so the ring wraps the whole row (label + action).
   'focus-visible:shadow-none'
@@ -696,7 +943,7 @@ const SECTION_HEADER_BUTTON_CLASS = cn(
 
 const SECTION_HEADER_CHEVRON_CLASS = cn(
   'h-3.5 w-3.5 shrink-0 text-current opacity-0',
-  'transition-[opacity,translate,scale] duration-150 ease-out'
+  'transition-[opacity,translate,scale,rotate] duration-150 ease-out'
 );
 
 /**
@@ -711,6 +958,8 @@ export function SidebarSectionHeader({
   label,
   collapsed,
   action,
+  activity,
+  describeActivity = true,
   onToggleCollapsed,
   isMobile,
   toggleLabel,
@@ -721,6 +970,13 @@ export function SidebarSectionHeader({
   /** @deprecated The collapsed count badge has been removed; this prop is ignored. */
   count?: number;
   action?: ReactNode;
+  /**
+   * Status of the Sessions this section hides. Drawn only while collapsed, as
+   * {@link SidebarGroupActivityMark}; an expanded section's rows speak for it.
+   */
+  activity?: SidebarGroupActivity | null;
+  /** False when a wrapper already owns the header's hover surface (machine card). */
+  describeActivity?: boolean;
   onToggleCollapsed?: () => void;
   isMobile?: boolean;
   toggleLabel?: string;
@@ -730,7 +986,7 @@ export function SidebarSectionHeader({
     if (canToggle) onToggleCollapsed?.();
   };
   return (
-    <div className="group flex h-7 items-center gap-1 rounded-md pr-2 has-[[role=button]:focus-visible]:shadow-[inset_0_0_0_1px_hsl(var(--primary)/0.5)]">
+    <div className="group flex h-[26px] items-center gap-1 rounded-md has-[[role=button]:focus-visible]:shadow-[inset_0_0_0_1px_hsl(var(--primary)/0.5)]">
       <div
         role={canToggle ? 'button' : undefined}
         tabIndex={canToggle ? 0 : -1}
@@ -769,8 +1025,11 @@ export function SidebarSectionHeader({
           />
         ) : null}
         <span className="flex-1" aria-hidden="true" />
+        {collapsed && activity ? (
+          <SidebarGroupActivityMark activity={activity} describe={describeActivity} />
+        ) : null}
       </div>
-      {action ? <div className="shrink-0">{action}</div> : null}
+      {action ? <div className="mr-2 shrink-0">{action}</div> : null}
     </div>
   );
 }
@@ -812,10 +1071,7 @@ export function SidebarListSkeleton({
         </div>
         <div className="flex flex-col gap-px">
           {SIDEBAR_SKELETON_ROW_WIDTHS.map((width, index) => (
-            <div
-              key={index}
-              className="flex h-7 min-w-0 items-center gap-1.5 rounded-md px-2"
-            >
+            <div key={index} className="flex h-7 min-w-0 items-center gap-1.5 rounded-md px-2">
               <Skeleton className="h-3.5 w-3.5 shrink-0 rounded-full" />
               <Skeleton className={cn('h-3 min-w-0', width)} />
               <Skeleton className="ml-auto h-3 w-8 shrink-0" />

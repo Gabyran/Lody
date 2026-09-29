@@ -73,6 +73,9 @@ export class Lody {
       { workspaceId: options.workspaceId },
       async () =>
         await LoroDocumentManager.create(options.workspaceId, options.userId, options.logger, {
+          // The daemon is the only process that resumes LoroDoc rooms from the
+          // shared SQLite cursors; one-shot commands keep theirs in memory.
+          documentCursorScope: 'shared-durable',
           streamsTokens: options.cloudPort.streamsTokens,
           cloudBilling: options.cloudPort.billing,
         })
@@ -237,6 +240,15 @@ export class Lody {
         );
         continue;
       }
+      // Keep the legacy row as the sole Pi provider until its owner confirms
+      // migration. Check legacy first so a completed migration is then caught
+      // by the builtin lookup below, rather than creating a second provider.
+      if (
+        cliType === 'pi' &&
+        (await this.documentManager.hasAgentConfig('registry', 'pi-acp', this.machineId))
+      ) {
+        continue;
+      }
       const has = await this.documentManager.hasAgentConfig('builtin', cliType, this.machineId);
       if (!has) {
         await this.documentManager.createAgentConfig(
@@ -338,6 +350,10 @@ export class Lody {
 
   getActiveSessionCount(): number {
     return this.runtime.getActiveSessionCount();
+  }
+
+  hasAutomationSessionWork(sessionId: SessionId): boolean {
+    return this.runtime.getMessageHandler()?.hasAutomationSessionWork(sessionId) ?? true;
   }
 
   async attachRemoteBridge(): Promise<void> {

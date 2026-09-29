@@ -1,10 +1,12 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useRouter } from '@tanstack/react-router';
+import * as stylex from '@stylexjs/stylex';
+import { colors } from '@lody/ui/tokens/colors.stylex';
 import { cloudOperations } from '@/lib/cloud-api-operations';
-import { useCloudQuery } from '@lody/platform/react';
+import { useCloudMutation, useCloudQuery } from '@lody/platform/react';
 import { Invitation } from 'better-auth/plugins';
-import { toast } from 'sonner';
+import { toast } from '@/lib/toast';
 import type { AvatarKind, CliApiKeyRecord, WorkspaceId } from '@lody/shared';
 import { uploadAvatarImage } from '@/lib/avatar-upload';
 import { verifyCurrentPassword } from '@/lib/verify-password';
@@ -30,7 +32,13 @@ import {
   type WorkspaceDeleteBillingGuard,
 } from './account-setting-pure';
 import { WorkspaceJoinRequestsSettings } from './workspace-join-requests-settings';
+import { WorkspaceOwnershipTransfer } from './workspace-ownership-transfer';
 import { AccountMachinesOverview } from './account-machines-overview';
+import { settingsType as type } from './type.stylex';
+
+const styles = stylex.create({
+  empty: { margin: 0, fontSize: type.caption, color: colors.secondaryLabel },
+});
 
 const getInviteLink = (invitation: Invitation) => getAppShareUrl(`/invite/${invitation.id}`);
 const FREE_WORKSPACE_MEMBER_LIMIT_REACHED_CODE = 'free_workspace_member_limit_reached';
@@ -53,6 +61,7 @@ export function AccountSettingsComponent({
 function CloudAccountSettings({ surface }: { surface: AccountSettingsSurface }) {
   const { t } = useTranslation();
   const authClient = useAuthClient();
+  const transferOwnership = useCloudMutation(cloudOperations.auth.transferWorkspaceOwnership);
   const signOut = useAuthSignOut();
   const router = useRouter();
   const {
@@ -662,7 +671,7 @@ function CloudAccountSettings({ surface }: { surface: AccountSettingsSurface }) 
   }
 
   if (!activeOrganization) {
-    return <p className="text-sm text-muted-foreground">No organization</p>;
+    return <p {...stylex.props(styles.empty)}>No organization</p>;
   }
 
   return (
@@ -675,6 +684,24 @@ function CloudAccountSettings({ surface }: { surface: AccountSettingsSurface }) 
       members={sortedMembers}
       pendingInvitations={pendingInvitations}
       accountMachinesSlot={surface === 'account' ? <AccountMachinesOverview /> : undefined}
+      workspaceOwnershipSlot={
+        role === 'owner' && currentUserId ? (
+          <WorkspaceOwnershipTransfer
+            key={activeOrganization.id}
+            workspaceName={activeOrganization.name}
+            currentUserId={currentUserId}
+            members={sortedMembers}
+            onTransfer={async (targetMemberId) => {
+              await transferOwnership({ workspaceId: activeOrganization.id, targetMemberId });
+              // A cache refresh failure must never turn a committed transfer into a failure.
+              void Promise.all([authClient.updateSession(), refetchActiveOrganization()]).catch(
+                console.error
+              );
+              toast.success(t('workspace.transfer.success'));
+            }}
+          />
+        ) : undefined
+      }
       workspaceJoinRequestsSlot={
         role === 'owner' ? (
           <WorkspaceJoinRequestsSettings workspaceId={activeOrganization.id} />

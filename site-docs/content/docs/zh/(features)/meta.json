@@ -7,7 +7,12 @@
     "claude-codex-capabilities",
     "mobile",
     "team",
+    "session-handoff",
+    "parallel-agents",
+    "session-orchestration",
+    "agent-collaboration",
     "agent-roles",
+    "scheduled-tasks",
     "cli-runtimes",
     "device-resource-monitoring",
     "lody-review",
@@ -25,7 +30,6 @@
     "quota",
     "mention",
     "slash-commands",
-    "copy-md",
-    "session-orchestration"
+    "copy-md"
   ]
 }

@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import * as stylex from '@stylexjs/stylex';
 import { useTranslation } from 'react-i18next';
 import { useAtomValue } from 'jotai';
 import {
@@ -7,17 +8,85 @@ import {
   type MachineViewMeta,
   type ProviderSetupTask,
 } from '@lody/shared';
-import { Loader2, RotateCcw, Trash2, XCircle } from 'lucide-react';
+import { RotateCcw, Trash2 } from 'lucide-react';
+import { Spinner } from '@lody/ui/spinner';
 
-import { AgentIcon } from '@/components/icons/agent-icon';
-import { Button } from '@/ui/button';
-import { cn } from '@/lib/utils';
+import { AgentReadinessMark, type AgentReadiness } from '@/components/shared/agent-readiness-mark';
+import { Button } from '@lody/ui/button';
+import { colors } from '@lody/ui/tokens/colors.stylex';
+import { space } from '@lody/ui/tokens/scales.stylex';
+import { withClassName } from '@/lib/stylex';
+import { openExternalUrl } from '@/lib/native-browser';
 import { activeWorkspaceRuntimeAtom } from '@/atoms/runtime';
 import { useMachineAcpBinaryProgress } from '@/hooks/use-machine-acp-binary-progress';
 import { useMachineOnlineStatus } from '@/hooks/use-machine-online-status';
 import { AcpAuthenticationPanel } from './acp-authentication-panel';
 import { labelForAgent } from './provider-row';
 import { ProviderProgressButton } from './provider-progress-button';
+import { BUB_ACP_INSTALL_DOCS_URL, BubInstallGuide } from './bub-install-guide';
+import { settingsCatalog as catalog } from './surface';
+import { settingsType as type } from './type.stylex';
+
+/** Where the agent's text column starts: the mark, its gap, and the row's inset. */
+const TEXT_INSET = '52px';
+
+const styles = stylex.create({
+  root: { minWidth: 0 },
+  head: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: space[3],
+    minWidth: 0,
+    paddingBlock: space[3],
+    paddingInlineStart: space[3],
+  },
+  text: { flexGrow: 1, minWidth: 0 },
+  name: {
+    overflow: 'hidden',
+    textOverflow: 'ellipsis',
+    whiteSpace: 'nowrap',
+    fontSize: type.caption,
+    color: colors.label,
+  },
+  agent: {
+    overflow: 'hidden',
+    textOverflow: 'ellipsis',
+    whiteSpace: 'nowrap',
+    fontSize: type.caption,
+    color: colors.secondaryLabel,
+  },
+  /** The provider row's status column, reserved so the actions line up with it. */
+  statusSlot: { flexShrink: 0, minWidth: '80px' },
+  actions: {
+    display: 'flex',
+    flexShrink: 0,
+    alignItems: 'center',
+    gap: space[1],
+    paddingInlineEnd: space[3],
+  },
+  editSlot: { flexShrink: 0, width: '48px' },
+  primarySlot: {
+    display: 'flex',
+    flexShrink: 0,
+    alignItems: 'center',
+    justifyContent: 'flex-end',
+    width: '80px',
+  },
+  /** Layout only, for the button in the slot: it fills the slot. */
+  fill: { width: '100%' },
+  /** Aligned to the name above it, not to the edge: it is about this agent. */
+  detail: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: space[2],
+    paddingInlineStart: TEXT_INSET,
+    paddingInlineEnd: space[3],
+    paddingBottom: space[3],
+  },
+  status: { margin: 0, fontSize: type.caption, color: colors.secondaryLabel },
+  /** A failure says so in its sentence; the row takes no border for it. */
+  statusFailed: { color: colors.destructive },
+});
 
 export type ProviderSetupRowProps = {
   setup: ProviderSetupTask;
@@ -25,6 +94,7 @@ export type ProviderSetupRowProps = {
   machine: MachineViewMeta | undefined;
   onRetry: (setup: ProviderSetupTask) => Promise<void>;
   onDelete: (setup: ProviderSetupTask) => Promise<void>;
+  /** Layout only. The row draws no surface: a list's card draws it. */
   className?: string;
 };
 
@@ -38,6 +108,10 @@ export function ProviderSetupRow({
   const { t } = useTranslation();
   const [actionPending, setActionPending] = useState<'retry' | 'delete' | null>(null);
   const config = setup.config;
+  const isBubSetup = config.cliType === 'builtin' && config.agentType === 'bub';
+  const installDocsUrl = isBubSetup ? BUB_ACP_INSTALL_DOCS_URL : undefined;
+  const showBubInstallCommand =
+    isBubSetup && setup.status === 'failed' && setup.failureCode === 'runtime-unavailable';
   const runtime = useAtomValue(activeWorkspaceRuntimeAtom);
   const runtimeProgress = useMachineAcpBinaryProgress(runtime, setup.machineId, config.agentType);
   const machineOnline = useMachineOnlineStatus(setup.machineId) === 'online';
@@ -80,6 +154,12 @@ export function ProviderSetupRow({
         return t('settings.agent.setup.awaitingAuth', 'Sign in to finish this provider setup.');
       case 'failed':
         if (setup.failureCode === 'runtime-unavailable') {
+          if (isBubSetup) {
+            return t(
+              'settings.agent.setup.bubInstallRequired',
+              'Bub or its ACP server is not installed on the target machine.'
+            );
+          }
           return t(
             'settings.agent.setup.runtimeUnavailable',
             'This runtime is not available on the target machine.'
@@ -115,81 +195,117 @@ export function ProviderSetupRow({
     }
   };
 
+  // A setup row sits in the same list as a published AgentConfig row, so it
+  // borrows that row's geometry exactly: the same mark, the same two-line text
+  // column, the same fixed action slots. Anything narrower here re-ragged every
+  // column the moment a pending setup appeared above the published agents.
+  const markReadiness: AgentReadiness =
+    setup.status === 'failed' ||
+    (setup.status === 'queued' &&
+      (!machineOnline || (machine !== undefined && !supportsSetupProtocol)))
+      ? 'cold'
+      : active
+        ? 'arriving'
+        : 'ready';
+
   return (
-    <div
-      className={cn(
-        'rounded-xl border border-border/60 bg-card/40 px-3 py-3',
-        setup.status === 'failed' && 'border-status-error/30',
-        className
-      )}
-    >
-      <div className="flex min-w-0 items-center gap-3">
-        <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-muted/40">
-          <AgentIcon
-            cliType={config.cliType}
-            agentType={config.agentType}
-            brandId={config.brandId}
-            env={config.env}
-            className="h-5 w-5"
-          />
-        </div>
-        <div className="min-w-0 flex-1">
-          <div className="truncate text-sm font-medium">{config.name}</div>
-          <div className="truncate text-xs text-muted-foreground">
+    <div {...withClassName(stylex.props(styles.root), className)}>
+      <div {...stylex.props(styles.head)}>
+        <AgentReadinessMark
+          cliType={config.cliType}
+          agentType={config.agentType}
+          brandId={config.brandId}
+          env={config.env}
+          readiness={markReadiness}
+          percent={downloadPercent}
+          size="md"
+        />
+        <div {...stylex.props(styles.text)}>
+          <div {...stylex.props(styles.name)}>{config.name}</div>
+          <div {...stylex.props(styles.agent)}>
             {labelForAgent(config.cliType, config.agentType)}
           </div>
         </div>
-        {active ? (
-          <ProviderProgressButton
-            percent={downloadPercent}
-            label={
-              downloadPercent !== null
-                ? `${downloadPercent}%`
-                : setup.status === 'queued'
-                  ? t('onboarding.providers.waitingAction', 'Waiting')
-                  : t('onboarding.providers.workingAction', 'Working')
-            }
-            ariaLabel={statusText}
-          />
-        ) : setup.status === 'failed' ? (
-          <XCircle className="h-4 w-4 shrink-0 text-status-error" />
-        ) : null}
-        {setup.status === 'failed' ? (
+        {/* Reserve the provider row's status and edit columns so setup actions
+            stay aligned with published providers. Failures are explained below. */}
+        <div {...stylex.props(styles.statusSlot)} aria-hidden="true" />
+        <div {...stylex.props(styles.actions)}>
+          <div {...stylex.props(styles.editSlot)} />
+          <div {...stylex.props(styles.primarySlot)}>
+            {active ? (
+              <ProviderProgressButton
+                className={stylex.props(styles.fill).className}
+                percent={downloadPercent}
+                label={
+                  downloadPercent !== null
+                    ? `${downloadPercent}%`
+                    : setup.status === 'queued'
+                      ? t('onboarding.providers.waitingAction', 'Waiting')
+                      : t('onboarding.providers.workingAction', 'Working')
+                }
+                ariaLabel={statusText}
+              />
+            ) : setup.status === 'failed' ? (
+              <Button
+                type="button"
+                variant="secondary"
+                size="small"
+                className={stylex.props(styles.fill).className}
+                disabled={actionPending !== null}
+                onClick={() => void runAction('retry', onRetry)}
+              >
+                {actionPending === 'retry' ? (
+                  <Spinner size="small" />
+                ) : (
+                  <RotateCcw {...stylex.props(catalog.icon)} />
+                )}
+                {t('common.retry', 'Retry')}
+              </Button>
+            ) : null}
+          </div>
           <Button
             type="button"
-            variant="outline"
-            size="sm"
+            variant="ghost"
+            size="small"
+            icon
+            tone="destructive"
             disabled={actionPending !== null}
-            onClick={() => void runAction('retry', onRetry)}
+            aria-label={t('common.delete', 'Delete')}
+            onClick={() => void runAction('delete', onDelete)}
           >
-            {actionPending === 'retry' ? (
-              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+            {actionPending === 'delete' ? (
+              <Spinner size="small" />
             ) : (
-              <RotateCcw className="h-3.5 w-3.5" />
+              <Trash2 {...stylex.props(catalog.icon)} />
             )}
-            {t('common.retry', 'Retry')}
           </Button>
-        ) : null}
-        <Button
-          type="button"
-          variant="ghost"
-          size="icon"
-          className="h-8 w-8 shrink-0 text-muted-foreground hover:text-destructive"
-          disabled={actionPending !== null}
-          aria-label={t('common.delete', 'Delete')}
-          onClick={() => void runAction('delete', onDelete)}
-        >
-          {actionPending === 'delete' ? (
-            <Loader2 className="h-3.5 w-3.5 animate-spin" />
-          ) : (
-            <Trash2 className="h-3.5 w-3.5" />
-          )}
-        </Button>
+        </div>
       </div>
-      <p className="mt-2 text-xs text-muted-foreground">{statusText}</p>
-      {setup.status === 'awaiting-auth' ? (
-        <div className="mt-3">
+      {/* Aligned to the name above it, not to the edge: the sentence is about
+          this agent, so it starts where the agent's text column starts. */}
+      <div {...stylex.props(styles.detail)}>
+        <p {...stylex.props(styles.status, setup.status === 'failed' && styles.statusFailed)}>
+          {statusText}
+        </p>
+        {showBubInstallCommand ? (
+          <BubInstallGuide />
+        ) : setup.status === 'failed' && installDocsUrl ? (
+          <div>
+            <Button
+              type="button"
+              variant="link"
+              size="small"
+              onClick={() => {
+                void openExternalUrl(installDocsUrl);
+              }}
+            >
+              {t('settings.agent.dialog.bubInstallDocs', 'Open install guide')}
+            </Button>
+          </div>
+        ) : null}
+        {setup.status === 'awaiting-auth' ? (
           <AcpAuthenticationPanel
+            codexAuthMode={config.codexAuth?.mode}
             machineId={setup.machineId}
             configId={config.id}
             cliType={config.cliType}
@@ -199,8 +315,8 @@ export function ProviderSetupRow({
             env={config.env}
             compact
           />
-        </div>
-      ) : null}
+        ) : null}
+      </div>
     </div>
   );
 }

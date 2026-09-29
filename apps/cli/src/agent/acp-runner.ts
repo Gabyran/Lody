@@ -56,6 +56,7 @@ import {
   createAcpStartupMonitor,
 } from './acp-startup-monitor';
 import { withLodyNpmCacheForNpx } from './npx-cache';
+import { resolveDeepSeekHarnessSpawn } from './deepseek-harness-runtime';
 import { runNpxStartupWithRecovery } from './acp-npx-startup-policy';
 import { truncateLogText } from '@/utils/log-format';
 import {
@@ -66,10 +67,12 @@ import {
   resolveAcpLauncher,
 } from './acp-analytics';
 import { withoutElectronBootstrapCredentials } from '@/electron-bootstrap-env';
+import { ACP_STARTUP_QUEUE_WAIT_TIMEOUT_MS } from '@lody/shared/acp-startup-budget';
 import { withLoopbackNoProxy } from '@lody/shared/proxy-env';
 import { withAcpSessionStartSlot } from './acp-session-start-gate';
 
 export type CreateAcpClientOptions = {
+  resolveWorktreeProject?: AgentClientOptions['resolveWorktreeProject'];
   stream: Stream;
   workdir: string;
   logger: Logger;
@@ -79,7 +82,6 @@ export type CreateAcpClientOptions = {
     agentType: string;
   };
   configOptionValues?: AgentClientOptions['configOptionValues'];
-  taskToolsEnabled?: boolean;
   /** Launcher family (npx/uvx/local) for ACP startup analytics; non-PII. */
   launcher?: AcpLauncher;
   resumeSessionId?: ACPSessionId;
@@ -127,7 +129,7 @@ export const createAcpClient = async (options: CreateAcpClientOptions) => {
     terminalManager: options.terminalManager,
     agentConfig: options.agentConfig,
     configOptionValues: options.configOptionValues,
-    taskToolsEnabled: options.taskToolsEnabled,
+    resolveWorktreeProject: options.resolveWorktreeProject,
     launcher: options.launcher,
     terminalEnabled: options.terminalEnabled,
     onStartupStage: options.onStartupStage,
@@ -257,7 +259,14 @@ export const spawnAcpProcess = (options: SpawnAcpProcessOptions): ChildProcess =
   }
   const spawnFn = options.spawnImpl ?? spawn;
 
-  return spawnFn(command, args, {
+  const executable = resolveDeepSeekHarnessSpawn({
+    command,
+    args,
+    env: options.env,
+    workdir: options.workdir,
+  });
+
+  return spawnFn(executable.command, executable.args, {
     cwd: options.workdir,
     env: options.env,
     stdio: ['pipe', 'pipe', 'pipe'],
@@ -269,6 +278,7 @@ export const spawnAcpProcess = (options: SpawnAcpProcessOptions): ChildProcess =
 };
 
 export type StartLocalAcpAgentOptions = {
+  codexProfile?: CodexProfileExecution;
   cliType: AgentConfigCliType;
   agentType: string;
   customAcp?: CustomAcpLaunchSpec;
@@ -354,6 +364,7 @@ export const startLocalAcpAgent = async (options: StartLocalAcpAgentOptions) => 
     agentType: options.agentType,
     customAcp: options.customAcp,
     runtimeOverrides: options.runtimeOverrides,
+    env: options.env,
     extraArgs: options.extraArgs,
     onManagedRuntimeProgress: options.onManagedRuntimeProgress
       ? (event) => {
@@ -373,7 +384,11 @@ export const startLocalAcpAgent = async (options: StartLocalAcpAgentOptions) => 
     isResume: false,
   };
 
-  const baseEnv = withoutElectronBootstrapCredentials(options.env ?? process.env);
+  const baseEnv = withoutElectronBootstrapCredentials(
+    options.codexProfile
+      ? codexProfileEnvironment(options.codexProfile.profile, options.env ?? process.env)
+      : (options.env ?? process.env)
+  );
   // Codex CLI reads config from `~/.codex` by default. E2E and title-agent runs use a temporary,
   // repo-local Codex home so their rollout/history state stays isolated. A title agent copies the
   // user's config into that home because custom model-provider routing and authentication must stay
@@ -455,17 +470,41 @@ export const startLocalAcpAgent = async (options: StartLocalAcpAgentOptions) => 
 
     captureAcpSpawnStarted(spawnAnalyticsProps);
     let agentProcess: ChildProcess;
+    const releaseProfile =
+      options.codexProfile?.profile.profile.mode === 'chatgpt'
+        ? await registerCodexProfileProcess(options.codexProfile.profile)
+        : undefined;
+    let closeBroker: (() => Promise<void>) | undefined;
+    const releaseResources = async () => {
+      await closeBroker?.();
+      await releaseProfile?.();
+    };
     try {
+      const prepared = options.codexProfile
+        ? await codexProfileSpawnEnvironment(options.codexProfile, envWithAcpStartup)
+        : { env: envWithAcpStartup, close: undefined };
+      closeBroker = prepared.close;
+      if (releaseProfile) prepared.env.LODY_CODEX_PROCESS_TOKEN = releaseProfile.token;
       agentProcess = spawnAcpProcess({
         cliType: options.cliType,
         agentType: options.agentType,
         workdir: options.workdir,
-        env: envWithAcpStartup,
+        env: prepared.env,
         command: launch.command,
         args: [...attemptArgs],
         spawnImpl: options.spawnImpl,
       });
+      agentProcess.once('exit', () => {
+        void releaseResources().catch(() => {});
+      });
+      agentProcess.once('error', () => {
+        void (
+          agentProcess.pid === undefined ? releaseProfile?.abandonBeforeSpawn() : releaseResources()
+        )?.catch(() => {});
+      });
     } catch (error) {
+      await releaseProfile?.abandonBeforeSpawn();
+      await releaseResources();
       // Synchronous spawn failure (e.g. spawnImpl throws). Async ENOENT/EACCES
       // surface later via the startup monitor and are captured in the catch below.
       cleanupCodexHome();
@@ -594,6 +633,12 @@ export const startLocalAcpAgent = async (options: StartLocalAcpAgentOptions) => 
       label: `acp-startup:${options.agentType}`,
       logger: options.logger,
       abortSignal: options.signal,
+      // This path is a capability refresh or a title run: both sit inside a
+      // client-visible budget, and the queue ahead of them emits no progress
+      // frame. Without a deadline here that wait is silence the client counts
+      // against a machine that has not started working yet. Session restore
+      // deliberately has no such bound — see the gate's options.
+      waitTimeoutMs: ACP_STARTUP_QUEUE_WAIT_TIMEOUT_MS,
     },
     async () =>
       await runNpxStartupWithRecovery({
@@ -641,3 +686,9 @@ export async function shutdownLocalAcpAgent(options: ShutdownLocalAcpAgentOption
     exitTimeoutMs
   );
 }
+import {
+  codexProfileEnvironment,
+  codexProfileSpawnEnvironment,
+  registerCodexProfileProcess,
+  type CodexProfileExecution,
+} from './codex-profile-runtime';

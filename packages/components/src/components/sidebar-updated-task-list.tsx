@@ -12,25 +12,19 @@ import {
   GitBranch,
   GitPullRequest,
   Link2,
-  Loader2,
   LockKeyhole,
   Pencil,
   Pin,
   PinOff,
   Users,
 } from 'lucide-react';
+import { Spinner } from '@lody/ui/spinner';
 import { useTranslation } from 'react-i18next';
 
 import { cn } from '@/lib/utils';
 import { formatCompactRelativeTime } from '@/lib/format-relative-time';
-import { TooltipProvider } from '@/ui/tooltip';
-import {
-  ContextMenu,
-  ContextMenuContent,
-  ContextMenuItem,
-  ContextMenuSeparator,
-  ContextMenuTrigger,
-} from '@/ui/context-menu';
+import { Tooltip } from '@lody/ui/tooltip';
+import { ContextMenu } from '@lody/ui/context-menu';
 import { SwipeActionRow } from '@/components/shared/swipe-action-row';
 import {
   SessionPrIcon,
@@ -40,6 +34,7 @@ import {
   SidebarRowEndSlot,
   SidebarListSkeleton,
   SidebarSectionHeader,
+  SidebarSessionTitleText,
   type SidebarRowKind,
 } from '@/components/sidebar-row-shared';
 import { SessionInfoHoverCard } from '@/components/session-info-hover-card';
@@ -408,7 +403,7 @@ export const SidebarUpdatedTaskList = memo(function SidebarUpdatedTaskList({
   const canToggleFullBucket = typeof onToggleFullBucket === 'function';
 
   return (
-    <TooltipProvider>
+    <Tooltip.Provider>
       <div className={cn('flex flex-col', className)}>
         {buckets.map((bucket, bucketIndex) => {
           const bucketHeaderAction = bucketIndex === 0 ? headerAction : null;
@@ -498,7 +493,7 @@ export const SidebarUpdatedTaskList = memo(function SidebarUpdatedTaskList({
           );
         })}
       </div>
-    </TooltipProvider>
+    </Tooltip.Provider>
   );
 });
 
@@ -636,8 +631,6 @@ const UpdatedItemRow = memo(function UpdatedItemRow({
       Boolean(shareMenuState) ||
       Boolean(branchName) ||
       (showPr && Boolean(onOpenPullRequest)));
-  const titleFontClassName = item.isPinned ? 'font-normal' : 'font-medium';
-
   const handlePrOpen =
     onOpenPullRequest && prUrl
       ? () =>
@@ -672,22 +665,20 @@ const UpdatedItemRow = memo(function UpdatedItemRow({
       className={cn(
         'min-w-0 w-full truncate bg-transparent outline-hidden',
         'border border-sidebar-ring/40 rounded-sm px-1 -mx-1',
-        'text-sm',
-        titleFontClassName
+        'text-sm font-normal'
       )}
     />
   ) : (
-    <span
+    <SidebarSessionTitleText
+      sessionId={item.id}
+      selected={showSelectedState}
       className={cn(
-        'min-w-0 flex-1 truncate',
-        titleFontClassName,
-        showSelectedState
-          ? 'text-sidebar-selection-foreground'
-          : 'text-sidebar-foreground dark:text-sidebar-foreground/75 group-hover/row:text-sidebar-hover-foreground'
+        'min-w-0 flex-1 truncate font-normal',
+        showSelectedState ? 'text-sidebar-selection-foreground' : 'text-sidebar-row-foreground'
       )}
     >
       {item.title}
-    </span>
+    </SidebarSessionTitleText>
   );
 
   const [rowMenuOpen, setRowMenuOpen] = useState(false);
@@ -714,7 +705,7 @@ const UpdatedItemRow = memo(function UpdatedItemRow({
           !isMobile &&
           'hover:bg-sidebar-hover hover:text-sidebar-hover-foreground data-[menu-open]:bg-sidebar-hover data-[menu-open]:text-sidebar-hover-foreground',
         showSelectedState &&
-          'border-sidebar-foreground/10 bg-sidebar-foreground/10 text-sidebar-foreground hover:bg-sidebar-foreground/10',
+          'bg-sidebar-selection text-sidebar-selection-foreground hover:bg-sidebar-selection',
         // Keyboard-only focus ring — see TaskList: plain :focus-within also
         // matches after mouse clicks via the overlay <a> and left a permanent
         // inset ring on the selected row.
@@ -754,12 +745,9 @@ const UpdatedItemRow = memo(function UpdatedItemRow({
 
       <div className="flex w-full min-w-0 items-center gap-1.5 text-sm">
         <SessionRowLeadingSlot
-          isWaitingPermission={item.isWaitingPermission}
-          isWorking={item.isWorking}
-          hasUnreadMessages={item.hasUnreadMessages}
           showMenuButton={hasMenuActions}
           menuLabel={contextMenuLabels.moreActions}
-          fadeClassName="group-hover/row:opacity-0"
+          fadeClassName="group-hover/row:opacity-0 group-data-[menu-open]/row:opacity-0"
           revealClassName="group-hover/row:opacity-100 group-hover/row:pointer-events-auto group-data-[menu-open]/row:opacity-100 group-data-[menu-open]/row:pointer-events-auto"
         />
         {showPinnedIcon && item.isPinned ? (
@@ -785,15 +773,15 @@ const UpdatedItemRow = memo(function UpdatedItemRow({
         >
           {titleNode}
         </div>
-        {/* Keep PR at the right edge, with All Changes totals immediately before it. */}
+        {/* Keep PR at the right edge. Line totals stay in the hover card. */}
         <SidebarRowEndSlot
-          fadeClassName="group-hover/row:opacity-0"
+          sessionId={item.id}
+          isWaitingPermission={item.isWaitingPermission}
+          isWorking={item.isWorking}
+          hasUnreadMessages={item.hasUnreadMessages}
+          fadeClassName="group-hover/row:opacity-0 group-data-[menu-open]/row:opacity-0"
           restIcon={
-            showPr ||
-            hasChanges ||
-            showMergeablePill ||
-            isMobile ||
-            item.sharing?.visibility === 'private' ? (
+            showPr || showMergeablePill || isMobile || item.sharing?.visibility === 'private' ? (
               <span
                 className={cn(
                   'flex select-none items-center gap-1.5 text-[11px] tabular-nums text-sidebar-foreground-muted/80',
@@ -801,15 +789,10 @@ const UpdatedItemRow = memo(function UpdatedItemRow({
                 )}
               >
                 {isMobile ? <span>{relativeTime}</span> : null}
-                {showMergeablePill ? (
-                  <SessionMergeablePill />
-                ) : hasChanges && !isMergeable ? (
-                  <span className="flex items-center gap-1">
-                    <span className="text-code-added">+{addedLines}</span>
-                    <span className="text-code-removed">-{deletedLines}</span>
-                  </span>
+                {showMergeablePill ? <SessionMergeablePill /> : null}
+                {showPr ? (
+                  <SessionPrIcon compact prStatus={prStatus} prCiState={item.prCiState} />
                 ) : null}
-                {showPr ? <SessionPrIcon prStatus={prStatus} prCiState={item.prCiState} /> : null}
                 {item.sharing ? <SessionSharingIndicator state={item.sharing} /> : null}
               </span>
             ) : undefined
@@ -859,79 +842,81 @@ const UpdatedItemRow = memo(function UpdatedItemRow({
   }
 
   const menuRow = hasMenuActions ? (
-    <ContextMenu onOpenChange={setRowMenuOpen}>
-      <ContextMenuTrigger asChild>{row}</ContextMenuTrigger>
-      <ContextMenuContent className="min-w-[180px]">
+    <ContextMenu.Root onOpenChange={setRowMenuOpen}>
+      <ContextMenu.Trigger>{row}</ContextMenu.Trigger>
+      <ContextMenu.Content className="min-w-[180px]">
         {handlePrOpen ? (
-          <ContextMenuItem
-            onSelect={() => {
+          <ContextMenu.Item
+            icon={<GitPullRequest />}
+            onClick={() => {
               handlePrOpen();
             }}
           >
-            <GitPullRequest />
             {contextMenuLabels.openPr}
-          </ContextMenuItem>
+          </ContextMenu.Item>
         ) : null}
         {handlePrOpen && (canRename || canTogglePin || canArchive || canCopyUrl || branchName) ? (
-          <ContextMenuSeparator />
+          <ContextMenu.Separator />
         ) : null}
         {canRename ? (
-          <ContextMenuItem
-            onSelect={() => {
+          <ContextMenu.Item
+            icon={<Pencil />}
+            onClick={() => {
               onBeginRename(item.id, item.title);
             }}
           >
-            <Pencil />
             {contextMenuLabels.rename}
-          </ContextMenuItem>
+          </ContextMenu.Item>
         ) : null}
         {canTogglePin ? (
-          <ContextMenuItem
-            onSelect={() => {
+          <ContextMenu.Item
+            icon={item.isPinned ? <PinOff /> : <Pin />}
+            onClick={() => {
               onTogglePin?.(item.id, !item.isPinned);
             }}
           >
-            {item.isPinned ? <PinOff /> : <Pin />}
             {item.isPinned ? contextMenuLabels.unpin : contextMenuLabels.pin}
-          </ContextMenuItem>
+          </ContextMenu.Item>
         ) : null}
         {canArchive ? (
-          <ContextMenuItem
-            onSelect={() => {
+          <ContextMenu.Item
+            icon={<Archive />}
+            onClick={() => {
               onArchive?.(item.id);
             }}
           >
-            <Archive />
             {contextMenuLabels.archive}
-          </ContextMenuItem>
+          </ContextMenu.Item>
         ) : null}
         {(canRename || canTogglePin || canArchive) && (canCopyUrl || branchName) ? (
-          <ContextMenuSeparator />
+          <ContextMenu.Separator />
         ) : null}
         {canCopyUrl ? (
-          <ContextMenuItem
-            onSelect={() => {
+          <ContextMenu.Item
+            icon={<Link2 />}
+            onClick={() => {
               onCopyUrl?.(item.id);
             }}
           >
-            <Link2 />
             {contextMenuLabels.copyUrl}
-          </ContextMenuItem>
+          </ContextMenu.Item>
         ) : null}
         {shareMenuState ? (
-          <ContextMenuItem
+          <ContextMenu.Item
             disabled={shareMenuState !== 'share'}
-            onSelect={() => {
+            icon={
+              shareMenuState === 'share' ? (
+                <Users />
+              ) : shareMenuState === 'loading' ? (
+                <Spinner />
+              ) : (
+                <LockKeyhole />
+              )
+            }
+            onClick={() => {
               onShareWithTeam?.(item.id);
             }}
           >
-            {shareMenuState === 'share' ? (
-              <Users />
-            ) : shareMenuState === 'loading' ? (
-              <Loader2 className="animate-spin" />
-            ) : (
-              <LockKeyhole />
-            )}
             {shareMenuState === 'share'
               ? contextMenuLabels.shareWithTeam
               : shareMenuState === 'unregistered'
@@ -939,20 +924,20 @@ const UpdatedItemRow = memo(function UpdatedItemRow({
                 : shareMenuState === 'owner-only'
                   ? contextMenuLabels.onlyOwnerCanShare
                   : contextMenuLabels.loadingSharing}
-          </ContextMenuItem>
+          </ContextMenu.Item>
         ) : null}
         {branchName ? (
-          <ContextMenuItem
-            onSelect={() => {
+          <ContextMenu.Item
+            icon={<GitBranch />}
+            onClick={() => {
               void navigator.clipboard.writeText(branchName).catch(() => {});
             }}
           >
-            <GitBranch />
             {contextMenuLabels.copyBranch}
-          </ContextMenuItem>
+          </ContextMenu.Item>
         ) : null}
-      </ContextMenuContent>
-    </ContextMenu>
+      </ContextMenu.Content>
+    </ContextMenu.Root>
   ) : (
     row
   );

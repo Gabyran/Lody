@@ -2,15 +2,21 @@ import { describe, expect, it, vi } from 'vitest';
 
 import {
   buildCommandCandidates,
+  buildFileCandidates,
   buildIssuePrCandidates,
+  buildMentionFileIndex,
+  buildSkillCandidates,
   getCategoryNavigateText,
   selectMentionMenuView,
   selectMentionMenuViewForTrigger,
   toFileCandidate,
   toIssuePrCandidate,
+  toSessionCandidate,
   type MentionCandidate,
   type MentionCategory,
 } from '../src/components/mentions/mention-registry';
+import type { SessionMentionItem } from '../src/components/mentions/mention-session-source';
+import { buildSkillMentionItems } from '../src/components/mentions/mention-skill-source';
 
 function makeCandidate(value: string): MentionCandidate {
   return {
@@ -50,7 +56,6 @@ function makeIssuePrSuggestion(number: number, type: 'issue' | 'pr', title: stri
     token: `#${number}`,
     label: String(number),
     searchableNumber: String(number),
-    searchableTitle: title.toLowerCase(),
   };
 }
 
@@ -131,6 +136,24 @@ describe('selectMentionMenuView', () => {
     expect(getCategoryNavigateText({ namespace: 'issue' })).toBe('@issue:');
   });
 
+  it.each(['/', '、'])('routes %s to commands and shortcuts only', (trigger) => {
+    const command = makeCategory('command', 'command', 'Commands', []);
+    command.directTrigger = '/';
+    command.getCandidates = vi.fn((term: string) =>
+      buildCommandCandidates([{ name: 'review', description: 'Review' }], term)
+    );
+    const shortcut = makeCategory('prompt_shortcut', 'shortcut', 'Shortcuts', ['review-template']);
+    shortcut.directTrigger = '/';
+    const file = makeCategory('file', 'file', 'Files', ['review.ts']);
+
+    const view = selectMentionMenuViewForTrigger([command, shortcut, file], trigger, 'rev');
+    if (view?.level !== 'aggregate') throw new Error('expected aggregate');
+    expect(view.groups.map((group) => group.category.id)).toEqual(['command', 'prompt_shortcut']);
+    expect(
+      view.groups.flatMap((group) => group.candidates.map((candidate) => candidate.insertText))
+    ).toEqual(['/review', '@review-template']);
+  });
+
   it('opens skills directly from the retained $ trigger', () => {
     const skill = makeCategory('skill', 'skill', 'Skills', ['review']);
     skill.directTrigger = '$';
@@ -144,18 +167,95 @@ describe('selectMentionMenuView', () => {
   });
 });
 
+describe('skill category filtering', () => {
+  // A machine's system skills: every path runs through `~/.codex/skills/.system`.
+  const items = buildSkillMentionItems([
+    {
+      scope: 'system',
+      dir: '~/.codex/skills/.system',
+      skills: [
+        'imagegen',
+        'openai-docs',
+        'plugin-creator',
+        'review-agent',
+        'skill-creator',
+        'skill-installer',
+      ].map((name) => ({
+        id: name,
+        name,
+        relativePath: `~/.codex/skills/.system/${name}/SKILL.md`,
+        isSymlink: false,
+      })),
+    },
+  ]);
+  const labels = {
+    author: 'Author',
+    path: 'Path',
+    linksTo: 'Links to',
+    symlink: 'symlink',
+    scope: { project: 'Project', global: 'Global', system: 'System' },
+  };
+  const skills: MentionCategory = {
+    id: 'skill',
+    namespace: 'skill',
+    directTrigger: '$',
+    label: 'Skills',
+    icon: 'skill',
+    status: 'ready',
+    getCandidates: (term, limit) => buildSkillCandidates(items, term, null, labels, limit),
+  };
+
+  it('answers a term that names no skill with no rows, not the whole list', () => {
+    // `sy` is in `.system`, which every one of these paths shares.
+    for (const view of [
+      selectMentionMenuView([skills], 'skill:sy'),
+      selectMentionMenuViewForTrigger([skills], '$', 'sy'),
+    ]) {
+      if (view?.level !== 'category') throw new Error('expected the skill level');
+      expect(view.candidates).toEqual([]);
+    }
+  });
+
+  it('matches the skill, not the skills directory around it', () => {
+    const view = selectMentionMenuView([skills], 'skill:skill');
+    if (view.level !== 'category') throw new Error('expected the skill level');
+    expect(view.candidates.map((candidate) => candidate.title)).toEqual([
+      'skill-creator',
+      'skill-installer',
+    ]);
+  });
+});
+
 describe('candidate insertion semantics', () => {
   it('lets a directory descend but commits it without the trailing slash', () => {
     const candidate = toFileCandidate({
       kind: 'dir',
       path: 'src/components',
       token: 'src/components/',
-      searchable: 'src/components/',
     });
 
     expect(candidate.navigateText).toBe('@src/components/');
     expect(candidate.insertText).toBe('@src/components');
     expect(candidate.kind).toBe('dir');
+    // The row reads the folder's own name, then where it sits.
+    expect(candidate.title).toBe('components/');
+    expect(candidate.hint).toBe('src');
+  });
+
+  it('shows a path as its name then its folder, while committing the whole path', () => {
+    const nested = toFileCandidate({
+      kind: 'file',
+      path: 'src/ui/mention/mention-root.tsx',
+      token: 'src/ui/mention/mention-root.tsx',
+    });
+    expect(nested.title).toBe('mention-root.tsx');
+    expect(nested.hint).toBe('src/ui/mention');
+    expect(nested.insertText).toBe('@src/ui/mention/mention-root.tsx');
+
+    // A file at the root has no folder to name.
+    const top = toFileCandidate({ kind: 'file', path: 'README.md', token: 'README.md' });
+    expect(top.title).toBe('README.md');
+    expect(top.hint).toBeUndefined();
   });
 
   it('commits a file with no navigation step', () => {
@@ -163,7 +263,6 @@ describe('candidate insertion semantics', () => {
       kind: 'file',
       path: 'src/a.ts',
       token: 'src/a.ts',
-      searchable: 'src/a.ts',
     });
 
     expect(candidate.navigateText).toBeUndefined();
@@ -180,10 +279,41 @@ describe('candidate insertion semantics', () => {
     expect(candidate.title).toBe('Broken menu');
   });
 
+  it("carries a session's last activity for the row to state", () => {
+    const candidate = toSessionCandidate(
+      {
+        slug: 'parser-work',
+        sessionId: 'session-1' as SessionMentionItem['sessionId'],
+        title: 'Parser work',
+        activityAt: 1_700_000_000_000,
+        projectKey: 'chat',
+      },
+      { untitled: 'Untitled session' }
+    );
+    expect(candidate.activityAt).toBe(1_700_000_000_000);
+
+    const unknown = toSessionCandidate(
+      {
+        slug: 'x',
+        sessionId: 'session-2' as SessionMentionItem['sessionId'],
+        title: '',
+        activityAt: 0,
+        projectKey: 'chat',
+      },
+      { untitled: 'Untitled session' }
+    );
+    // No timestamp is no time at all, not "56y".
+    expect(unknown.activityAt).toBeUndefined();
+    expect(unknown.title).toBe('Untitled session');
+  });
+
   it('keeps the slash form for commands', () => {
     const [candidate] = buildCommandCandidates([{ name: 'review', description: 'Review' }], '');
 
     expect(candidate?.insertText).toBe('/review');
+    // The description rides on the name's line rather than a second one.
+    expect(candidate?.hint).toBe('Review');
+    expect(candidate?.subtitle).toBeUndefined();
   });
 });
 
@@ -200,11 +330,49 @@ describe('buildIssuePrCandidates', () => {
     ];
 
     const scopedTo = (type: 'issue' | 'pr') => suggestions.filter((item) => item.type === type);
-    const prs = buildIssuePrCandidates(scopedTo('pr'), '', null);
-    const issues = buildIssuePrCandidates(scopedTo('issue'), '', null);
+    const prs = buildIssuePrCandidates(scopedTo('pr'), '');
+    const issues = buildIssuePrCandidates(scopedTo('issue'), '');
 
     expect(prs.map((entry) => entry.value)).toEqual(['#900', '#901']);
     expect(issues.every((entry) => entry.kind === 'issue')).toBe(true);
     expect(issues.length).toBeGreaterThan(0);
   });
+
+  it('matches issue titles as ordered subsequences across words and punctuation', () => {
+    const suggestions = [
+      makeIssuePrSuggestion(42, 'issue', 'File generated-name is missing'),
+      makeIssuePrSuggestion(43, 'issue', 'Unrelated bug'),
+    ];
+
+    expect(buildIssuePrCandidates(suggestions, 'filename').map((entry) => entry.value)).toEqual([
+      '#42',
+    ]);
+  });
+});
+
+describe('buildFileCandidates', () => {
+  it('matches paths as ordered subsequences across words and punctuation', () => {
+    const index = buildMentionFileIndex(
+      { paths: ['src/file generated-name.ts', 'src/unrelated.ts'] },
+      () => null
+    );
+
+    expect(buildFileCandidates(index, 'filename').map((entry) => entry.value)).toContain(
+      'src/file generated-name.ts'
+    );
+  });
+});
+
+it('keeps pending and failed sources visible in aggregate search without stale candidates', () => {
+  const file = makeCategory('file', 'file', 'Files', []);
+  for (const status of ['loading', 'error'] as const) {
+    file.status = status;
+    const view = selectMentionMenuView([file], 'composer');
+    expect(view.level).toBe('aggregate');
+    if (view.level !== 'aggregate') throw new Error('Expected aggregate search');
+    expect(view.groups).toEqual([{ category: file, candidates: [] }]);
+  }
+  file.status = 'ready';
+  const view = selectMentionMenuView([file], 'composer');
+  expect(view.level === 'aggregate' && view.groups).toEqual([]);
 });

@@ -16,6 +16,36 @@ const {
 };
 
 describe('local session control node validators', () => {
+  it('accepts the new preview status contract and rejects malformed renewal/expiry fields', () => {
+    const request = {
+      type: 'session/preview-status',
+      machineId: 'machine-1',
+      workspaceId: 'workspace-1',
+      sessionId: 'session-1',
+      requestedByUserId: 'user-1',
+      renewEndpointId: 'endpoint-1',
+    };
+    const response = {
+      type: 'session/preview-status_response',
+      sessionId: 'session-1',
+      success: true,
+      connection: { status: 'closed', closedReason: 'idle_timeout', endpointId: 'endpoint-1' },
+      expiresAt: 1_800_000_000_000,
+    };
+    for (const validate of [isLocalSessionControlRequest, isLocalSessionControlRequestCjs]) {
+      expect(validate(request)).toBe(true);
+      expect(validate({ ...request, renewEndpointId: 1 })).toBe(false);
+    }
+    for (const validate of [isLocalSessionControlResponse, isLocalSessionControlResponseCjs]) {
+      expect(validate(response)).toBe(true);
+      expect(validate({ ...response, expiresAt: 'tomorrow' })).toBe(false);
+      expect(validate({ ...response, expiresAt: -1 })).toBe(false);
+      expect(validate({ ...response, connection: { status: 'revoked' } })).toBe(false);
+      expect(
+        validate({ ...response, connection: { status: 'closed', closedReason: 'unknown' } })
+      ).toBe(false);
+    }
+  });
   it('accepts builtin Kimi sessions in TS and CJS validators', () => {
     const request = {
       type: 'session/create',
@@ -44,6 +74,25 @@ describe('local session control node validators', () => {
       acpSessionConfig: {
         cliType: 'builtin',
         agentType: 'deepseek',
+        prompt: 'hello',
+      },
+      userId: 'user-1',
+      userName: 'Test User',
+      userEmail: 'test@example.com',
+    };
+    expect(isLocalSessionControlRequest(request)).toBe(true);
+    expect(isLocalSessionControlRequestCjs(request)).toBe(true);
+  });
+
+  it.each(['bub', 'dimcode'])('accepts builtin %s in TS and CJS', (agentType) => {
+    const request = {
+      type: 'session/create',
+      sessionId: 'session-builtin',
+      machineId: 'machine-1',
+      workspaceId: 'workspace-1',
+      acpSessionConfig: {
+        cliType: 'builtin',
+        agentType,
         prompt: 'hello',
       },
       userId: 'user-1',
@@ -114,6 +163,16 @@ describe('local session control node validators', () => {
         ],
       },
     };
+    const runtimeDownloadProgress = {
+      type: 'machine/acp-authentication-progress',
+      machineId: 'machine-1',
+      requestId: 'auth-1',
+      agentType: 'codex',
+      status: 'runtime-download',
+      runtimeName: 'codex',
+      runtimePhase: 'downloading',
+      runtimePercent: 42,
+    };
     const submitInput = {
       type: 'machine/acp-authenticate',
       machineId: 'machine-1',
@@ -153,6 +212,16 @@ describe('local session control node validators', () => {
     expect(isLocalSessionControlResponseCjs(progress)).toBe(true);
     expect(isLocalSessionControlResponse(inputProgress)).toBe(true);
     expect(isLocalSessionControlResponseCjs(inputProgress)).toBe(true);
+    expect(isLocalSessionControlResponse(runtimeDownloadProgress)).toBe(true);
+    expect(isLocalSessionControlResponseCjs(runtimeDownloadProgress)).toBe(true);
+    for (const validate of [isLocalSessionControlResponse, isLocalSessionControlResponseCjs]) {
+      // runtime-download progress requires the runtime identity it reports on.
+      const { runtimeName: _runtimeName, ...withoutRuntimeName } = runtimeDownloadProgress;
+      expect(validate(withoutRuntimeName)).toBe(false);
+      const { runtimePhase: _runtimePhase, ...withoutRuntimePhase } = runtimeDownloadProgress;
+      expect(validate(withoutRuntimePhase)).toBe(false);
+      expect(validate({ ...runtimeDownloadProgress, runtimePercent: 101 })).toBe(false);
+    }
     expect(isLocalSessionControlResponse(response)).toBe(true);
     expect(isLocalSessionControlResponseCjs(response)).toBe(true);
   });
@@ -539,6 +608,20 @@ describe('local session control node validators', () => {
         env: { ACP_PROVIDER_TOKEN: 'attacker-controlled' },
       })
     ).toBe(false);
+  });
+
+  it('carries the forced capability refresh flag through ts and cjs validators', () => {
+    const request = {
+      type: 'machine/acp-capabilities-refresh' as const,
+      machineId: 'machine-1',
+      workspaceId: 'workspace-1',
+      configId: 'config-1',
+    };
+
+    expect(isLocalSessionControlRequest({ ...request, force: true })).toBe(true);
+    expect(isLocalSessionControlRequestCjs({ ...request, force: true })).toBe(true);
+    expect(isLocalSessionControlRequest({ ...request, force: 'yes' })).toBe(false);
+    expect(isLocalSessionControlRequestCjs({ ...request, force: 'yes' })).toBe(false);
   });
 
   it('accepts machine ping requests and responses in ts and cjs validators', () => {

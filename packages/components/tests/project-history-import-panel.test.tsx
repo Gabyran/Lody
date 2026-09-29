@@ -15,7 +15,7 @@ import {
   type ProjectSettingsRow,
 } from '../src/components/settings/project-settings';
 import { initI18n } from '../src/i18n';
-import { TooltipProvider } from '../src/ui/tooltip';
+import { Tooltip } from '@lody/ui/tooltip';
 
 (
   globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean }
@@ -54,6 +54,7 @@ function makeRow(state: ProjectHistoryImportState): ProjectSettingsRow {
       createdAtMs: 1,
     },
     sharedWithTeam: false,
+    conversationCount: 0,
     isUpdating: false,
     canUpdateSharing: true,
     worktreeSetup: { scripts: {} },
@@ -91,9 +92,9 @@ describe('ProjectHistoryImportPanel empty states', () => {
     const row = makeRow(state);
     await act(async () => {
       root.render(
-        <TooltipProvider>
+        <Tooltip.Provider>
           <ProjectHistoryImportPanel row={row} state={state} onSyncHistory={async () => {}} />
-        </TooltipProvider>
+        </Tooltip.Provider>
       );
     });
   }
@@ -105,17 +106,24 @@ describe('ProjectHistoryImportPanel empty states', () => {
     });
   }
 
+  it('identifies the selected configuration instead of collapsing it to the agent family', async () => {
+    await renderState({ ...makeState(null), providerLabel: 'Codex work account' });
+    expect(container.textContent).toContain(
+      "Find this project's conversations in Codex work account"
+    );
+  });
+
   it('guides the first sync without showing list actions', async () => {
     await renderState(makeState(null));
 
-    expect(container.textContent).toContain('Sync Codex conversations');
+    expect(container.textContent).toContain("Find this project's conversations in Codex");
     expect(buttonLabels()).toEqual(['Sync']);
   });
 
   it('guides another sync when the synced catalog is empty', async () => {
     await renderState(makeState({ listed: 0, lastListedAt: 1, sessions: [] }));
 
-    expect(container.textContent).toContain('No Codex conversations found');
+    expect(container.textContent).toContain('Start a conversation for this project in Codex');
     expect(buttonLabels()).toEqual(['Sync again']);
   });
 

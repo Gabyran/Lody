@@ -1,4 +1,4 @@
-import { Fragment, useMemo, useState, type ReactNode } from 'react';
+import { Fragment, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { AnimatePresence, motion } from 'framer-motion';
 import {
   ChevronRight,
@@ -8,27 +8,24 @@ import {
   LockKeyhole,
   MessageCircle,
 } from 'lucide-react';
-import { useAtomValue, useSetAtom } from 'jotai';
+import { atom, useAtom, useAtomValue, useSetAtom, type PrimitiveAtom } from 'jotai';
+import { atomFamily } from 'jotai/utils';
 import { useTranslation } from 'react-i18next';
 import { getServerNow } from '@lody/shared';
-import { buildOpenedBySessionTree, pinnedFirstRootRank } from '@/lib/session-opened-by-tree';
+import {
+  buildOpenedBySessionTree,
+  countOpenedByTreeRoots,
+  pinnedFirstRootRank,
+} from '@/lib/session-opened-by-tree';
 import {
   sidebarCollapsedOpenedBySessionsAtom,
   toggleSidebarCollapsedOpenedBySessionAtom,
 } from '@/atoms/focus-layer';
 import { buildSessionRowOpenedByTreeSlot } from '@/components/sidebar-row-shared';
 import { cn } from '@/lib/utils';
-import { Checkbox } from '@/ui/checkbox';
-import {
-  AlertDialog,
-  AlertDialogAction,
-  AlertDialogCancel,
-  AlertDialogContent,
-  AlertDialogDescription,
-  AlertDialogFooter,
-  AlertDialogHeader,
-  AlertDialogTitle,
-} from '@/ui/alert-dialog';
+import { Button } from '@lody/ui/button';
+import { Checkbox } from '@lody/ui/checkbox';
+import { AlertDialog } from '@/ui/dialog';
 import {
   ConversationRow,
   conversationRowHasActivity,
@@ -86,6 +83,61 @@ export const PINNED_BUCKET_ID = '__pinned__';
    section above — no heading; just the remaining rows. */
 const FLAT_UNPINNED_BUCKET_ID = '__flat-unpinned__';
 
+/* Rows a bucket shows before it collapses behind "Show all (N)".
+   Same value as the desktop sidebar's `MAX_VISIBLE_SESSIONS`
+   (`../session-list.tsx`) — deliberately duplicated rather than imported so
+   the mobile bundle does not pull in the desktop session-list module.
+
+   Why 5 and not 3: a phone screen already fits ~8 rows, so 3 turns every
+   project into a two-tap read and puts the toggle back in the user's way on
+   every bucket. 5 is the point where a project's recent work still reads as a
+   list while an idle project costs one line more than its heading — and it
+   keeps the two platforms saying the same thing about the same workspace.
+
+   The cap counts TOP-LEVEL rows only (`maxRoots`), so a preview never splits
+   an opener from the Sessions it opened. */
+export const MOBILE_CHAT_PREVIEW_MAX_ROOTS = 5;
+
+/* Tree accessors shared by the render pass and the overflow count, so the
+   "does this bucket overflow" question is answered by the same nesting model
+   that decides what renders. */
+const CHAT_OPENED_BY_TREE_ACCESSORS = {
+  getId: (chat: MobileConversationItem) => chat.id,
+  getOpenedBySessionId: (chat: MobileConversationItem) =>
+    chat.openedByRowSessionId ?? chat.openedBySessionId,
+} as const;
+
+/* Per-bucket preview state. Owned by `MobileChatList` (one flag per bucket id)
+   rather than by the shared `sidebarCollapsedOpenedBySessionsAtom`: that atom
+   is the opener FOLD state, which the drawer sidebar and this list must agree
+   on. How many rows a mobile bucket previews is a property of this surface
+   alone and must not leak into the sidebar. */
+export type MobileChatPreviewState = {
+  /** True once the user expanded this bucket past the preview cap. */
+  showAll: boolean;
+  onToggle: () => void;
+};
+
+/* Group fold + "Show all" state for one list surface. Held in an atom, not
+   component state, because leaving the home screen (e.g. into Settings)
+   unmounts the list and would otherwise re-expand every folded group on
+   return. In-memory only: it survives navigation, not an app reload. */
+type MobileChatBucketUiState = {
+  collapsed: ReadonlySet<string>;
+  expanded: ReadonlySet<string>;
+};
+const createBucketUiStateAtom = () =>
+  atom<MobileChatBucketUiState>({ collapsed: new Set<string>(), expanded: new Set<string>() });
+const mobileChatBucketUiStateAtomFamily = atomFamily((_stateKey: string) =>
+  createBucketUiStateAtom()
+);
+const toggleInSet = (set: ReadonlySet<string>, id: string): ReadonlySet<string> => {
+  const next = new Set(set);
+  if (next.has(id)) next.delete(id);
+  else next.add(id);
+  return next;
+};
+
 /* Fixed date-bucket ids (ordered newest → oldest). Month buckets use
    `date:month:YYYY-MM` and sort after these named ones. */
 export const DATE_BUCKET_TODAY = 'date:today';
@@ -113,15 +165,10 @@ const GROUP_HEADING_X = 'ps-[18px] pe-4';
 
 /* Group label type size — slightly under session-row 15px so sections
    stay secondary, but large enough to scan. */
-const GROUP_HEADING_TEXT =
-  'text-[14px] font-semibold tracking-tight text-muted-foreground';
+const GROUP_HEADING_TEXT = 'text-[14px] font-semibold tracking-tight text-muted-foreground';
 
 export function MobileChatSectionHeading({ children }: { children: ReactNode }) {
-  return (
-    <div className={cn(GROUP_HEADING_X, 'pb-1.5 pt-5', GROUP_HEADING_TEXT)}>
-      {children}
-    </div>
-  );
+  return <div className={cn(GROUP_HEADING_X, 'pb-1.5 pt-5', GROUP_HEADING_TEXT)}>{children}</div>;
 }
 
 /* Chevron for group collapse state: points right when collapsed,
@@ -371,6 +418,7 @@ export function MobileChatListCard({
   archived = false,
   onRequestDelete,
   selection,
+  preview,
   secondaryField = 'branch',
 }: {
   chats: MobileConversationItem[];
@@ -392,6 +440,10 @@ export function MobileChatListCard({
      toolbar's "select all" + count stay in sync across grouped
      sections. */
   selection?: ChatSelectionState;
+  /** Caps the bucket at {@link MOBILE_CHAT_PREVIEW_MAX_ROOTS} top-level rows
+     and appends a "Show all (N)" toggle. Omit to render every row (what a
+     standalone card without a `MobileChatList` around it does). */
+  preview?: MobileChatPreviewState;
   /** @deprecated Conversation rows are single-line; branch/project meta
      is no longer shown. Kept for call-site compatibility. */
   secondaryField?: 'branch' | 'project';
@@ -419,19 +471,41 @@ export function MobileChatListCard({
      opener in the drawer and in the mobile list can never disagree. */
   const collapsedOpeners = useAtomValue(sidebarCollapsedOpenedBySessionsAtom);
   const toggleCollapsedOpener = useSetAtom(toggleSidebarCollapsedOpenedBySessionAtom);
+  /* A capped bucket renders at most `MOBILE_CHAT_PREVIEW_MAX_ROOTS` top-level
+     rows. `maxRoots` is applied AFTER `rootRank`, so the preview keeps the
+     pinned-first / latest-activity order the bucket already promises — it
+     truncates that order rather than reshuffling it. */
+  const showAll = preview?.showAll ?? false;
+  const previewEnabled = preview != null;
+  const capped = previewEnabled && !showAll;
   const treeNodes = useMemo(
     () =>
       buildOpenedBySessionTree(chats, {
-        getId: (chat) => chat.id,
-        getOpenedBySessionId: (chat) => chat.openedByRowSessionId ?? chat.openedBySessionId,
+        ...CHAT_OPENED_BY_TREE_ACCESSORS,
         isCollapsed: (openerId) => collapsedOpeners[openerId] === true,
         /* Bucket order is pinned-first then latest activity; rank an opener by
            its freshest opened Session so nesting cannot bury a just-updated
            row under a stale opener. */
         rootRank: (chat) => pinnedFirstRootRank(chat.latestMessageAt ?? 0, chat.isPinned),
+        ...(capped ? { maxRoots: MOBILE_CHAT_PREVIEW_MAX_ROOTS } : {}),
       }),
-    [chats, collapsedOpeners]
+    [capped, chats, collapsedOpeners]
   );
+  /* Gate the toggle on TOP-LEVEL rows, matching what the cap actually limits:
+     five openers plus the Sessions they opened is not an overflowing bucket,
+     so it must not sprout a "Show all" the tap would not change.
+
+     Deliberately NOT wrapped in `useMemo`. `MobileChatList` calls `groupChats`
+     in its render body, so every bucket receives a freshly built `chats` array
+     on every render — measured: a state-only re-render (tapping one bucket's
+     toggle) hands all buckets a new array. A memo keyed on `chats` therefore
+     cannot ever hit, and one that looks like a cache while caching nothing is
+     worse than the O(rows) scan it fails to avoid. `previewEnabled` exists for
+     the same reason: `preview` is a new object literal each render, so only the
+     one bit of it that matters may be read. */
+  const overflowsPreview =
+    previewEnabled &&
+    countOpenedByTreeRoots(chats, CHAT_OPENED_BY_TREE_ACCESSORS) > MOBILE_CHAT_PREVIEW_MAX_ROOTS;
   return (
     /* Flat list — no rounded card shell or inter-row dividers. Rows
        sit directly on the page canvas; `ConversationRow` supplies its
@@ -449,8 +523,18 @@ export function MobileChatListCard({
          per-row exit animations don't fire for every row at once
          (which felt like a freeze on lists with > 5–10 rows). The
          intentional single-row archive case still works because that
-         path only removes one item from the same key bucket. */}
-      <AnimatePresence initial={false} key={archived ? 'archived' : 'active'}>
+         path only removes one item from the same key bucket.
+
+         "Show less" is the same shape of bulk removal. Measured with the key
+         carrying only `archived`: collapsing a 14-row bucket leaves all 14 rows
+         in the DOM a frame later, animating out together for 400ms. Adding the
+         preview state to the key makes that transition a remount instead — the
+         same frame reports the 5 rows that remain — and `initial={false}` means
+         expanding adds its rows with no enter animation either. */}
+      <AnimatePresence
+        initial={false}
+        key={`${archived ? 'archived' : 'active'}:${capped ? 'preview' : 'full'}`}
+      >
         {treeNodes.map((node) => {
           const conversation = node.item;
           /* Same builder the sidebar rows use, so the disclosure's aria-label
@@ -475,9 +559,7 @@ export function MobileChatListCard({
               onToggleSelect={
                 selection ? () => selection.onToggleSelect(conversation.id) : undefined
               }
-              onLongPress={
-                selection ? () => selection.onLongPress(conversation.id) : undefined
-              }
+              onLongPress={selection ? () => selection.onLongPress(conversation.id) : undefined}
               secondaryField={secondaryField}
             />
           );
@@ -515,11 +597,7 @@ export function MobileChatListCard({
                         ? () => rowActions.onRestore!(conversation.id)
                         : undefined
                     }
-                    onDelete={
-                      onRequestDelete
-                        ? () => onRequestDelete(conversation.id)
-                        : undefined
-                    }
+                    onDelete={onRequestDelete ? () => onRequestDelete(conversation.id) : undefined}
                   >
                     {row}
                   </MobileSwipeableRow>
@@ -532,8 +610,7 @@ export function MobileChatListCard({
                     isPinned={conversation.isPinned ?? false}
                     onTogglePin={
                       rowActions?.onTogglePin
-                        ? () =>
-                            rowActions.onTogglePin!(conversation.id, !conversation.isPinned)
+                        ? () => rowActions.onTogglePin!(conversation.id, !conversation.isPinned)
                         : undefined
                     }
                     onArchive={
@@ -552,7 +629,71 @@ export function MobileChatListCard({
           );
         })}
       </AnimatePresence>
+      {overflowsPreview && preview ? (
+        <MobileChatPreviewToggle
+          showAll={showAll}
+          totalCount={chats.length}
+          onToggle={preview.onToggle}
+        />
+      ) : null}
     </>
+  );
+}
+
+/* Tail affordance of a capped bucket. Sits inside the bucket body, directly
+   under the last row and above the next group heading, so it reads as the end
+   of THIS list rather than as chrome between sections.
+
+   Geometry: the label starts on the row-title x (px-4 + the 16px leading slot
+   + gap-2.5 = 42px) via an empty spacer, exactly as the desktop sidebar's
+   "Show all" does. The slot stays EMPTY on purpose — it is the column that
+   carries a row's status indicator and an opener's fold chevron, so a chevron
+   here would read as one of those. The label alone says which way it goes.
+
+   The type is quieter than a session title (15px medium foreground) and than a
+   group heading (14px semibold muted), which is the hierarchy: rows, then
+   sections, then this. Full-width `min-h-11` keeps a thumb target the size of
+   a row. */
+function MobileChatPreviewToggle({
+  showAll,
+  totalCount,
+  onToggle,
+}: {
+  showAll: boolean;
+  totalCount: number;
+  onToggle: () => void;
+}) {
+  const { t } = useTranslation();
+  const buttonRef = useRef<HTMLButtonElement | null>(null);
+  const wasShowingAll = useRef(showAll);
+  /* Collapsing removes rows ABOVE this button, so on a long bucket the tap
+     target — and everything the user was reading — jumps off the top of the
+     viewport. Pull it back into view minimally (`nearest` is a no-op when it
+     is already visible). A layout effect runs after the rows are removed and
+     before paint, so the correction never renders as a visible scroll jump.
+     Chrome's native scroll anchoring would cover this on its own; WebKit has
+     never shipped `overflow-anchor`, and iOS is the surface this list is for. */
+  useLayoutEffect(() => {
+    if (wasShowingAll.current && !showAll) {
+      buttonRef.current?.scrollIntoView?.({ block: 'nearest' });
+    }
+    wasShowingAll.current = showAll;
+  }, [showAll]);
+  const label = showAll
+    ? t('sessions.showLess', 'Show less')
+    : t('sessions.showAll', 'Show all ({{count}})', { count: totalCount });
+  return (
+    <button
+      ref={buttonRef}
+      type="button"
+      data-chat-list-preview-toggle=""
+      aria-expanded={showAll}
+      onClick={onToggle}
+      className="flex min-h-11 w-full items-center gap-2.5 bg-background px-4 py-2 text-left text-[13px] font-medium text-muted-foreground transition-colors active:bg-muted/40"
+    >
+      <span className="h-4 w-4 shrink-0" aria-hidden="true" />
+      <span className="min-w-0 truncate">{label}</span>
+    </button>
   );
 }
 
@@ -649,9 +790,7 @@ export function dateBucketIdFor(
   nowMs: number = getServerNow()
 ): string {
   const t =
-    typeof latestMessageAt === 'number' && Number.isFinite(latestMessageAt)
-      ? latestMessageAt
-      : 0;
+    typeof latestMessageAt === 'number' && Number.isFinite(latestMessageAt) ? latestMessageAt : 0;
   if (t <= 0) return DATE_BUCKET_UNKNOWN;
 
   const startToday = startOfLocalDayMs(nowMs);
@@ -803,9 +942,11 @@ export function MobileChatList({
   onPermanentDelete,
   selectionLabels,
   rowSecondaryField,
+  capGroupPreviews = false,
   privateLabel,
   privateHelpAriaLabel,
   onPrivateHelp,
+  bucketStateKey,
 }: {
   chats: MobileConversationItem[];
   groupBy?: MobileChatGroupBy;
@@ -837,6 +978,28 @@ export function MobileChatList({
      multi-select flow. The promise lets the list wait before
      clearing its selection state. */
   onPermanentDelete?: (chatIds: string[]) => void | Promise<void>;
+  /** Caps every bucket at {@link MOBILE_CHAT_PREVIEW_MAX_ROOTS} top-level rows
+     behind a "Show all (N)" toggle. On for the workspace home list, where
+     buckets compete for the screen and one busy project would otherwise push
+     every other project and worktree below the fold. Off inside a single
+     project's page: the user drilled in to read exactly that list, and there
+     is nothing else there for a cap to make room for.
+
+     This stays an explicit flag rather than being derived from
+     `groupBy !== 'none'`, which is equivalent TODAY and shorter. The project
+     page is `none` only because `chat-landing.tsx` pins it there so a
+     single-bucket list does not render a redundant heading — a presentation
+     decision that has nothing to do with capping. Deriving from it would couple
+     the two through a shared variable and fail silently in both directions: give
+     the project page a date mode and the cap switches on and starts hiding
+     worktree rows, which is the opposite of what it is for; give home a flat
+     mode and the cap disappears. `groupBy` also defaults to `none`, so a new
+     caller would silently opt out. */
+  capGroupPreviews?: boolean;
+  /** Keeps group fold / "Show all" state across unmounts (navigating to
+     Settings and back). Surfaces sharing a key share that state; omit it to
+     scope the state to this mount. */
+  bucketStateKey?: string;
   /** Copy for the multi-select toolbar + confirmation alert-dialog.
      All keys are optional with reasonable Chinese defaults; callers
      can override to localize. */
@@ -854,18 +1017,26 @@ export function MobileChatList({
   const selectionEnabled = archived && Boolean(onPermanentDelete);
   const [selectionMode, setSelectionMode] = useState(false);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(() => new Set());
-  /* Project-group collapse: ids in the set are collapsed (body hidden).
-     Default empty → every bucket starts expanded. */
-  const [collapsedBucketIds, setCollapsedBucketIds] = useState<Set<string>>(
-    () => new Set()
+  /* Project-group collapse (ids in `collapsed` hide their body; default
+     empty → every bucket starts expanded) and buckets the user expanded past
+     the preview cap (`expanded`). Every bucket starts capped at
+     `MOBILE_CHAT_PREVIEW_MAX_ROOTS`, which is the whole point: without it a
+     project with forty Sessions pushes every other project and worktree off
+     the screen. The preview flag is deliberately NOT the shared opener-fold
+     atom — see `MobileChatPreviewState`. With `bucketStateKey` the state
+     outlives this component; without it, it lives and dies with the mount. */
+  const [localBucketUiStateAtom] =
+    useState<PrimitiveAtom<MobileChatBucketUiState>>(createBucketUiStateAtom);
+  const [bucketUiState, setBucketUiState] = useAtom(
+    bucketStateKey ? mobileChatBucketUiStateAtomFamily(bucketStateKey) : localBucketUiStateAtom
   );
+  const collapsedBucketIds = bucketUiState.collapsed;
+  const expandedBucketIds = bucketUiState.expanded;
   const toggleBucket = (bucketId: string) => {
-    setCollapsedBucketIds((prev) => {
-      const next = new Set(prev);
-      if (next.has(bucketId)) next.delete(bucketId);
-      else next.add(bucketId);
-      return next;
-    });
+    setBucketUiState((prev) => ({ ...prev, collapsed: toggleInSet(prev.collapsed, bucketId) }));
+  };
+  const toggleBucketPreview = (bucketId: string) => {
+    setBucketUiState((prev) => ({ ...prev, expanded: toggleInSet(prev.expanded, bucketId) }));
   };
   /* Pending permanent-delete confirmation. Drives one shared
      alert-dialog for two entry points: the multi-select toolbar
@@ -982,12 +1153,7 @@ export function MobileChatList({
       }
     />
   ) : flatHeading != null && groupBy === 'none' ? (
-    <div
-      className={cn(
-        'flex w-full items-center gap-2 pb-1.5 pt-5',
-        GROUP_HEADING_X
-      )}
-    >
+    <div className={cn('flex w-full items-center gap-2 pb-1.5 pt-5', GROUP_HEADING_X)}>
       <div className={cn('min-w-0 flex-1', GROUP_HEADING_TEXT)}>{flatHeading}</div>
       {firstGroupTrailing ? <div className="shrink-0">{firstGroupTrailing}</div> : null}
     </div>
@@ -1019,6 +1185,17 @@ export function MobileChatList({
         const expanded = !collapsedBucketIds.has(id);
         const onToggle = () => toggleBucket(id);
         const compactTop = index === 0;
+        /* Multi-select drives a permanent delete, and "select all" operates on
+           every id in the list. Capping the rows while it is active would let
+           the user confirm a delete of Sessions the surface never showed them,
+           so selection mode renders the buckets in full. */
+        const bucketPreview: MobileChatPreviewState | undefined =
+          !capGroupPreviews || selectionToolbarActive
+            ? undefined
+            : {
+                showAll: expandedBucketIds.has(id),
+                onToggle: () => toggleBucketPreview(id),
+              };
         const trailing =
           showFirstGroupTrailing && !trailingConsumedByFlatHeading && index === 0
             ? firstGroupTrailing
@@ -1051,6 +1228,7 @@ export function MobileChatList({
                 archived={archived}
                 onRequestDelete={selectionEnabled ? requestSwipeDelete : undefined}
                 selection={selectionState}
+                preview={bucketPreview}
                 secondaryField={resolvedSecondaryField}
               />
             </Fragment>
@@ -1139,6 +1317,7 @@ export function MobileChatList({
                 archived={archived}
                 onRequestDelete={selectionEnabled ? requestSwipeDelete : undefined}
                 selection={selectionState}
+                preview={bucketPreview}
                 secondaryField={resolvedSecondaryField}
               />
             ) : null}
@@ -1156,44 +1335,43 @@ export function MobileChatList({
     <MobileSwipeableRowGroup>
       {headingNode}
       {cards}
-      <AlertDialog
+      <AlertDialog.Root
         open={pendingDelete != null}
         onOpenChange={(open) => !isDeleting && !open && setPendingDelete(null)}
       >
-        <AlertDialogContent>
-          <AlertDialogHeader>
-            <AlertDialogTitle>
+        <AlertDialog.Content>
+          <AlertDialog.Header>
+            <AlertDialog.Title>
               {selectionLabels?.confirmTitle ?? '彻底删除归档对话'}
-            </AlertDialogTitle>
-            <AlertDialogDescription>
-              {(selectionLabels?.confirmDescription ?? '将永久删除选中的 {count} 个对话，此操作不可恢复。').replace(
-                '{count}',
-                String(pendingDeleteCount)
-              )}
-            </AlertDialogDescription>
-          </AlertDialogHeader>
-          <AlertDialogFooter>
-            <AlertDialogCancel disabled={isDeleting}>
+            </AlertDialog.Title>
+            <AlertDialog.Description>
+              {(
+                selectionLabels?.confirmDescription ??
+                '将永久删除选中的 {count} 个对话，此操作不可恢复。'
+              ).replace('{count}', String(pendingDeleteCount))}
+            </AlertDialog.Description>
+          </AlertDialog.Header>
+          <AlertDialog.Footer>
+            <AlertDialog.Cancel disabled={isDeleting}>
               {selectionLabels?.cancel ?? '取消'}
-            </AlertDialogCancel>
-            <AlertDialogAction
-              onClick={(event) => {
+            </AlertDialog.Cancel>
+            <Button
+              onClick={() => {
                 /* Don't auto-close — `handleDelete` does it after the
                    delete promise resolves. Without this, Radix closes
                    synchronously and the user sees the destructive
                    action complete with no feedback that anything is
                    happening on slow networks. */
-                event.preventDefault();
                 void handleDelete();
               }}
               disabled={isDeleting}
-              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+              variant="destructive"
             >
               {selectionLabels?.confirmDelete ?? '删除'}
-            </AlertDialogAction>
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
+            </Button>
+          </AlertDialog.Footer>
+        </AlertDialog.Content>
+      </AlertDialog.Root>
     </MobileSwipeableRowGroup>
   );
 }
@@ -1232,7 +1410,7 @@ function SelectionToolbar({
         onClick={onToggleAll}
         className="inline-flex items-center gap-2 text-sm font-medium text-foreground"
       >
-        <Checkbox checked={allSelected} tabIndex={-1} className="pointer-events-none h-4 w-4" />
+        <Checkbox checked={allSelected} tabIndex={-1} className="pointer-events-none" />
         <span>{countLabel}</span>
       </button>
       <div className="flex items-center gap-1">

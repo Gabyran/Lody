@@ -27,20 +27,34 @@ import grokPackageJson from '../../../../packages/acp-extension-grok/package.jso
 import grokRuntimeManifestJson from '../../../../packages/acp-extension-grok/runtime-manifest.json';
 import claudeSdkManifestJson from '../../node_modules/@anthropic-ai/claude-agent-sdk/manifest.json';
 import claudeSdkPackageJson from '../../node_modules/@anthropic-ai/claude-agent-sdk/package.json';
+import grokPinsJson from './grok-runtime-manifest.json';
 import claudeRuntimeManifestJson from './claude-runtime-manifest.json';
 import codexRuntimeManifestJson from './codex-runtime-manifest.json';
 import kimiRuntimeManifestJson from './kimi-runtime-manifest.json';
+import piRuntimeManifestJson from './pi-runtime-manifest.json';
 
 import {
+  CURRENT_MACHINE_PROTOCOL_CAPABILITIES,
+  MACHINE_PROTOCOL_CAPABILITIES,
   getManagedBuiltinRuntimeByRuntimeName,
   type ManagedBuiltinRuntimeName,
+  PI_EXTENSIONS_PROTOCOL_VERSION,
 } from '@lody/shared';
 import { formatErrorWithCauses } from '@/utils/format-error';
+import { getLogger } from '@/utils/logger';
 import { getCliHttpFetch, resolveCliHttpTransportConfig } from '@/utils/http-transport';
 import { resolveProxyUrl } from '@/utils/proxy';
 import { getLodyDataDir } from '@lody/shared/node/installation-profile';
 
 const COMPLETE_MARKER = '.lody-complete';
+
+/**
+ * Floor between managed-runtime progress emissions. A listener republishes these as
+ * session presence, and the presence channel is a shared serial queue that the machine
+ * heartbeat also uses, so the emit rate must be bounded by the publisher rather than by
+ * the download's chunk rate. See specs/loro-ephemeral-presence-channel.md.
+ */
+const MANAGED_RUNTIME_PROGRESS_MIN_INTERVAL_MS = 500;
 
 function managedRuntimeAbortError(signal: AbortSignal): Error {
   return signal.reason instanceof Error
@@ -131,6 +145,7 @@ type ManagedRuntimeInstallEntry = {
 };
 
 const MANAGED_RUNTIME_NAME_VALUES = [
+  'pi',
   'codex',
   'claude-code',
   'kimi-code',
@@ -334,8 +349,17 @@ if (
 export const CODEX_ACP_ADAPTER_VERSION = codexPackageJson.version;
 export const CLAUDE_ACP_ADAPTER_VERSION = claudePackageJson.version;
 export const KIMI_CODE_VERSION = kimiRuntimeManifestJson.version;
+export const PI_RUNTIME_VERSION = piRuntimeManifestJson.version;
+export const PI_EXTENSIONS_SUPPORTED =
+  'piExtensionsProtocolVersion' in piRuntimeManifestJson &&
+  piRuntimeManifestJson.piExtensionsProtocolVersion === PI_EXTENSIONS_PROTOCOL_VERSION;
 export const GROK_ACP_ADAPTER_VERSION = grokPackageJson.version;
-export const GROK_BUILD_RUNTIME_VERSION = grokRuntimeManifestJson.officialRuntime.version;
+export const GROK_BUILD_RUNTIME_VERSION = grokPinsJson.version;
+if (GROK_BUILD_RUNTIME_VERSION !== grokRuntimeManifestJson.officialRuntime.version) {
+  throw new Error(
+    `Grok runtime manifest ${GROK_BUILD_RUNTIME_VERSION} does not match official runtime ${grokRuntimeManifestJson.officialRuntime.version}. Run pnpm mirror:agent-runtimes -- --runtime grok-build to refresh it.`
+  );
+}
 export const KIMI_CODE_MIN_NODE_VERSION = resolveMinimumNodeVersion(
   'Kimi managed runtime manifest',
   `>=${kimiRuntimeManifestJson.minNodeVersion}`
@@ -376,6 +400,15 @@ function createClaudeRuntimeArchive(platform: ClaudeRuntimePlatform): RuntimeArc
   };
 }
 
+function createGrokRuntimeArchive(platform: keyof typeof grokPinsJson.artifacts): RuntimeArchive {
+  const { sourceIntegrity: _sourceIntegrity, ...artifact } = grokPinsJson.artifacts[platform];
+  return {
+    ...artifact,
+    compression: 'zstd',
+    cmd: platform.startsWith('win32-') ? 'grok.exe' : 'grok',
+  };
+}
+
 const RUNTIMES: Record<ManagedRuntimeName, RuntimeDefinition> = {
   codex: {
     name: 'codex',
@@ -403,6 +436,15 @@ const RUNTIMES: Record<ManagedRuntimeName, RuntimeDefinition> = {
       'win32-x64': createClaudeRuntimeArchive('win32-x64'),
     },
   },
+  pi: {
+    name: 'pi',
+    version: PI_RUNTIME_VERSION,
+    kind: 'node-package',
+    minNodeVersion: piRuntimeManifestJson.minNodeVersion,
+    platforms: {
+      node: { ...piRuntimeManifestJson.artifact, compression: 'zstd' },
+    },
+  },
   'kimi-code': {
     name: 'kimi-code',
     version: KIMI_CODE_VERSION,
@@ -422,60 +464,12 @@ const RUNTIMES: Record<ManagedRuntimeName, RuntimeDefinition> = {
     name: 'grok-build',
     version: GROK_BUILD_RUNTIME_VERSION,
     platforms: {
-      'darwin-arm64': {
-        fileName: `xai-official-grok-darwin-arm64-${GROK_BUILD_RUNTIME_VERSION}.tar.zst`,
-        sha256: '82ffbd254fb76ae5e6be651342e902184a024f78bbe1cf6c8f48854d9f9b1594',
-        size: 46850248,
-        compression: 'zstd',
-        cmd: 'grok',
-        executableSha256: '8669e0fdadceec25b8c159c355f427ffbd82583525d774b6ab1522197ea83b80',
-        executableSize: 133486016,
-      },
-      'darwin-x64': {
-        fileName: `xai-official-grok-darwin-x64-${GROK_BUILD_RUNTIME_VERSION}.tar.zst`,
-        sha256: '4f48fbc4280a033da3e763e4c19585014917677d9e5c4c8405d2f80f9d21ed7a',
-        size: 51374009,
-        compression: 'zstd',
-        cmd: 'grok',
-        executableSha256: '8eacec87f5ecdb9259c6d812d12ce9e2d405b1526e36ae9d7fc81ec31dbd74d6',
-        executableSize: 149694528,
-      },
-      'linux-arm64': {
-        fileName: `xai-official-grok-linux-arm64-${GROK_BUILD_RUNTIME_VERSION}.tar.zst`,
-        sha256: '676d6795d6e558adb9749f002d9dadc950acc2c5effee839cb9e1f47f8480b03',
-        size: 50397485,
-        compression: 'zstd',
-        cmd: 'grok',
-        executableSha256: 'b926fc5308374396e260e7efbd6107231a8dae13c084ddaf0fe89b7ebb3edd25',
-        executableSize: 135641288,
-      },
-      'linux-x64': {
-        fileName: `xai-official-grok-linux-x64-${GROK_BUILD_RUNTIME_VERSION}.tar.zst`,
-        sha256: '358061308ca5c06832d62c079644f51ef355d820d94a9ca11513c09fb4160049',
-        size: 54001005,
-        compression: 'zstd',
-        cmd: 'grok',
-        executableSha256: 'edf79521581bb5e6b95abef848491a6a742e860da3e237ebe86a280d30dce4c1',
-        executableSize: 166079904,
-      },
-      'win32-arm64': {
-        fileName: `xai-official-grok-win32-arm64-${GROK_BUILD_RUNTIME_VERSION}.tar.zst`,
-        sha256: '243aaca666d4375980905c30b5a33e5b0c9a82e9e2c9bc3fd5b6cdf47819e9ad',
-        size: 45479753,
-        compression: 'zstd',
-        cmd: 'grok.exe',
-        executableSha256: '7325ad53988f9c5ca2a35e79b83280441e64d132a9046a947fd14ebb22f48db0',
-        executableSize: 121991168,
-      },
-      'win32-x64': {
-        fileName: `xai-official-grok-win32-x64-${GROK_BUILD_RUNTIME_VERSION}.tar.zst`,
-        sha256: 'e5a50bceb2caba7bef83ef7581b50c4f4db480174a2ed44c4785f77dd9520214',
-        size: 48377036,
-        compression: 'zstd',
-        cmd: 'grok.exe',
-        executableSha256: '6caf906d6ef968004b5ff33422c84e33d51a1cd7b4ee5acd19ff695aaa92672e',
-        executableSize: 140801024,
-      },
+      'darwin-arm64': createGrokRuntimeArchive('darwin-arm64'),
+      'darwin-x64': createGrokRuntimeArchive('darwin-x64'),
+      'linux-arm64': createGrokRuntimeArchive('linux-arm64'),
+      'linux-x64': createGrokRuntimeArchive('linux-x64'),
+      'win32-arm64': createGrokRuntimeArchive('win32-arm64'),
+      'win32-x64': createGrokRuntimeArchive('win32-x64'),
     },
   },
 };
@@ -523,6 +517,11 @@ export function mapManagedRuntimePlatform(
   platform: NodeJS.Platform = process.platform,
   arch: string = process.arch
 ): string | undefined {
+  if (
+    name === 'pi' &&
+    (!['darwin', 'linux', 'win32'].includes(platform) || !['arm64', 'x64'].includes(arch))
+  )
+    return undefined;
   if (RUNTIMES[name].kind === 'node-package') return 'node';
   const archPart = arch === 'arm64' ? 'arm64' : arch === 'x64' ? 'x64' : undefined;
   if (!archPart) return undefined;
@@ -533,6 +532,25 @@ export function mapManagedRuntimePlatform(
     return `linux-${archPart}${muslSuffix}`;
   }
   return undefined;
+}
+
+/** Host-dependent runtime capabilities must not be advertised by shared static metadata. */
+export function getHostMachineProtocolCapabilities(
+  nodeVersion = process.versions.node,
+  platform: NodeJS.Platform = process.platform,
+  arch: string = process.arch
+) {
+  const capabilities = { ...CURRENT_MACHINE_PROTOCOL_CAPABILITIES };
+  if (
+    mapManagedRuntimePlatform('pi', platform, arch) &&
+    isNodeVersionAtLeast(nodeVersion, piRuntimeManifestJson.minNodeVersion)
+  ) {
+    capabilities[MACHINE_PROTOCOL_CAPABILITIES.builtinPi] = 1;
+    if (PI_EXTENSIONS_SUPPORTED) {
+      capabilities[MACHINE_PROTOCOL_CAPABILITIES.piExtensions] = PI_EXTENSIONS_PROTOCOL_VERSION;
+    }
+  }
+  return capabilities;
 }
 
 async function sha256File(
@@ -758,9 +776,10 @@ export class ManagedAgentRuntimeManager {
       installation.metadata.archiveSize !== archive.size ||
       installation.metadata.minNodeVersion !== definition.minNodeVersion
     ) {
-      throw new ManagedRuntimeError(
-        `Managed runtime cache metadata does not match the current definition for ${name}/${definition.version}/${platformArch}`
-      );
+      // A repacked artifact can keep its source version but change its integrity
+      // pins. It is not the current installation: never launch it, and let the
+      // normal verified install path replace it instead of blocking CLI startup.
+      return null;
     }
     return installation;
   }
@@ -866,9 +885,13 @@ export class ManagedAgentRuntimeManager {
   async listAvailableUpdates(): Promise<ManagedRuntimeName[]> {
     const updates: ManagedRuntimeName[] = [];
     for (const name of MANAGED_RUNTIME_NAMES) {
-      const status = await this.getRuntimeStatus(name);
-      if (status.kind === 'installed' && status.updateAvailable) {
-        updates.push(name);
+      try {
+        const status = await this.getRuntimeStatus(name);
+        if (status.kind === 'installed' && status.updateAvailable) {
+          updates.push(name);
+        }
+      } catch (error) {
+        this.warnCacheMaintenanceFailure(name, 'update scan', error);
       }
     }
     return updates;
@@ -894,7 +917,27 @@ export class ManagedAgentRuntimeManager {
 
   async prepareCache(): Promise<void> {
     for (const name of MANAGED_RUNTIME_NAMES) {
-      await this.pruneSupersededVersions(name);
+      try {
+        await this.pruneSupersededVersions(name);
+      } catch (error) {
+        // Cache maintenance must never prevent the daemon from starting or
+        // stop cleanup of unrelated runtimes. Launch/install still validate.
+        this.warnCacheMaintenanceFailure(name, 'startup cache cleanup', error);
+      }
+    }
+  }
+
+  private warnCacheMaintenanceFailure(
+    name: ManagedRuntimeName,
+    operation: string,
+    error: unknown
+  ): void {
+    try {
+      getLogger('managed-runtime').warn(
+        `Skipping failed ${operation} for ${name}: ${formatErrorWithCauses(error)}`
+      );
+    } catch {
+      // Even an unavailable log sink must not make maintenance fatal.
     }
   }
 
@@ -1418,15 +1461,20 @@ export class ManagedAgentRuntimeManager {
     }
 
     let downloadedBytes = offset;
-    let lastPercent = -1;
     let lastEmitAtMs = 0;
     const emitDownloadProgress = (force = false) => {
       const percent = getDownloadPercent(downloadedBytes, archive.size);
       const nowMs = Date.now();
-      if (!force && percent === lastPercent && nowMs - lastEmitAtMs < 500) {
+      // This runs per stream chunk, and a listener publishes it as session presence.
+      // The ceiling must therefore be TIME-based, not "changed percent": a changing
+      // value is exactly what defeats the `(phase, detail)` dedupe downstream, and a
+      // presence write per changed percent puts ~100 serial POSTs ahead of the
+      // machine heartbeat on the workspace's shared queue. Terminal state is never
+      // lost, because the caller forces an emit after the pipeline settles.
+      // Bounds: specs/loro-ephemeral-presence-channel.md.
+      if (!force && nowMs - lastEmitAtMs < MANAGED_RUNTIME_PROGRESS_MIN_INTERVAL_MS) {
         return;
       }
-      lastPercent = percent ?? -1;
       lastEmitAtMs = nowMs;
       this.emitProgress(progressKey, {
         runtimeName: name,

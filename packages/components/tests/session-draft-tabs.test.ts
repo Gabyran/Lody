@@ -9,6 +9,7 @@ import type {
 } from '@lody/shared';
 
 import {
+  appendTabOrderId,
   buildDraftSessionAgentRolePatch,
   createDraftSessionTab,
   filterPendingPromotedChildSessions,
@@ -218,6 +219,33 @@ describe('session draft tabs', () => {
     expect(readPersistedDraftTabs('session-1' as SessionId)[0]?.agentRoleId).toBe('reviewer');
   });
 
+  it('removes the draft-tabs storage key when nothing remains to persist', () => {
+    installWindowStorage();
+    const emptyDraft = createDraftSessionTab({
+      cliType: 'builtin',
+      agentType: 'codex',
+      modeId: null,
+      modelId: null,
+    });
+    const keyedDraft = createDraftSessionTab({
+      cliType: 'builtin',
+      agentType: 'codex',
+      modeId: null,
+      modelId: null,
+    });
+    keyedDraft.prompt = 'Keep this draft';
+
+    writePersistedDraftTabs('session-1' as SessionId, [keyedDraft]);
+    expect(localStorage.getItem('lody:draft-tabs:session-1')).not.toBeNull();
+
+    writePersistedDraftTabs('session-1' as SessionId, [emptyDraft]);
+    expect(localStorage.getItem('lody:draft-tabs:session-1')).toBeNull();
+    expect(readPersistedDraftTabs('session-1' as SessionId)).toEqual([]);
+
+    writePersistedDraftTabs('session-1' as SessionId, []);
+    expect(localStorage.getItem('lody:draft-tabs:session-1')).toBeNull();
+  });
+
   it('replaces a persisted draft session id that is not upload-safe', () => {
     installWindowStorage();
     localStorage.setItem(
@@ -310,6 +338,17 @@ describe('session draft tabs', () => {
       'a',
       'session-2',
       'c',
+    ]);
+  });
+
+  it('seeds a missing order with displayed tabs before appending a new tab', () => {
+    const initialOrder = appendTabOrderId([], ['child-1', 'child-2'], 'draft:3');
+
+    expect(initialOrder).toEqual(['child-1', 'child-2', 'draft:3']);
+    expect(replaceTabOrderId(initialOrder, 'draft:3', 'child-3')).toEqual([
+      'child-1',
+      'child-2',
+      'child-3',
     ]);
   });
 

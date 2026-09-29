@@ -60,6 +60,7 @@ import {
   LoroStreamsMachineRpcClient,
   LoroStreamsRpcResponseDispatcher,
   LoroStreamsRpcRequestSchema,
+  LoroMachineAcpCapabilitiesRefreshRpcRequestSchema,
   createRpcSecretRecipient,
   createLoroStreamsJsonStreamClient,
   decryptCodeCollabV2RpcPayload,
@@ -250,6 +251,49 @@ const createFakeStreamClient = () => {
 };
 
 describe('LoroStreamsMachineRpcClient', () => {
+  describe('capability refresh force field', () => {
+    // How a daemon without the acpCapabilityRefreshCache capability parses this
+    // request: the same strict schema minus the params field that build never
+    // declared. Derived from the current schema so it cannot drift from what shipped.
+    const previousGenerationSchema = LoroMachineAcpCapabilitiesRefreshRpcRequestSchema.extend({
+      params: LoroMachineAcpCapabilitiesRefreshRpcRequestSchema.shape.params.omit({ force: true }),
+    });
+
+    const emitRefreshRequest = async (force: boolean | undefined): Promise<unknown> => {
+      const fake = createFakeStreamClient();
+      const client = new LoroStreamsMachineRpcClient({
+        workspaceId: 'workspace-1',
+        machineId: 'machine-1',
+        streamClient: fake.streamClient,
+      });
+      void client
+        .requestMachineAcpCapabilitiesRefresh({ configId, force, timeoutMs: 5_000 })
+        .catch(() => undefined);
+      await vi.waitFor(() => expect(fake.appended).toHaveLength(1));
+      return fake.appended[0]?.value;
+    };
+
+    it('omits the field entirely when the caller did not negotiate a forced refresh', async () => {
+      const request = await emitRefreshRequest(undefined);
+
+      // A strict schema rejects the key even when its value is undefined, so
+      // absence — not falsiness — is what keeps an older daemon able to answer.
+      expect(Object.keys((request as { params: object }).params)).not.toContain('force');
+      expect(previousGenerationSchema.safeParse(request).success).toBe(true);
+      expect(LoroStreamsRpcRequestSchema.safeParse(request).success).toBe(true);
+    });
+
+    it('sends the field when the caller negotiated a forced refresh', async () => {
+      const request = await emitRefreshRequest(true);
+
+      expect((request as { params: { force?: boolean } }).params.force).toBe(true);
+      expect(LoroStreamsRpcRequestSchema.safeParse(request).success).toBe(true);
+      // The regression negotiation prevents: an older daemon fails to parse the
+      // request and drops it without a reply, so the caller only sees a timeout.
+      expect(previousGenerationSchema.safeParse(request).success).toBe(false);
+    });
+  });
+
   it('sends minimal session preparation requests and resolves the response', async () => {
     const fake = createFakeStreamClient();
     const sessionId = SessionIdSchema.parse('session-1');
@@ -1882,7 +1926,12 @@ describe('LoroStreamsMachineRpcClient', () => {
     client.stop();
   });
 
-  it('sends session preview create requests and resolves preview responses', async () => {
+  it('keeps preview creation pending beyond public route propagation and resolves its response', async () => {
+    const proof = {
+      runtimeNonce: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+      requestId: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
+      requestToken: 'synthetic-preview-proof',
+    };
     const fake = createFakeStreamClient();
     const client = new LoroStreamsMachineRpcClient({
       workspaceId: 'workspace-1',
@@ -1890,76 +1939,85 @@ describe('LoroStreamsMachineRpcClient', () => {
       streamClient: fake.streamClient,
     });
 
-    const responsePromise = client.requestSessionPreviewCreate({
-      sessionId: 'session-1',
-      requestedByUserId: 'user-1',
-      target: { protocol: 'http', host: '127.0.0.1', port: 5173 },
-      approval: {
-        source: 'browser_address',
-        targetClass: 'loopback',
-        target: { protocol: 'http', host: '127.0.0.1', port: 5173 },
-        confirmedByUserId: 'user-1',
-        confirmedAt: 1000,
-      },
-      timeoutMs: 5000,
-    });
-
-    await vi.waitFor(() => {
-      expect(fake.appended).toHaveLength(1);
-    });
-
-    const request = fake.appended[0]?.value as {
-      id: string;
-      method: string;
-      params?: { sessionId?: string; requestedByUserId?: string };
-    };
-    expect(request.method).toBe('session/preview-create');
-    expect(request.params).toEqual({
-      sessionId: 'session-1',
-      requestedByUserId: 'user-1',
-      target: { protocol: 'http', host: '127.0.0.1', port: 5173 },
-      approval: {
-        source: 'browser_address',
-        targetClass: 'loopback',
-        target: { protocol: 'http', host: '127.0.0.1', port: 5173 },
-        confirmedByUserId: 'user-1',
-        confirmedAt: 1000,
-      },
-      replaceExisting: undefined,
-    });
-
-    fake.pushBatch({
-      messages: [
-        {
-          jsonrpc: '2.0',
-          id: request.id,
-          method: 'session/preview-create',
-          rpcVersion: '1',
-          machineId: 'machine-1',
-          result: {
-            type: 'session/preview-create_response',
-            sessionId: 'session-1',
-            success: false,
-            error: 'tunnel_not_configured',
-            message: 'Preview gateway is not configured.',
-          },
-        },
-      ],
-      nextOffset: '3',
-      cursor: 'cursor-3',
-      upToDate: true,
-    });
-
-    await expect(responsePromise).resolves.toEqual(
-      expect.objectContaining({
-        type: 'session/preview-create_response',
+    vi.useFakeTimers();
+    try {
+      const responsePromise = client.requestSessionPreviewCreate({
+        proof,
         sessionId: 'session-1',
-        success: false,
-        error: 'tunnel_not_configured',
-      })
-    );
+        requestedByUserId: 'user-1',
+        target: { protocol: 'http', host: '127.0.0.1', port: 5173 },
+        approval: {
+          source: 'browser_address',
+          targetClass: 'loopback',
+          target: { protocol: 'http', host: '127.0.0.1', port: 5173 },
+          confirmedByUserId: 'user-1',
+          confirmedAt: 1000,
+        },
+      });
 
-    client.stop();
+      await fake.waitForAppendedCount(1);
+      let settled = false;
+      void responsePromise.then(() => {
+        settled = true;
+      });
+      await vi.advanceTimersByTimeAsync(65_000);
+      expect(settled).toBe(false);
+
+      const request = fake.appended[0]?.value as {
+        id: string;
+        method: string;
+        params?: { sessionId?: string; requestedByUserId?: string };
+      };
+      expect(request.method).toBe('session/preview-create');
+      expect(request.params).toEqual({
+        proof,
+        sessionId: 'session-1',
+        requestedByUserId: 'user-1',
+        target: { protocol: 'http', host: '127.0.0.1', port: 5173 },
+        approval: {
+          source: 'browser_address',
+          targetClass: 'loopback',
+          target: { protocol: 'http', host: '127.0.0.1', port: 5173 },
+          confirmedByUserId: 'user-1',
+          confirmedAt: 1000,
+        },
+        restart: undefined,
+      });
+
+      fake.pushBatch({
+        messages: [
+          {
+            jsonrpc: '2.0',
+            id: request.id,
+            method: 'session/preview-create',
+            rpcVersion: '1',
+            machineId: 'machine-1',
+            result: {
+              type: 'session/preview-create_response',
+              sessionId: 'session-1',
+              success: false,
+              error: 'tunnel_not_configured',
+              message: 'Remote preview is not configured.',
+            },
+          },
+        ],
+        nextOffset: '3',
+        cursor: 'cursor-3',
+        upToDate: true,
+      });
+
+      await expect(responsePromise).resolves.toEqual(
+        expect.objectContaining({
+          type: 'session/preview-create_response',
+          sessionId: 'session-1',
+          success: false,
+          error: 'tunnel_not_configured',
+        })
+      );
+    } finally {
+      client.stop();
+      vi.useRealTimers();
+    }
   });
 
   it('sends local project git state requests and resolves git state responses', async () => {
@@ -3156,5 +3214,126 @@ describe('machine RPC response live transport fallback', () => {
     });
 
     dispatcher.stop();
+  });
+});
+
+describe('pending RPC deadline', () => {
+  // Flush the microtask queue without advancing the (faked) clock, so the
+  // response loop can deliver a pushed batch between timer advances.
+  const flushMicrotasks = async (): Promise<void> => {
+    for (let index = 0; index < 8; index += 1) {
+      await Promise.resolve();
+    }
+  };
+
+  const registerRefresh = (
+    dispatcher: LoroStreamsRpcResponseDispatcher,
+    onAcpBinaryProgress: (message: unknown) => void
+  ) =>
+    dispatcher.registerPending('request-1', {
+      machineId: 'machine-1',
+      method: 'machine/acp-capabilities-refresh',
+      timeoutMs: 1_000,
+      startedAtMs: Date.now(),
+      onAcpBinaryProgress: onAcpBinaryProgress as never,
+    });
+
+  const progressBatch = (nextOffset: string): LoroJsonStreamBatch => ({
+    messages: [
+      {
+        jsonrpc: '2.0',
+        id: 'request-1',
+        method: 'machine/acp-capabilities-refresh',
+        rpcVersion: '1',
+        machineId: 'machine-1',
+        result: {
+          type: 'machine/acp-binary-progress',
+          machineId: 'machine-1',
+          agentType: 'kimi',
+          status: 'downloading',
+          percent: 42,
+        },
+      },
+    ],
+    nextOffset,
+    cursor: `cursor-${nextOffset}`,
+    upToDate: true,
+  });
+
+  it('measures silence, so a reporting download cannot expire its own request', async () => {
+    // The startup budget excludes runtime download on the stated grounds that
+    // progress frames keep resetting this deadline. With an absolute timer that
+    // was simply false: a download slower than the budget expired the very
+    // request that was reporting it, and the user got a client-side timeout
+    // instead of the machine's answer.
+    vi.useFakeTimers();
+    try {
+      const fake = createFakeStreamClient();
+      const dispatcher = new LoroStreamsRpcResponseDispatcher({
+        workspaceId: 'workspace-1',
+        streamClient: fake.streamClient,
+        responseStreamId: 'workspace-1:rpc:res:client-1',
+      });
+      await dispatcher.start();
+      await flushMicrotasks();
+
+      const progress: unknown[] = [];
+      let settled = false;
+      const pending = registerRefresh(dispatcher, (message) => progress.push(message)).then(
+        (value) => {
+          settled = true;
+          return value;
+        }
+      );
+
+      for (let elapsed = 0; elapsed < 5_000; elapsed += 800) {
+        await vi.advanceTimersByTimeAsync(800);
+        fake.pushBatch(progressBatch(String(elapsed)));
+        await flushMicrotasks();
+      }
+
+      // Five seconds on a one-second deadline, and still in flight.
+      expect(progress).toHaveLength(7);
+      expect(settled).toBe(false);
+
+      dispatcher.stop();
+      await expect(pending).resolves.toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('still gives up once the machine goes quiet', async () => {
+    // The point of re-arming is that silence, not elapsed work, is what a
+    // dead daemon looks like. A machine that stops reporting must still expire.
+    vi.useFakeTimers();
+    try {
+      const fake = createFakeStreamClient();
+      const dispatcher = new LoroStreamsRpcResponseDispatcher({
+        workspaceId: 'workspace-1',
+        streamClient: fake.streamClient,
+        responseStreamId: 'workspace-1:rpc:res:client-1',
+      });
+      await dispatcher.start();
+      await flushMicrotasks();
+
+      const pending = registerRefresh(dispatcher, () => {});
+
+      await vi.advanceTimersByTimeAsync(800);
+      fake.pushBatch(progressBatch('1'));
+      await flushMicrotasks();
+
+      await vi.advanceTimersByTimeAsync(800);
+      await flushMicrotasks();
+      // 1.6s total, but only 0.8s since the last frame.
+      await expect(Promise.race([pending, Promise.resolve('pending')])).resolves.toBe('pending');
+
+      await vi.advanceTimersByTimeAsync(1_000);
+      await expect(pending).resolves.toBeNull();
+
+      dispatcher.stop();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

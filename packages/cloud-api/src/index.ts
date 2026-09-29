@@ -1,4 +1,24 @@
 import { anyApi, type FunctionReference } from 'convex/server';
+import type {
+  BeginShareDeployment,
+  SessionShareManagement,
+  SessionShareView,
+  PublishedSessionSharePage,
+  SessionShareRequestInput,
+  SessionShareRequestResult,
+  SessionShareRequest,
+} from './session-sharing';
+export type {
+  PublishedSessionShare,
+  PublishedSessionSharePage,
+  SessionShareView,
+  SessionShareManagementEntry,
+  SessionShareManagement,
+  SessionShareRequestInput,
+  SessionShareRequestStatus,
+  SessionShareRequestResult,
+  SessionShareRequest,
+} from './session-sharing';
 import type { ModelUsage } from 'acp-extension-core';
 import type {
   MachinePairingView,
@@ -47,6 +67,7 @@ export type WorkspaceRepository = {
 };
 
 export type GitHubTokenErrorCode =
+  | 'personal_unavailable'
   | 'unauthorized'
   | 'not_a_member'
   | 'repo_not_linked'
@@ -274,6 +295,103 @@ type SeatInvitePreview =
     };
 
 export type CloudApi = {
+  promptShortcuts: {
+    stageDocument: Mutation<
+      {
+        workspaceId: string;
+        ownerUserId: string;
+        shortcutId: string;
+        bodyDocId: string;
+        visibility: 'private' | 'workspace';
+      },
+      { bodyDocId: string; status: 'staged' | 'active' }
+    >;
+    activateDocument: Mutation<
+      {
+        workspaceId: string;
+        bodyDocId: string;
+        previousBodyDocId: string | null;
+        previousRevision: string | null;
+        revision: string;
+        slug: string;
+        indexBytes: number;
+      },
+      null
+    >;
+    settleDocument: Mutation<
+      {
+        workspaceId: string;
+        shortcutId: string;
+        bodyDocId: string;
+        visibility: 'private' | 'workspace';
+      },
+      'active' | 'cancelled'
+    >;
+    revokeShortcut: Mutation<
+      {
+        workspaceId: string;
+        shortcutId: string;
+        bodyDocId: string;
+        visibility: 'private' | 'workspace';
+      },
+      null
+    >;
+    listAccessibleDocuments: Query<
+      { workspaceId: string },
+      Array<{
+        shortcutId: string;
+        bodyDocId: string;
+        ownerUserId: string;
+        visibility: 'private' | 'workspace';
+        revision: string | null;
+        deleted?: boolean;
+      }>
+    >;
+    getStreamToken: Action<
+      {
+        workspaceId: string;
+        target:
+          | { kind: 'index'; ownerUserId: string; visibility: 'private' | 'workspace' }
+          | { kind: 'body'; bodyDocId: string };
+        write: boolean;
+      },
+      { token: string; expiresIn: number; gatewayBaseUrl: string; streamId: string }
+    >;
+  };
+  sessionSharing: {
+    requestFromCli: Mutation<
+      SessionShareRequestInput & { cliToken: string },
+      SessionShareRequestResult
+    >;
+    listRequests: Query<{ workspaceId: string; sourceSessionId: string }, SessionShareRequest[]>;
+    getRequestResultFromCli: Query<
+      {
+        cliToken: string;
+        workspaceId: string;
+        shareRequestId: string;
+        sourceSessionId: string;
+        requesterUserId: string;
+        deliveryPublicKey: string;
+      },
+      SessionShareRequestResult
+    >;
+    cancelRequest: Mutation<{ requestId: string }, void>;
+    list: Query<
+      { workspaceId: string; paginationOpts: { numItems: number; cursor: string | null } },
+      PublishedSessionSharePage
+    >;
+    getManagement: Query<
+      { workspaceId: string; rootSessionId: string; shareId?: string },
+      SessionShareManagement
+    >;
+    beginDeployment: Mutation<BeginShareDeployment, SessionShareView & { deploymentId: string }>;
+    publishDeployment: Mutation<{ deploymentId: string }, SessionShareView>;
+    resetCredential: Mutation<
+      { shareId: string; expectedRevision: number; credentialHash: string },
+      SessionShareView
+    >;
+    revoke: Mutation<{ shareId: string; expectedRevision: number }, SessionShareView>;
+  };
   activity: {
     recordMyWorkspaceDailyActiveUser: Mutation<
       { workspaceId: string },
@@ -281,6 +399,7 @@ export type CloudApi = {
     >;
   };
   auth: {
+    transferWorkspaceOwnership: Mutation<{ workspaceId: string; targetMemberId: string }, null>;
     getMyWorkspaceMembershipFingerprint: Query<Record<string, never>, string | null>;
     getUserById: Query<
       { workspaceId?: string; userId: string },
@@ -300,6 +419,10 @@ export type CloudApi = {
     >;
   };
   billing: {
+    createBillingPortalSession: Action<
+      { workspaceId: string; returnUrl?: string; returnTarget?: 'web' | 'desktop' },
+      { url: string }
+    >;
     createCheckoutSession: Action<
       CheckoutUrls & { workspaceId: string; interval: BillingInterval },
       { url: string; checkoutKind?: 'subscription' | 'gift_setup' }
@@ -399,9 +522,16 @@ export type CloudApi = {
       { state: string }
     >;
     getPersonalOperationSettings: Query<{ workspaceId: string }, PersonalOperationSettings>;
+    resolveLegacyPrRepositoryIdentity: Mutation<
+      { workspaceId: string; repoFullName: string; prNumber: number; sessionId: string },
+      { resolved: boolean }
+    >;
     getPrCacheVersions: Query<
-      { workspaceId: string; repoFullName: string; prNumber: number },
+      { workspaceId: string; repoFullName: string; prNumber: number; sessionId?: string },
       {
+        repoFullName?: string;
+        repositoryId?: number;
+        identityPending?: boolean;
         prDetailsUpdatedAt: number | null;
         reviewCommentsUpdatedAt: number | null;
         reviewsUpdatedAt: number | null;
@@ -459,8 +589,13 @@ export type CloudApi = {
       { workspaceId: string; repoFullName: string; cliToken: string },
       BasicGitHubTokenResult
     >;
+    getCredentialPolicyForCli: Action<
+      { cliToken: string; workspaceId: string; requesterUserId: string; machineId: string },
+      { personalEnabled: boolean }
+    >;
     getOperationAccessTokenByRepoNameForCli: Action<
       {
+        credentialSource?: 'personal' | 'app';
         machineId?: string;
         requesterUserId?: string;
         forceAppFallback?: boolean;

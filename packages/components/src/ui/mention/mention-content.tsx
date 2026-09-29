@@ -19,6 +19,15 @@ import { MentionMobilePanel, useIsMentionMobile } from './mention-mobile-content
 
 const CONTENT_NAME = 'MentionContent';
 const MENTION_VIEWPORT_PADDING_PX = 16;
+/**
+ * The room a composer menu needs to open above without cutting its list short:
+ * the menu's 320px list, a level header and the surface inset. With at least
+ * this much above the composer — or no less than below it — the menu opens
+ * above; only a composer pressed against the top of its layer opens it below.
+ */
+const COMPOSER_MENU_ROOM_PX = 360;
+/** A composer marks the box a menu belongs to: its chip row and its input. */
+const MENTION_FRAME_SELECTOR = '[data-mention-frame]';
 
 type ContentElement = React.ElementRef<typeof Primitive.div>;
 type InputBoundaryRect = {
@@ -29,6 +38,8 @@ type InputBoundaryRect = {
 };
 type MentionContentStyle = React.CSSProperties & {
   '--mention-input-width'?: string;
+  /** Where the entrance starts: one step further from the caret, on the side the menu landed. */
+  '--mention-rise'?: string;
 };
 
 interface MentionContentContextValue {
@@ -46,11 +57,19 @@ const [MentionContentProvider, useMentionContentContext] =
 interface MentionContentProps
   extends AnchorPositionerProps, React.ComponentPropsWithoutRef<typeof Primitive.div> {
   /**
-   * Which reference rect drives floating placement. `input-top` is useful for
-   * large top-side menus that should sit directly above the input rather than
-   * above the current caret line.
+   * Which reference rect drives floating placement.
+   *
+   * `caret` follows the caret line and flips to stay on screen.
+   *
+   * `composer` belongs to the composer instead: it opens against the nearest
+   * `[data-mention-frame]` around the input (else the input's wrapper),
+   * left-aligned to it and as wide at most. It picks its side once per open —
+   * above unless there is truly no room there — and keeps it: a level change or
+   * a keystroke resizes the menu in place and never moves its anchor. Its height
+   * is capped to the room on that side instead of flipping. An explicit `side`
+   * pins the side instead of choosing it from the room.
    */
-  positionAnchor?: 'caret' | 'input-top';
+  positionAnchor?: 'caret' | 'composer';
 
   /**
    * Event handler called when the `Escape` key is pressed.
@@ -65,12 +84,21 @@ interface MentionContentProps
    * Can be used to prevent the popover from closing when the pointer is outside of the content.
    */
   onPointerDownOutside?: (event: PointerDownOutsideEvent) => void;
+
+  /**
+   * Opt out of the mobile docked panel even at the <640px breakpoint. The dock
+   * is built for a composer pinned to the bottom of the screen above the
+   * keyboard; an inline editor mid-conversation keeps the floating caret
+   * popover instead, which positions around the line regardless of where the
+   * input sits. Defaults to true (docked), preserving composer behavior.
+   */
+  dockedOnMobile?: boolean;
 }
 
 const MentionContent = React.forwardRef<ContentElement, MentionContentProps>(
   (props, forwardedRef) => {
     const {
-      side = 'bottom',
+      side: requestedSide,
       sideOffset = 4,
       align = 'start',
       alignOffset = 0,
@@ -85,6 +113,7 @@ const MentionContent = React.forwardRef<ContentElement, MentionContentProps>(
       hideWhenDetached = false,
       trackAnchor = true,
       positionAnchor = 'caret',
+      dockedOnMobile = true,
       onEscapeKeyDown,
       onPointerDownOutside,
       style,
@@ -92,55 +121,82 @@ const MentionContent = React.forwardRef<ContentElement, MentionContentProps>(
     } = props;
 
     const context = useMentionContext(CONTENT_NAME);
-    const isMobile = useIsMentionMobile();
+    const isMobileViewport = useIsMentionMobile();
+    // A floating-anchored editor opts out of the bottom-composer dock; the
+    // desktop popover handles the small viewport by flipping.
+    const isMobile = isMobileViewport && dockedOnMobile;
     const [inputBoundary, setInputBoundary] = React.useState<InputBoundaryRect | null>(null);
-    const [inputTopAnchorRect, setInputTopAnchorRect] = React.useState<InputBoundaryRect | null>(
-      null
-    );
+    const [frameRect, setFrameRect] = React.useState<InputBoundaryRect | null>(null);
+    /** Room above and below the frame inside the visible layer, for `composer`. */
+    const [frameRoom, setFrameRoom] = React.useState<{ above: number; below: number } | null>(null);
+    /** The side a `composer` menu chose or was pinned to when it opened. Held until it closes. */
+    const [lockedSide, setLockedSide] = React.useState<Side | null>(null);
+    const composerAnchor = positionAnchor === 'composer';
+    const side = requestedSide ?? 'bottom';
 
     const rtlAwareAlign = React.useMemo(() => {
       if (context.dir !== 'rtl') return align;
       return align === 'start' ? 'end' : align === 'end' ? 'start' : align;
     }, [align, context.dir]);
 
+    // Measured afresh on each open: a composer menu chooses its side from the
+    // room it opens with.
     React.useLayoutEffect(() => {
       if (isMobile || typeof window === 'undefined') {
         setInputBoundary(null);
         return undefined;
       }
+      const open = context.open;
 
       const input = context.inputRef.current;
       if (!input) {
         setInputBoundary(null);
-        setInputTopAnchorRect(null);
+        setFrameRect(null);
+        setFrameRoom(null);
         return undefined;
       }
 
+      const modal = input.closest<HTMLElement>('[data-lody-dialog-content], [data-vaul-drawer]');
+      // A composer menu measures against the composer's own frame (its chip
+      // row and box), so it lines up with them and never cuts a chip in half.
+      const frame =
+        (composerAnchor ? input.closest<HTMLElement>(MENTION_FRAME_SELECTOR) : null) ??
+        input.parentElement ??
+        input;
       const measure = () => {
-        const inputRect = (input.parentElement ?? input).getBoundingClientRect();
+        const modalRect = modal?.getBoundingClientRect();
+        const inputRect = frame.getBoundingClientRect();
         const viewport = window.visualViewport;
         const viewportLeft = viewport?.offsetLeft ?? 0;
         const viewportTop = viewport?.offsetTop ?? 0;
         const viewportWidth = viewport?.width ?? window.innerWidth;
         const viewportHeight = viewport?.height ?? window.innerHeight;
         const viewportRight = viewportLeft + viewportWidth;
+        // The modal is the portal owner and can clip its descendants. Flip/shift
+        // within that visible layer rather than placing rows behind its footer.
+        const top = Math.max(viewportTop, modalRect?.top ?? viewportTop);
+        const bottom = Math.min(viewportTop + viewportHeight, modalRect?.bottom ?? Infinity);
         const left = Math.max(inputRect.left, viewportLeft + MENTION_VIEWPORT_PADDING_PX);
         const right = Math.min(inputRect.right, viewportRight - MENTION_VIEWPORT_PADDING_PX);
         const next =
           right > left
             ? {
                 x: left,
-                y: viewportTop,
+                y: top,
                 width: right - left,
-                height: viewportHeight,
+                height: Math.max(0, bottom - top),
               }
             : null;
 
-        const nextInputTopAnchor = {
+        const nextFrame = {
           x: inputRect.left,
           y: inputRect.top,
           width: inputRect.width,
-          height: 0,
+          height: inputRect.height,
+        };
+        const nextRoom = {
+          above: Math.max(0, inputRect.top - top - MENTION_VIEWPORT_PADDING_PX),
+          below: Math.max(0, bottom - inputRect.bottom - MENTION_VIEWPORT_PADDING_PX),
         };
 
         setInputBoundary((previous) => {
@@ -154,22 +210,36 @@ const MentionContent = React.forwardRef<ContentElement, MentionContentProps>(
           }
           return next;
         });
-        setInputTopAnchorRect((previous) => {
+        setFrameRect((previous) => {
           if (
-            previous?.x === nextInputTopAnchor.x &&
-            previous?.y === nextInputTopAnchor.y &&
-            previous?.width === nextInputTopAnchor.width &&
-            previous?.height === nextInputTopAnchor.height
+            previous?.x === nextFrame.x &&
+            previous?.y === nextFrame.y &&
+            previous?.width === nextFrame.width &&
+            previous?.height === nextFrame.height
           ) {
             return previous;
           }
-          return nextInputTopAnchor;
+          return nextFrame;
         });
+        // A closed menu holds no room, so the next open cannot choose its side
+        // from where the composer was the last time.
+        setFrameRoom((previous) =>
+          !open
+            ? null
+            : previous?.above === nextRoom.above && previous?.below === nextRoom.below
+              ? previous
+              : nextRoom
+        );
       };
 
       measure();
 
       const cleanupResizeObserver = observeResizeOnAnimationFrame(input, () => measure());
+      const cleanupFrameObserver =
+        frame !== input ? observeResizeOnAnimationFrame(frame, measure) : undefined;
+      const cleanupModalObserver = modal
+        ? observeResizeOnAnimationFrame(modal, measure)
+        : undefined;
       window.addEventListener('resize', measure);
       window.addEventListener('scroll', measure, true);
       window.visualViewport?.addEventListener('resize', measure);
@@ -177,12 +247,32 @@ const MentionContent = React.forwardRef<ContentElement, MentionContentProps>(
 
       return () => {
         cleanupResizeObserver();
+        cleanupFrameObserver?.();
+        cleanupModalObserver?.();
         window.removeEventListener('resize', measure);
         window.removeEventListener('scroll', measure, true);
         window.visualViewport?.removeEventListener('resize', measure);
         window.visualViewport?.removeEventListener('scroll', measure);
       };
-    }, [context.inputRef, isMobile]);
+    }, [composerAnchor, context.inputRef, context.open, isMobile]);
+
+    // A composer menu chooses its side once, from the room it opened with, and
+    // keeps it until it closes: the first level is short and the second tall, so
+    // letting floating-ui flip on size put the two on opposite sides.
+    React.useLayoutEffect(() => {
+      if (!composerAnchor || !context.open) {
+        setLockedSide(null);
+        return;
+      }
+      if (requestedSide || !frameRoom) return;
+      setLockedSide(
+        (previous) =>
+          previous ??
+          (frameRoom.above >= COMPOSER_MENU_ROOM_PX || frameRoom.above >= frameRoom.below
+            ? 'top'
+            : 'bottom')
+      );
+    }, [composerAnchor, context.open, frameRoom, requestedSide]);
 
     const inputWidthStyle = React.useMemo<MentionContentStyle>(() => {
       return {
@@ -190,20 +280,20 @@ const MentionContent = React.forwardRef<ContentElement, MentionContentProps>(
       };
     }, [inputBoundary]);
 
-    const inputTopAnchor = React.useMemo<VirtualElement | null>(() => {
-      if (!inputTopAnchorRect) return null;
+    const frameAnchor = React.useMemo<VirtualElement | null>(() => {
+      if (!frameRect) return null;
       return {
         contextElement: context.inputRef.current ?? undefined,
         getBoundingClientRect() {
           return {
-            width: inputTopAnchorRect.width,
-            height: inputTopAnchorRect.height,
-            x: inputTopAnchorRect.x,
-            y: inputTopAnchorRect.y,
-            top: inputTopAnchorRect.y,
-            right: inputTopAnchorRect.x + inputTopAnchorRect.width,
-            bottom: inputTopAnchorRect.y + inputTopAnchorRect.height,
-            left: inputTopAnchorRect.x,
+            width: frameRect.width,
+            height: frameRect.height,
+            x: frameRect.x,
+            y: frameRect.y,
+            top: frameRect.y,
+            right: frameRect.x + frameRect.width,
+            bottom: frameRect.y + frameRect.height,
+            left: frameRect.x,
             toJSON() {
               return this;
             },
@@ -220,18 +310,18 @@ const MentionContent = React.forwardRef<ContentElement, MentionContentProps>(
           return rects;
         },
       };
-    }, [context.inputRef, inputTopAnchorRect]);
+    }, [context.inputRef, frameRect]);
 
-    const anchorRef =
-      positionAnchor === 'input-top'
-        ? (inputTopAnchor ?? context.virtualAnchor)
-        : context.virtualAnchor;
+    const anchorRef = composerAnchor
+      ? (frameAnchor ?? context.virtualAnchor)
+      : context.virtualAnchor;
+    const placedSide: Side = composerAnchor ? (requestedSide ?? lockedSide ?? 'top') : side;
 
     const positionerContext = useAnchorPositioner({
       open: context.open,
       onOpenChange: context.onOpenChange,
       anchorRef,
-      side,
+      side: placedSide,
       sideOffset,
       align: rtlAwareAlign,
       alignOffset,
@@ -246,7 +336,8 @@ const MentionContent = React.forwardRef<ContentElement, MentionContentProps>(
       collisionPadding,
       sticky,
       strategy,
-      avoidCollisions,
+      // A composer menu never flips: its side is locked and its height capped.
+      avoidCollisions: composerAnchor ? false : avoidCollisions,
       disableArrow: true,
       fitViewport,
       hideWhenDetached,
@@ -259,14 +350,29 @@ const MentionContent = React.forwardRef<ContentElement, MentionContentProps>(
       setFloatingRef.current(node);
     }, []);
     const composedRef = useComposedRefs(forwardedRef, handleFloatingRef);
-    const composedStyle = React.useMemo<React.CSSProperties>(() => {
+    const resolvedSide = positionerContext.side;
+    const composerMaxHeight =
+      composerAnchor && frameRoom
+        ? Math.max(0, (placedSide === 'top' ? frameRoom.above : frameRoom.below) - sideOffset)
+        : undefined;
+    const composedStyle = React.useMemo<MentionContentStyle>(() => {
       return {
         ...inputWidthStyle,
+        '--mention-rise': resolvedSide === 'top' ? '-4px' : '4px',
+        ...(composerMaxHeight !== undefined ? { maxHeight: `${composerMaxHeight}px` } : {}),
         ...style,
         ...positionerContext.floatingStyles,
         ...(!context.open && forceMount ? { visibility: 'hidden' } : {}),
       };
-    }, [inputWidthStyle, style, positionerContext.floatingStyles, forceMount, context.open]);
+    }, [
+      inputWidthStyle,
+      resolvedSide,
+      composerMaxHeight,
+      style,
+      positionerContext.floatingStyles,
+      forceMount,
+      context.open,
+    ]);
 
     useDismiss({
       /* Disabled on mobile: the docked panel manages its own lifetime
@@ -297,7 +403,7 @@ const MentionContent = React.forwardRef<ContentElement, MentionContentProps>(
     if (isMobile) {
       return (
         <MentionContentProvider
-          side={side}
+          side={placedSide}
           align={rtlAwareAlign}
           arrowStyles={positionerContext.arrowStyles}
           arrowDisplaced={positionerContext.arrowDisplaced}
@@ -313,7 +419,7 @@ const MentionContent = React.forwardRef<ContentElement, MentionContentProps>(
 
     return (
       <MentionContentProvider
-        side={side}
+        side={placedSide}
         align={rtlAwareAlign}
         arrowStyles={positionerContext.arrowStyles}
         arrowDisplaced={positionerContext.arrowDisplaced}

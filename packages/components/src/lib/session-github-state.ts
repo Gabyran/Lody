@@ -10,6 +10,8 @@ import {
 } from '@lody/shared';
 
 export type SessionGitHubState = {
+  /** The session owning the PR, also used for server-side repository identity. */
+  sourceSessionId: SessionMeta['id'] | undefined;
   repoFullName: string;
   latestPr: SessionPullRequestMeta | null;
   latestPrState: SessionPullRequestStateMeta | null;
@@ -17,12 +19,18 @@ export type SessionGitHubState = {
   hasExistingPr: boolean;
   workspaceDirty: boolean;
   /**
+   * Committed but not on the remote. Independent of `workspaceDirty`, which
+   * goes false the moment the agent commits while the PR head stays behind —
+   * together they answer "is the PR head the author's latest work?".
+   */
+  workspaceUnpushed: boolean;
+  /**
    * Whether the session has any changes to base a PR on — uncommitted
    * (`workspaceDirty`) OR already committed (`diffStats.allChange > 0`). These
    * two signals come from independent writers (post-turn `git status` vs the
    * Code Collab file-index scanner), so together they survive one being stale
    * and, unlike `workspaceDirty` alone, keep "Create PR" available after the
-   * agent auto-commits (clean tree, real commits, still no PR).
+   * agent commits (clean tree, real commits, still no PR).
    */
   hasChanges: boolean;
 };
@@ -86,16 +94,19 @@ export const getSessionGitHubState = (
     : null;
 
   const workspaceDirty = sourceSession?.workspaceDirty ?? false;
+  const workspaceUnpushed = sourceSession?.workspaceUnpushed ?? false;
   const allChange = sourceSession?.diffStats?.allChange;
   const hasCommittedDiff = allChange ? allChange.add + allChange.del > 0 : false;
 
   return {
+    sourceSessionId: sourceSession?.id,
     repoFullName,
     latestPr,
     latestPrState,
     canShowGitHubActions: !!repoFullName,
     hasExistingPr: !!repoFullName && !!latestPr,
     workspaceDirty,
+    workspaceUnpushed,
     hasChanges: workspaceDirty || hasCommittedDiff,
   };
 };

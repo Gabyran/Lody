@@ -135,7 +135,7 @@ function isPreviewApproval(value: unknown): boolean {
   if (!isObjectRecord(value)) return false;
   return (
     (value.source === 'browser_address' || value.source === 'share_action') &&
-    (value.targetClass === 'loopback' || value.targetClass === 'private_lan') &&
+    value.targetClass === 'loopback' &&
     isPreviewTarget(value.target) &&
     typeof value.confirmedByUserId === 'string' &&
     typeof value.confirmedAt === 'number' &&
@@ -162,9 +162,14 @@ function isPreviewConnection(value: unknown): boolean {
   }
   return (
     typeof value.status === 'string' &&
-    isOptionalString(value.grantId) &&
+    ['creating', 'active', 'closed', 'failed'].includes(value.status) &&
+    isOptionalString(value.endpointId) &&
     isOptionalString(value.publicUrl) &&
-    isOptionalString(value.tunnelId) &&
+    (value.closedReason === undefined ||
+      (typeof value.closedReason === 'string' &&
+        ['idle_timeout', 'revoked', 'session_ended', 'replaced', 'runtime_lost'].includes(
+          value.closedReason
+        ))) &&
     (typeof value.target === 'undefined' || isPreviewTarget(value.target)) &&
     isOptionalString(value.approvedByUserId)
   );
@@ -403,13 +408,15 @@ function isACPSessionConfig(value: unknown): boolean {
   }
   const { cliType, agentType } = normalizedTarget;
   // This dependency-free validator has a hand-maintained CJS mirror and cannot
-  // import the ESM runtime table. Keep this literal aligned with ai.ts and the
-  // TS/CJS parity test.
+  // import the ESM runtime table. Keep builtin additions aligned with ai.ts and the TS/CJS
+  // parity test when changing this feature.
   const isBuiltinAgentType =
     agentType === 'claude' ||
     agentType === 'codex' ||
     agentType === 'kimi' ||
-    agentType === 'deepseek';
+    agentType === 'deepseek' ||
+    agentType === 'bub' ||
+    agentType === 'dimcode';
   if (
     typeof value.prompt !== 'string' ||
     (cliType === 'builtin' && !isBuiltinAgentType) ||
@@ -508,6 +515,7 @@ export function isLocalSessionControlRequest(value: unknown): value is LocalSess
       typeof value.workspaceId === 'string' &&
       typeof value.configId === 'string' &&
       value.configId.trim().length > 0 &&
+      (typeof value.force === 'undefined' || typeof value.force === 'boolean') &&
       typeof value.cliType === 'undefined' &&
       typeof value.agentType === 'undefined' &&
       typeof value.customAcp === 'undefined' &&
@@ -629,7 +637,17 @@ export function isLocalSessionControlRequest(value: unknown): value is LocalSess
       typeof value.requestedByUserId === 'string' &&
       isPreviewTarget(value.target) &&
       isPreviewApproval(value.approval) &&
-      (typeof value.replaceExisting === 'undefined' || typeof value.replaceExisting === 'boolean')
+      (typeof value.restart === 'undefined' || typeof value.restart === 'boolean')
+    );
+  }
+
+  if (value.type === 'session/preview-status') {
+    return (
+      typeof value.machineId === 'string' &&
+      typeof value.workspaceId === 'string' &&
+      typeof value.sessionId === 'string' &&
+      typeof value.requestedByUserId === 'string' &&
+      isOptionalString(value.renewEndpointId)
     );
   }
 
@@ -834,6 +852,7 @@ export function isLocalSessionControlResponse(
         value.status === 'auth-methods' ||
         value.status === 'authorization' ||
         value.status === 'input-required' ||
+        value.status === 'runtime-download' ||
         value.status === 'output' ||
         value.status === 'authenticated' ||
         value.status === 'cancelled' ||
@@ -860,6 +879,21 @@ export function isLocalSessionControlResponse(
         (typeof value.expiresInSeconds === 'number' &&
           Number.isInteger(value.expiresInSeconds) &&
           value.expiresInSeconds > 0)) &&
+      isOptionalString(value.runtimeName) &&
+      (typeof value.runtimePhase === 'undefined' ||
+        value.runtimePhase === 'downloading' ||
+        value.runtimePhase === 'verifying' ||
+        value.runtimePhase === 'extracting' ||
+        value.runtimePhase === 'publishing' ||
+        value.runtimePhase === 'complete') &&
+      (typeof value.runtimePercent === 'undefined' ||
+        (typeof value.runtimePercent === 'number' &&
+          value.runtimePercent >= 0 &&
+          value.runtimePercent <= 100)) &&
+      (value.status !== 'runtime-download' ||
+        (typeof value.runtimeName === 'string' &&
+          value.runtimeName.trim().length > 0 &&
+          typeof value.runtimePhase === 'string')) &&
       isOptionalString(value.output) &&
       isOptionalString(value.error)
     );
@@ -1027,11 +1061,16 @@ export function isLocalSessionControlResponse(
 
   if (
     value.type === 'session/preview-create_response' ||
-    value.type === 'session/preview-revoke_response'
+    value.type === 'session/preview-revoke_response' ||
+    value.type === 'session/preview-status_response'
   ) {
     return (
       typeof value.sessionId === 'string' &&
       typeof value.success === 'boolean' &&
+      (value.expiresAt === undefined ||
+        (typeof value.expiresAt === 'number' &&
+          Number.isSafeInteger(value.expiresAt) &&
+          value.expiresAt >= 0)) &&
       (typeof value.connection === 'undefined' || isPreviewConnection(value.connection)) &&
       isOptionalString(value.error) &&
       isOptionalString(value.message)

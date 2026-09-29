@@ -4,6 +4,7 @@ import type { CodeCollabDebugGlobal } from './lib/code-collab-global-debug';
 import type { WorkspacePresenceDebugGlobal } from './providers/workspace-presence-transport';
 import type { LodyLiveActivityBridge } from './hooks/use-lody-live-activity';
 import type { LodyAppStoreReviewBridge } from './hooks/use-app-store-review-prompt';
+import type { AppIconBridge } from './components/mobile/mobile-app-icon-settings';
 import type { LodyStartupThemeBridge } from './theme-provider';
 
 /**
@@ -38,6 +39,7 @@ declare global {
     __LODY_BOOT__?: LodyBootController;
     __LODY_LIVE_ACTIVITY__?: LodyLiveActivityBridge;
     __LODY_APP_STORE_REVIEW__?: LodyAppStoreReviewBridge;
+    __LODY_APP_ICON__?: AppIconBridge;
     __LODY_STARTUP_THEME__?: LodyStartupThemeBridge;
     __LODY_APP_INFO__?: {
       version?: string;

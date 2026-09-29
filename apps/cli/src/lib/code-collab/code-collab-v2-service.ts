@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { execFile } from 'node:child_process';
 import {
+  chmod,
   lstat,
   opendir,
   open,
@@ -290,6 +291,11 @@ export class CodeCollabV2Service {
   constructor(
     private readonly deps: {
       readonly resolveWorkspace: CodeCollabV2WorkspaceResolver;
+      /** Observe branch on activation/explicit refresh without gating file snapshots. */
+      readonly observeWorkspaceGit?: (workspace: {
+        readonly ownerSessionId: SessionId;
+        readonly workspaceRoot: string;
+      }) => Promise<void>;
       readonly publishFileIndex?: CodeCollabV2FileIndexPublisher;
       readonly publishFileIndexSignal?: CodeCollabV2FileIndexSignalPublisher;
       readonly maxRawTextBytes?: number;
@@ -355,6 +361,7 @@ export class CodeCollabV2Service {
     const hasActiveWatch = this.watchByOwnerSessionId.has(resolved.ownerSessionId);
     const activatedLocally = !hasState || !hasActiveWatch;
     if (activatedLocally) {
+      this.observeWorkspaceGit(resolved);
       await this.enqueueSharedStateRefresh(resolved.ownerSessionId, {
         kind: 'full',
         resolved,
@@ -536,12 +543,32 @@ export class CodeCollabV2Service {
         path: resolved.workspacePath,
       });
     }
+    if (!resolved.workspacePath) this.observeWorkspaceGit(resolved);
     const publishedEntries = await this.scanAndPublishDirectory(resolved);
     return {
       status: 'ok',
       path: resolved.workspacePath || ROOT_DIRECTORY_REQUEST_PATH,
       publishedEntries,
     };
+  }
+
+  private observeWorkspaceGit(
+    workspace: Pick<ResolvedPath, 'ownerSessionId' | 'workspaceRoot'>
+  ): void {
+    // Observe activation and explicit refresh, not every file watcher event or
+    // terminal diff refresh. Execution already owns terminal branch observation.
+    void Promise.resolve()
+      .then(() =>
+        this.deps.observeWorkspaceGit?.({
+          ownerSessionId: workspace.ownerSessionId,
+          workspaceRoot: workspace.workspaceRoot,
+        })
+      )
+      .catch((error) => {
+        this.logger.debug(
+          `[code-collab] Workspace branch observation failed: ${formatErrorMessage(error)}`
+        );
+      });
   }
 
   async refreshSharedState(
@@ -552,6 +579,7 @@ export class CodeCollabV2Service {
       request.sessionId,
       ROOT_DIRECTORY_REQUEST_PATH
     );
+    this.observeWorkspaceGit(resolved);
     void this.ensureWorkspaceWatch(resolved).catch(() => undefined);
     await this.enqueueSharedStateRefresh(resolved.ownerSessionId, {
       kind: 'full',
@@ -2288,8 +2316,19 @@ async function writeFileAtomically(
   workspacePath: string
 ): Promise<void> {
   const temporaryPath = `${absolutePath}.lody-save-${process.pid}-${randomUUID()}.tmp`;
+  // writeFile's mode is still masked by umask. chmod the temp file before rename
+  // so an existing 0755 script does not become 0644/0664 and lose +x.
+  const preserveMode =
+    process.platform === 'win32'
+      ? undefined
+      : await lstat(absolutePath)
+          .then((existing) => (existing.isFile() ? existing.mode & 0o777 : undefined))
+          .catch(() => undefined);
   try {
     await writeFile(temporaryPath, bytes, { mode: 0o666 });
+    if (preserveMode !== undefined) {
+      await chmod(temporaryPath, preserveMode);
+    }
     await rename(temporaryPath, absolutePath);
   } catch (error) {
     await unlink(temporaryPath).catch(() => undefined);

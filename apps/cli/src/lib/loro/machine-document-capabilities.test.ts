@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
+  ACP_CAPABILITY_FETCH_TIME_RENEW_AFTER_MS,
   type AgentConfigId,
   type MachineFlockKey,
   type MachineFlockWritableFlock,
@@ -69,15 +70,139 @@ describe('MachineDocument ACP capabilities', () => {
         true
       );
 
-    await write();
+    const first = await write();
     vi.setSystemTime(new Date('2026-07-15T00:01:00.000Z'));
-    await write();
+    const second = await write();
 
     expect(flock.commits).toBe(1);
     expect(flush).toHaveBeenCalledTimes(1);
     expect(markDirty).toHaveBeenCalledTimes(1);
     expect(syncOnce).not.toHaveBeenCalled();
+    expect(second.fetchedAt).toBe(first.fetchedAt);
     expect([...flock.rows.values()][0]?.value).toMatchObject({ acknowledgedSteer: true });
+  });
+
+  it('rewrites an unchanged entry only once it is old enough to need renewing', async () => {
+    vi.useFakeTimers();
+    const start = new Date('2026-07-15T00:00:00.000Z').getTime();
+    vi.setSystemTime(start);
+    const flock = new FakeMachineFlock();
+    const markDirty = vi.fn();
+    const repo = {
+      openFlockDoc: vi.fn(async () => ({ flock, syncOnce: vi.fn(async () => undefined) })),
+      flush: vi.fn(async () => undefined),
+    } as unknown as LoroRepo;
+    const document = new MachineDocument(
+      repo,
+      'workspace-1' as WorkspaceId,
+      'machine-1' as MachineId,
+      markDirty
+    );
+    const write = () =>
+      document.updateAcpCapabilities(
+        'config-1' as AgentConfigId,
+        'registry',
+        'opencode',
+        [],
+        [{ modelId: 'model-a', name: 'Model A' }],
+        undefined,
+        undefined,
+        false,
+        'opencode@1.0.0'
+      );
+    const storedFetchedAt = () =>
+      ([...flock.rows.values()][0]?.value as { fetchedAt: number } | undefined)?.fetchedAt;
+
+    await write();
+    vi.setSystemTime(start + ACP_CAPABILITY_FETCH_TIME_RENEW_AFTER_MS - 1);
+    await write();
+
+    // Still young: identical content costs no Flock write, flush or sync.
+    expect(flock.commits).toBe(1);
+    expect(markDirty).toHaveBeenCalledTimes(1);
+    expect(storedFetchedAt()).toBe(start);
+
+    vi.setSystemTime(start + ACP_CAPABILITY_FETCH_TIME_RENEW_AFTER_MS);
+    const renewed = await write();
+
+    expect(flock.commits).toBe(2);
+    expect(markDirty).toHaveBeenCalledTimes(2);
+    expect(renewed.fetchedAt).toBe(start + ACP_CAPABILITY_FETCH_TIME_RENEW_AFTER_MS);
+    expect(storedFetchedAt()).toBe(start + ACP_CAPABILITY_FETCH_TIME_RENEW_AFTER_MS);
+  });
+
+  it('persists a capability change that only updates per-model reasoning efforts', async () => {
+    const flock = new FakeMachineFlock();
+    const flush = vi.fn(async () => undefined);
+    const markDirty = vi.fn();
+    const repo = {
+      openFlockDoc: vi.fn(async () => ({ flock, syncOnce: vi.fn(async () => undefined) })),
+      flush,
+    } as unknown as LoroRepo;
+    const document = new MachineDocument(
+      repo,
+      'workspace-1' as WorkspaceId,
+      'machine-1' as MachineId,
+      markDirty
+    );
+    const write = (efforts: string[]) =>
+      document.updateAcpCapabilities(
+        'config-1' as AgentConfigId,
+        'registry',
+        'deepseek',
+        [],
+        [{ modelId: 'kimi-k3', name: 'Kimi K3' }],
+        undefined,
+        undefined,
+        false,
+        'registry:deepseek:test',
+        { 'kimi-k3': efforts }
+      );
+
+    await write(['low', 'high']);
+    const updated = await write(['low', 'high', 'max']);
+
+    expect(flock.commits).toBe(2);
+    expect(flush).toHaveBeenCalledTimes(2);
+    expect(markDirty).toHaveBeenCalledTimes(2);
+    expect(updated.modelReasoningEfforts).toEqual({
+      'kimi-k3': ['low', 'high', 'max'],
+    });
+  });
+
+  it('persists title support changes even when all other capability fields are unchanged', async () => {
+    const flock = new FakeMachineFlock();
+    const repo = {
+      openFlockDoc: async () => ({ flock, syncOnce: async () => {} }),
+      flush: async () => {},
+    } as unknown as LoroRepo;
+    const document = new MachineDocument(
+      repo,
+      'workspace-1' as WorkspaceId,
+      'machine-1' as MachineId,
+      () => {}
+    );
+    const write = (sessionTitle: boolean) =>
+      document.updateAcpCapabilities(
+        'title-config' as AgentConfigId,
+        'custom',
+        'title-agent',
+        [],
+        [],
+        undefined,
+        undefined,
+        false,
+        'custom:test',
+        undefined,
+        false,
+        undefined,
+        { sessionTitle }
+      );
+    await write(false);
+    await write(true);
+    expect([...flock.rows.values()][0]?.value).toMatchObject({ sessionTitle: true });
+    await write(false);
+    expect([...flock.rows.values()][0]?.value).toMatchObject({ sessionTitle: false });
   });
 
   it('does not write capabilities when cancelled while opening the Machine Flock', async () => {
@@ -119,6 +244,7 @@ describe('MachineDocument ACP capabilities', () => {
       'builtin:codex:test',
       undefined,
       false,
+      undefined,
       { signal: controller.signal }
     );
     await openStarted;

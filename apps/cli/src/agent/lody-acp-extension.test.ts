@@ -1,0 +1,201 @@
+import { describe, expect, it } from 'vitest';
+import { LODY_EXTENSION_METHODS } from 'acp-extension-core';
+import type { RequestPermissionRequest, SessionConfigOption } from '@agentclientprotocol/sdk';
+import {
+  getBuiltinToolPermissionOutcome,
+  parseLodyExtensionCapabilities,
+  parseRateLimitsSnapshot,
+  parseLodyExtensionMessage,
+} from './lody-acp-extension';
+
+describe('Core usage accounting boundary', () => {
+  it('scopes Core-marked snapshots for any provider and keeps the native routing session', () => {
+    const usage = { inputTokens: 2000, outputTokens: 0, cacheReadInputTokens: 0 };
+    const update = { sessionId: 'native', usage, modelUsage: { 'model-b': usage } };
+    const parse = (provider: string, _meta: Record<string, unknown>) =>
+      parseLodyExtensionMessage({
+        method: LODY_EXTENSION_METHODS.sessionUsageUpdate,
+        params: { ...update, _meta },
+        sessionId: 'native',
+        provider,
+      });
+    for (const provider of ['claude', 'codex', 'kimi']) {
+      expect(parse(provider, { lody: { usageScopeId: 'result/1' } })).toEqual({
+        type: 'usage',
+        accountingId: 'native:scope:result%2F1',
+        update,
+      });
+    }
+    // Legacy Codex spelling maps to the same identity; other providers ignore it.
+    expect(parse('codex', { codex: { usageTurnId: 'turn-b' } })).toEqual({
+      type: 'usage',
+      accountingId: 'native:scope:turn-b',
+      update,
+    });
+    expect(parse('claude', { codex: { usageTurnId: 'turn-b' } })).toEqual({
+      type: 'usage',
+      update,
+    });
+    expect(parse('claude', { lody: { usageScopeId: '' } })).toEqual({ type: 'usage', update });
+  });
+  it.each(['codex', 'claude', 'kimi', 'grok', 'deepseek'] as const)(
+    'preserves %s optional delta separately from cumulative totals and rejects invalid buckets',
+    (provider) => {
+      const usage = { inputTokens: 100, outputTokens: 20, cacheReadInputTokens: 30 };
+      const params = {
+        sessionId: 's',
+        usage,
+        modelUsage: { model: { ...usage, inputTokens: 300 } },
+        delta: { usage, modelUsage: { model: usage } },
+      };
+      const parse = (value: Record<string, unknown>) =>
+        parseLodyExtensionMessage({
+          method: LODY_EXTENSION_METHODS.sessionUsageUpdate,
+          params: value,
+          sessionId: 's',
+          provider,
+        });
+      expect(parse(params)).toEqual({ type: 'usage', update: params });
+      const { delta, ...legacy } = params;
+      expect(parse(legacy)).toEqual({ type: 'usage', update: legacy });
+      expect(() =>
+        parse({ ...params, delta: { ...delta, usage: { ...usage, inputTokens: -1 } } })
+      ).toThrow();
+    }
+  );
+});
+
+describe('Grok TUI permission compatibility', () => {
+  const request: RequestPermissionRequest = {
+    sessionId: 'grok-session',
+    toolCall: { toolCallId: 'tool', title: 'Execute', kind: 'execute' },
+    options: [
+      { kind: 'allow_always', optionId: 'lasting-grant', name: 'Always allow' },
+      { kind: 'allow_once', optionId: 'this-call', name: 'Allow once' },
+    ],
+  };
+  const configOptions = (currentValue: string): SessionConfigOption[] => [
+    {
+      id: 'permission_mode',
+      name: 'Permissions',
+      type: 'select',
+      category: '_permission',
+      currentValue,
+      options: [],
+    },
+  ];
+  const args = {
+    agentConfig: { cliType: 'builtin' as const, agentType: 'grok' },
+    configOptions: configOptions('always-approve'),
+    request,
+    pending: false,
+  };
+
+  it('grants only this call, independent of option order or labels', () => {
+    expect(getBuiltinToolPermissionOutcome(args)).toEqual({
+      outcome: 'selected',
+      optionId: 'this-call',
+    });
+  });
+
+  it.each(['ask', 'auto', 'dontAsk', 'yolo', 'agent-full-access'])(
+    'keeps %s interactive',
+    (mode) => {
+      expect(
+        getBuiltinToolPermissionOutcome({ ...args, configOptions: configOptions(mode) })
+      ).toBeUndefined();
+    }
+  );
+
+  it('does not apply Grok policy to other providers or an absent option snapshot', () => {
+    for (const agentType of ['claude', 'codex', 'kimi']) {
+      expect(
+        getBuiltinToolPermissionOutcome({ ...args, agentConfig: { cliType: 'builtin', agentType } })
+      ).toBeUndefined();
+    }
+    expect(getBuiltinToolPermissionOutcome({ ...args, agentConfig: undefined })).toBeUndefined();
+    expect(getBuiltinToolPermissionOutcome({ ...args, configOptions: [] })).toBeUndefined();
+  });
+
+  it('never substitutes a lasting grant when AllowOnce is missing', () => {
+    const withoutOnce = {
+      ...request,
+      options: request.options.filter((o) => o.kind !== 'allow_once'),
+    };
+    expect(getBuiltinToolPermissionOutcome({ ...args, request: withoutOnce })).toBeUndefined();
+    expect(
+      getBuiltinToolPermissionOutcome({ ...args, request: withoutOnce, pending: true })
+    ).toEqual({ outcome: 'cancelled' });
+  });
+
+  it('keeps question requests interactive even when draining', () => {
+    const question: RequestPermissionRequest = {
+      ...request,
+      _meta: {
+        claudeCode: {
+          requestType: 'askUserQuestion',
+          askUserQuestion: {
+            version: 1,
+            questions: [
+              {
+                question: 'Which database?',
+                header: 'Database',
+                options: [{ label: 'Postgres', description: 'Use Postgres' }],
+                multiSelect: false,
+              },
+            ],
+          },
+        },
+      },
+    };
+    expect(
+      getBuiltinToolPermissionOutcome({ ...args, request: question, pending: true })
+    ).toBeUndefined();
+  });
+});
+
+describe('rate-limit window labels', () => {
+  const window = { usedPercent: 0, windowDurationSeconds: 604_800, resetsAtEpochSeconds: null };
+  const snapshot = {
+    rateLimits: [
+      {
+        limitId: 'claude',
+        scope: { providerId: 'claude' },
+        windows: [window, { ...window, label: 'Fable' }],
+      },
+    ],
+  };
+
+  it('preserves same-duration labeled windows in query responses', () => {
+    expect(parseRateLimitsSnapshot(snapshot)).toEqual(snapshot);
+  });
+
+  it('preserves labels in proactive updates', () => {
+    expect(
+      parseLodyExtensionMessage({
+        method: LODY_EXTENSION_METHODS.rateLimitsUpdate,
+        params: snapshot,
+        provider: 'claude',
+        sessionId: 'synthetic-session',
+      })
+    ).toEqual({ type: 'rateLimits', snapshot });
+  });
+});
+
+describe('session title capability negotiation', () => {
+  it.each([undefined, null, true, { version: 2 }, { version: '1' }])(
+    'ignores unsupported title capability %j without losing other capabilities',
+    (sessionTitle) => {
+      const capabilities = parseLodyExtensionCapabilities({
+        lody: { sessionTitle, usage: { version: 1 } },
+      });
+      expect(capabilities.sessionTitle).toBeUndefined();
+      expect(capabilities.usage).toEqual({ version: 1 });
+    }
+  );
+  it('accepts title v1', () => {
+    expect(
+      parseLodyExtensionCapabilities({ lody: { sessionTitle: { version: 1 } } }).sessionTitle
+    ).toEqual({ version: 1 });
+  });
+});

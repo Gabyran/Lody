@@ -15,7 +15,7 @@ import {
 } from '@dnd-kit/sortable';
 import { useTranslation } from 'react-i18next';
 import type { MessageQueueItem, SessionId } from '@lody/shared';
-import { TooltipProvider } from '@/ui/tooltip';
+import { Tooltip } from '@lody/ui/tooltip';
 import { cn } from '@/lib/utils';
 import { observeResizeOnAnimationFrame } from '@/lib/resize-observer';
 import {
@@ -25,7 +25,9 @@ import {
   scrollEdgeOverflowEquals,
 } from '@/lib/scroll-edge-fade';
 import { MessageQueueRow } from './message-queue-row';
+import { PendingQueueRow } from './pending-queue-row';
 import { useMessageQueueEditing } from './use-message-queue-editing';
+import { usePendingQueueActions, usePendingQueueRecords } from './use-pending-queue-records';
 
 export type MessageQueueDisplayProps = {
   sessionId: SessionId;
@@ -37,6 +39,8 @@ export type MessageQueueDisplayProps = {
   onEditSave: (item: MessageQueueItem, task: string) => void | Promise<void>;
   onSteer: (item: MessageQueueItem) => void | Promise<void>;
   showSteerAction?: boolean;
+  /** Native acknowledged steer: lets every queued row steer, not just the first. */
+  nativeSteerAvailable?: boolean;
   className?: string;
 };
 
@@ -52,6 +56,7 @@ export function MessageQueueDisplay({
   onEditSave,
   onSteer,
   showSteerAction = false,
+  nativeSteerAvailable = false,
   className,
 }: MessageQueueDisplayProps) {
   const { t } = useTranslation();
@@ -59,6 +64,9 @@ export function MessageQueueDisplay({
   const [overflow, setOverflow] = useState(NO_SCROLL_EDGE_OVERFLOW);
 
   const editing = useMessageQueueEditing(items, { onEditStart, onEditCancel, onEditSave });
+  const pending = usePendingQueueRecords(sessionId, items);
+  const pendingActions = usePendingQueueActions(sessionId);
+  const rowCount = items.length + pending.length;
 
   const itemIds = useMemo(() => items.map((item) => item.$cid), [items]);
   const canReorder = items.length > 1;
@@ -77,7 +85,7 @@ export function MessageQueueDisplay({
 
   useLayoutEffect(() => {
     updateOverflow();
-  }, [editing.editingCid, items, updateOverflow]);
+  }, [editing.editingCid, items, pending.length, updateOverflow]);
 
   useEffect(() => {
     const el = scrollRef.current;
@@ -103,30 +111,31 @@ export function MessageQueueDisplay({
     [onReorder]
   );
 
-  if (items.length === 0) {
+  if (rowCount === 0) {
     return null;
   }
 
   const fadeMask = buildScrollEdgeFadeMask(overflow, FADE_PX);
 
-  // Single rounded shell with header row; rows below use divide-y to feel like one continuous list
-  // rather than a stack of independent cards. Bottom corners stay square so it visually attaches
-  // to the chat composer below.
+  // A sheet tucked onto the surface below it (the info bar, or the composer when
+  // there is no bar): rounded top, square open bottom, and the composer's own
+  // fill and hairline so the stack reads as one piece rather than a gray slab.
+  // Rows use divide-y so the list feels continuous rather than stacked cards.
   return (
-    <TooltipProvider>
+    <Tooltip.Provider>
       <div
         className={cn(
-          'overflow-hidden rounded-md rounded-b-none border border-b-0 border-border/50',
-          'bg-muted/40',
+          'overflow-hidden rounded-t-lg rounded-b-none border-[0.5px] border-b-0',
+          'border-foreground/[0.10] bg-[hsl(var(--composer))] dark:border-input-border/45 dark:bg-input/70',
           className
         )}
       >
-        <div className="flex items-center justify-between px-2.5 py-1 text-[11px] text-muted-foreground">
+        <div className="flex cursor-default select-none items-center justify-between px-2.5 py-1 text-[11px] text-muted-foreground">
           <span className="font-medium">
             {t('sessions.messageQueue.upNext', 'Up next')}
             <span className="ml-1.5 text-muted-foreground/60">
               {t('sessions.messageQueue.queuedCount', {
-                count: items.length,
+                count: rowCount,
                 defaultValue: '{{count}} queued',
               })}
             </span>
@@ -135,7 +144,7 @@ export function MessageQueueDisplay({
 
         <div
           ref={scrollRef}
-          className="divide-y divide-border/30 overflow-y-auto border-t border-border/30"
+          className="overflow-y-auto border-t border-border/30"
           style={{
             maxHeight: 'min(25vh, 240px)',
             maskImage: fadeMask,
@@ -158,6 +167,7 @@ export function MessageQueueDisplay({
                     index={index}
                     isFirst={index === 0}
                     showSteerAction={showSteerAction}
+                    nativeSteerAvailable={nativeSteerAvailable}
                     canReorder={canReorder}
                     isEditing={isEditing}
                     editValue={isEditing ? editing.editValue : ''}
@@ -179,8 +189,22 @@ export function MessageQueueDisplay({
               })}
             </SortableContext>
           </DndContext>
+          {/* Local rows stay outside the sortable list: they are not queue items
+              yet, and the real item is appended at exactly this position. */}
+          {pending.map((record, index) => (
+            <PendingQueueRow
+              key={record.id}
+              record={record}
+              index={items.length + index}
+              divided={items.length + index > 0}
+              busy={pendingActions.busyId === record.id}
+              onRetry={() => void pendingActions.run(record, 'retry')}
+              onCancel={() => void pendingActions.run(record, 'cancel')}
+              onDiscard={() => void pendingActions.run(record, 'discard')}
+            />
+          ))}
         </div>
       </div>
-    </TooltipProvider>
+    </Tooltip.Provider>
   );
 }

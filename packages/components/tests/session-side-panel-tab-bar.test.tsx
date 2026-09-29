@@ -177,9 +177,19 @@ describe('SessionSidePanelTabBar', () => {
     await act(async () => {
       (closeFilesButton as HTMLButtonElement).click();
       (closeFileButton as HTMLButtonElement).click();
+      await new Promise((resolve) => setTimeout(resolve, 40));
     });
     expect(onTabClose.mock.calls).toEqual([['files'], ['file:src/app.tsx']]);
     expect(onTabSelect).not.toHaveBeenCalled();
+  });
+
+  it('caps each tab at 175px when the side panel is narrow', async () => {
+    await renderTabBar();
+    const bar = container?.querySelector('.\\@container\\/side-tabs') ?? container?.firstElementChild;
+    expect(bar?.className).toContain('@container/side-tabs');
+    const tab = container?.querySelector('[role="tab"]');
+    expect(tab?.className).toContain('max-w-[175px]');
+    expect(tab?.className).toContain('@max-[420px]/side-tabs:max-w-[175px]');
   });
 
   it('selects fixed and dynamic tabs through the same tablist', async () => {
@@ -212,8 +222,9 @@ describe('SessionSidePanelTabBar', () => {
     expect(addButton).toBeInstanceOf(HTMLButtonElement);
     await act(async () => {
       addButton?.dispatchEvent(
-        new MouseEvent('pointerdown', { bubbles: true, cancelable: true, button: 0 })
+        new MouseEvent('mousedown', { bubbles: true, cancelable: true, button: 0 })
       );
+      await new Promise((resolve) => setTimeout(resolve, 40));
     });
 
     const menuItems = Array.from(document.querySelectorAll<HTMLElement>('[role="menuitem"]'));
@@ -239,7 +250,6 @@ describe('SessionSidePanelTabBar', () => {
           ],
           onPanelOpen,
           title: 'Open a panel',
-          description: 'Choose what to show.',
         })
       );
     });

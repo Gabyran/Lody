@@ -1,6 +1,16 @@
 import { createHash } from 'node:crypto';
-import { execFile } from 'node:child_process';
-import { mkdir, mkdtemp, readdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
+import { execFile, spawnSync } from 'node:child_process';
+import {
+  chmod,
+  mkdir,
+  mkdtemp,
+  readdir,
+  readFile,
+  rename,
+  rm,
+  stat,
+  writeFile,
+} from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
@@ -122,6 +132,89 @@ function makeWorkspaceWatchCoordinator(): {
 }
 
 describe('CodeCollabV2Service text RPC boundary', () => {
+  it('activates checkout metadata independently of the initial file snapshot and refreshes it without file changes', async () => {
+    await withWorkspace(async (workspaceRoot) => {
+      let release: () => void = () => {};
+      const metadataReady = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      let currentBranch = 'feature/open';
+      let publishedBranch: string | undefined;
+      let publication: Promise<void> | undefined;
+      const service = new CodeCollabV2Service({
+        resolveWorkspace: makeResolver(workspaceRoot),
+        observeWorkspaceGit: ({ ownerSessionId, workspaceRoot: root }) => {
+          expect(ownerSessionId).toBe(SESSION_ID);
+          expect(root).toBe(workspaceRoot);
+          publication = metadataReady.then(() => {
+            publishedBranch = currentBranch;
+          });
+          return publication;
+        },
+      });
+      try {
+        const snapshot = await service.getFileIndex({ sessionId: SESSION_ID });
+        expect(snapshot.status).toBe('ok');
+        expect(publishedBranch).toBeUndefined();
+        release();
+        await publication;
+        expect(publishedBranch).toBe('feature/open');
+        currentBranch = 'feature/switched';
+        await service.refreshSharedStateAfterTurn({ sessionId: SESSION_ID });
+        expect(publishedBranch).toBe('feature/open');
+        await service.refreshSharedState({ sessionId: SESSION_ID });
+        await publication;
+        expect(publishedBranch).toBe('feature/switched');
+        currentBranch = 'feature/root-refresh';
+        await service.initDirectory({ sessionId: SESSION_ID, path: '.' });
+        await publication;
+        expect(publishedBranch).toBe('feature/root-refresh');
+      } finally {
+        release();
+        service.dispose();
+      }
+    });
+  });
+
+  it('refreshes watched files without repeating branch observation', async () => {
+    vi.useFakeTimers();
+    try {
+      await withWorkspace(async (workspaceRoot) => {
+        const watch = makeWorkspaceWatchCoordinator();
+        let currentBranch = 'feature/open';
+        let publishedBranch: string | undefined;
+        let finishRefresh: () => void = () => {};
+        const refreshed = new Promise<void>((resolve) => {
+          finishRefresh = resolve;
+        });
+        const service = new CodeCollabV2Service({
+          resolveWorkspace: makeResolver(workspaceRoot),
+          workspaceWatchCoordinator: watch.coordinator,
+          observeWorkspaceGit: async () => {
+            publishedBranch = currentBranch;
+          },
+          publishFileIndex: async (state) => {
+            if (state.fileIndex['watched.txt']) finishRefresh();
+          },
+        });
+        try {
+          await service.getFileIndex({ sessionId: SESSION_ID });
+          expect(publishedBranch).toBe('feature/open');
+          currentBranch = 'feature/external';
+          await writeFile(path.join(workspaceRoot, 'watched.txt'), 'changed');
+          watch.dirty();
+          await vi.advanceTimersByTimeAsync(150);
+          await refreshed;
+          expect(publishedBranch).toBe('feature/open');
+        } finally {
+          service.dispose();
+        }
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('opens text files with a sha256 digest and plain payload', async () => {
     await withWorkspace(async (workspaceRoot) => {
       await writeFile(path.join(workspaceRoot, 'hello.ts'), 'const value = 1;\n');
@@ -214,6 +307,160 @@ describe('CodeCollabV2Service text RPC boundary', () => {
     });
   });
 
+  it.runIf(process.platform !== 'win32')(
+    'keeps ordinary POSIX mode on an existing file after a successful save',
+    async () => {
+      const modeOf = async (filePath: string) => ((await stat(filePath)).mode & 0o777).toString(8);
+      const script = '#!/bin/sh\nprintf "saved\\n"\n';
+
+      await withWorkspace(async (workspaceRoot) => {
+        const previousMask = process.umask(0o022);
+        try {
+          const filePath = path.join(workspaceRoot, 'run.sh');
+          await writeFile(filePath, '#!/bin/sh\nprintf "old\\n"\n');
+          await chmod(filePath, 0o755);
+          const service = new CodeCollabV2Service({
+            resolveWorkspace: makeResolver(workspaceRoot),
+          });
+          const opened = await service.openText({ sessionId: SESSION_ID, path: 'run.sh' });
+          const saved = await service.saveText({
+            sessionId: SESSION_ID,
+            requestedByUserId: 'user-1',
+            path: 'run.sh',
+            baseDigest: opened.digest,
+            text: {
+              encoding: 'plain',
+              text: script,
+              rawBytes: Buffer.byteLength(script),
+            },
+          });
+          expect(saved.status).toBe('ok');
+          expect(await readFile(filePath, 'utf8')).toBe(script);
+          expect(await modeOf(filePath)).toBe('755');
+          const ran = spawnSync(filePath, [], { encoding: 'utf8' });
+          expect(ran.error).toBeUndefined();
+          expect(ran.status).toBe(0);
+          expect(ran.stdout).toBe('saved\n');
+        } finally {
+          process.umask(previousMask);
+        }
+      });
+
+      await withWorkspace(async (workspaceRoot) => {
+        const filePath = path.join(workspaceRoot, 'secret.txt');
+        await writeFile(filePath, 'old\n');
+        await chmod(filePath, 0o600);
+        const service = new CodeCollabV2Service({
+          resolveWorkspace: makeResolver(workspaceRoot),
+        });
+        const opened = await service.openText({ sessionId: SESSION_ID, path: 'secret.txt' });
+        const saved = await service.saveText({
+          sessionId: SESSION_ID,
+          requestedByUserId: 'user-1',
+          path: 'secret.txt',
+          baseDigest: opened.digest,
+          text: {
+            encoding: 'plain',
+            text: 'new\n',
+            rawBytes: Buffer.byteLength('new\n'),
+          },
+        });
+        expect(saved.status).toBe('ok');
+        expect(await readFile(filePath, 'utf8')).toBe('new\n');
+        expect(await modeOf(filePath)).toBe('600');
+      });
+
+      await withWorkspace(async (workspaceRoot) => {
+        const previousMask = process.umask(0o022);
+        try {
+          const filePath = path.join(workspaceRoot, 'plain.txt');
+          await writeFile(filePath, 'old\n');
+          await chmod(filePath, 0o644);
+          const service = new CodeCollabV2Service({
+            resolveWorkspace: makeResolver(workspaceRoot),
+          });
+          const opened = await service.openText({ sessionId: SESSION_ID, path: 'plain.txt' });
+          const saved = await service.saveText({
+            sessionId: SESSION_ID,
+            requestedByUserId: 'user-1',
+            path: 'plain.txt',
+            baseDigest: opened.digest,
+            text: {
+              encoding: 'plain',
+              text: 'new\n',
+              rawBytes: Buffer.byteLength('new\n'),
+            },
+          });
+          expect(saved.status).toBe('ok');
+          expect(await modeOf(filePath)).toBe('644');
+        } finally {
+          process.umask(previousMask);
+        }
+      });
+    }
+  );
+
+  it.runIf(process.platform !== 'win32')(
+    'does not change POSIX mode when a digest conflict skips the write',
+    async () => {
+      await withWorkspace(async (workspaceRoot) => {
+        const filePath = path.join(workspaceRoot, 'run.sh');
+        await writeFile(filePath, 'old\n');
+        await chmod(filePath, 0o755);
+        const service = new CodeCollabV2Service({
+          resolveWorkspace: makeResolver(workspaceRoot),
+        });
+        const opened = await service.openText({ sessionId: SESSION_ID, path: 'run.sh' });
+        await writeFile(filePath, 'external\n');
+        await chmod(filePath, 0o755);
+        const conflict = await service.saveText({
+          sessionId: SESSION_ID,
+          requestedByUserId: 'user-1',
+          path: 'run.sh',
+          baseDigest: opened.digest,
+          text: {
+            encoding: 'plain',
+            text: 'new\n',
+            rawBytes: Buffer.byteLength('new\n'),
+          },
+        });
+        expect(conflict.status).toBe('conflict');
+        expect(await readFile(filePath, 'utf8')).toBe('external\n');
+        expect(((await stat(filePath)).mode & 0o777).toString(8)).toBe('755');
+      });
+    }
+  );
+
+  it('does not recreate a deleted file when save reports file_deleted', async () => {
+    await withWorkspace(async (workspaceRoot) => {
+      const filePath = path.join(workspaceRoot, 'gone.ts');
+      await writeFile(filePath, 'old\n');
+      const service = new CodeCollabV2Service({
+        resolveWorkspace: makeResolver(workspaceRoot),
+      });
+      const opened = await service.openText({ sessionId: SESSION_ID, path: 'gone.ts' });
+      await rm(filePath);
+      const deleted = await service.saveText({
+        sessionId: SESSION_ID,
+        requestedByUserId: 'user-1',
+        path: 'gone.ts',
+        baseDigest: opened.digest,
+        text: {
+          encoding: 'plain',
+          text: 'new\n',
+          rawBytes: Buffer.byteLength('new\n'),
+        },
+      });
+      expect(deleted).toEqual({
+        status: 'conflict',
+        reason: 'file_deleted',
+        path: 'gone.ts',
+        baseDigest: opened.digest,
+      });
+      await expect(stat(filePath)).rejects.toMatchObject({ code: 'ENOENT' });
+    });
+  });
+
   it('returns after the durable save without waiting for shared-state publishing', async () => {
     await withWorkspace(async (workspaceRoot) => {
       const filePath = path.join(workspaceRoot, 'hello.ts');
@@ -222,17 +469,26 @@ describe('CodeCollabV2Service text RPC boundary', () => {
       const publishStarted = new Promise<void>((resolve) => {
         resolvePublishStarted = resolve;
       });
+      let releasePublish: (() => void) | undefined;
+      const publishGate = new Promise<void>((resolve) => {
+        releasePublish = resolve;
+      });
+      let published = false;
+      let publication: Promise<void> | undefined;
       const service = new CodeCollabV2Service({
         resolveWorkspace: makeResolver(workspaceRoot),
-        publishFileIndex: async () => {
+        publishFileIndex: () => {
+          publication = publishGate.then(() => {
+            published = true;
+          });
           resolvePublishStarted?.();
-          await new Promise<void>(() => undefined);
+          return publication;
         },
       });
-      const opened = await service.openText({ sessionId: SESSION_ID, path: 'hello.ts' });
-
-      const saved = await Promise.race([
-        service.saveText({
+      let save: ReturnType<CodeCollabV2Service['saveText']> | undefined;
+      try {
+        const opened = await service.openText({ sessionId: SESSION_ID, path: 'hello.ts' });
+        save = service.saveText({
           sessionId: SESSION_ID,
           requestedByUserId: 'user-1',
           path: 'hello.ts',
@@ -242,22 +498,30 @@ describe('CodeCollabV2Service text RPC boundary', () => {
             text: 'new\n',
             rawBytes: Buffer.byteLength('new\n'),
           },
-        }),
-        new Promise<never>((_, reject) => {
-          setTimeout(() => {
-            reject(new Error('saveText did not return after writing to disk'));
-          }, 250);
-        }),
-      ]);
-
-      expect(saved).toEqual({
-        status: 'ok',
-        path: 'hello.ts',
-        digest: digestText('new\n'),
-        rawBytes: Buffer.byteLength('new\n'),
-      });
-      expect(await readFile(filePath, 'utf8')).toBe('new\n');
-      await publishStarted;
+        });
+        const saved = await save;
+        expect(saved).toEqual({
+          status: 'ok',
+          path: 'hello.ts',
+          digest: digestText('new\n'),
+          rawBytes: Buffer.byteLength('new\n'),
+        });
+        expect(await readFile(filePath, 'utf8')).toBe('new\n');
+        await publishStarted;
+        expect(published).toBe(false);
+        releasePublish?.();
+        await publication;
+        expect(published).toBe(true);
+      } finally {
+        releasePublish?.();
+        // Never remove the workspace while the durable save is still writing.
+        try {
+          await save;
+          await publication;
+        } finally {
+          service.dispose();
+        }
+      }
     });
   });
 

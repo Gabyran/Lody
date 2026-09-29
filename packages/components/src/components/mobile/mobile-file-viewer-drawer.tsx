@@ -12,7 +12,7 @@ import { VaulDrawerBody } from '@/components/mobile/vaul-drawer-edge-back-zone';
 import { getSessionDetailTouchIconButtonClassName } from '@/lib/session-detail-a11y';
 import { getBasename } from '@/lib';
 import { isNativeAppShell } from '@/lib/native-platform';
-import { Button } from '@/ui/button';
+import { Button } from '@lody/ui/button';
 import { Drawer, DrawerContent, DrawerTitle } from '@/ui/drawer';
 
 const MOBILE_FILE_DRAWER_HEADER_INSET = 'calc(3.5rem + var(--safe-area-top))';
@@ -70,6 +70,7 @@ export function MobileFileViewerDrawer({
     <>
       <Drawer
         direction="right"
+        // The shared Drawer selects live viewport insets on non-iOS native shells.
         repositionInputs={isNativeAppShell()}
         open={open}
         onOpenChange={(nextOpen) => {
@@ -89,7 +90,7 @@ export function MobileFileViewerDrawer({
                 <Button
                   type="button"
                   variant="ghost"
-                  size="icon"
+                  icon
                   className={getSessionDetailTouchIconButtonClassName('-ml-1')}
                   onClick={() => onOpenChange(false)}
                   aria-label={t('common.back', 'Back')}
@@ -103,7 +104,7 @@ export function MobileFileViewerDrawer({
                 <Button
                   type="button"
                   variant="ghost"
-                  size="icon"
+                  icon
                   className={getSessionDetailTouchIconButtonClassName('-mr-1')}
                   onClick={() => setMenuOpen(true)}
                   aria-label={t('sessions.fileViewer.moreActions', 'File actions')}

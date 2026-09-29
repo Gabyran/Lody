@@ -1,13 +1,15 @@
 import { atom } from 'jotai';
 import {
   AGENT_CONFIG_DOC_PREFIX,
+  assertManagedCodexProfileConfig,
+  encodeCodexProfileConfig,
   getMachineFlockAgentConfigs,
   getMachineFlockProviderSetups,
   getMachineFlockDocId,
   getServerNow,
   hasBuiltinRuntimeOverrideValues,
   isAgentBrandId,
-  isManagedBuiltinAgentType,
+  supportsBuiltinProviderSetup,
   isBuiltinRuntimeOverrides,
   isCustomAcpLaunchSpec,
   isLoroRepoDocDeleted,
@@ -47,7 +49,8 @@ export async function writeAgentConfigToMachineFlock(
 ): Promise<MachineFlockRowMap> {
   const flockDocId = getMachineFlockDocId(runtime.workspaceId, config.machineId);
   const key = machineFlockKeys.agentConfig(config.id);
-  await runtime.writer.flockRowPut(flockDocId, key, config);
+  assertManagedCodexProfileConfig(config);
+  await runtime.writer.flockRowPut(flockDocId, key, encodeCodexProfileConfig(config));
   // The write goes through the writer seam (in local-first mode the CLI is the
   // sole author and the row syncs back into the local mirror asynchronously).
   // Read back the current rows from the local mirror and overlay the just-written
@@ -95,7 +98,11 @@ async function writeProviderSetupToMachineFlock(
 ): Promise<MachineFlockRowMap> {
   const flockDocId = getMachineFlockDocId(runtime.workspaceId, setup.machineId);
   const key = machineFlockKeys.providerSetup(setup.id);
-  await runtime.writer.flockRowPut(flockDocId, key, setup);
+  assertManagedCodexProfileConfig(setup.config);
+  await runtime.writer.flockRowPut(flockDocId, key, {
+    ...setup,
+    config: encodeCodexProfileConfig(setup.config),
+  });
   const handle = await runtime.repo.openFlockDoc(flockDocId);
   return {
     ...readMachineFlockRowsFromFlock(handle.flock),
@@ -378,10 +385,10 @@ export const cmdCreateProviderSetupAtom = atom(null, async (get, set, config: Ag
   if (!runtime) throw new Error('Runtime not ready');
   if (
     config.cliType !== 'builtin' ||
-    !isManagedBuiltinAgentType(config.agentType) ||
+    !supportsBuiltinProviderSetup(config.agentType) ||
     hasBuiltinRuntimeOverrideValues(config.runtimeOverrides)
   ) {
-    throw new Error('Provider setup is only supported for managed builtin agents');
+    throw new Error('Provider setup is not supported for this agent');
   }
   const now = getServerNow();
   const setup: ProviderSetupTask = {

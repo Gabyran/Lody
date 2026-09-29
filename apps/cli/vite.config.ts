@@ -2,7 +2,6 @@ import { builtinModules } from 'node:module';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { defineConfig } from 'vite';
-import topLevelAwait from 'vite-plugin-top-level-await';
 import wasm from 'vite-plugin-wasm';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -23,6 +22,7 @@ const bundledNodeBuiltins = new Set([
 ]);
 
 const explicitlyExternal = new Set([
+  '@napi-rs/keyring',
   'better-sqlite3',
   '@lydell/node-pty',
   '@sqlite.org/sqlite-wasm',
@@ -37,7 +37,10 @@ const explicitlyExternal = new Set([
 ]);
 
 export default defineConfig({
-  plugins: [wasm(), topLevelAwait()],
+  // Node 22 supports native top-level await, including wasm initialization.
+  // The browser compatibility transform reparses every emitted chunk into an
+  // additional SWC AST and exhausts the 2 GB packaging heap on this bundle.
+  plugins: [wasm()],
   define: inlineEnv,
   resolve: {
     alias: {
@@ -71,6 +74,7 @@ export default defineConfig({
       // better-sqlite3 external, just like the main CLI entry.
       input: {
         index: path.resolve(__dirname, 'src/index.ts'),
+        'cloudflared-worker': path.resolve(__dirname, 'src/preview/cloudflared-worker.ts'),
         'codex-acp': path.resolve(__dirname, 'src/codex-acp-entry.ts'),
         'claude-acp': path.resolve(__dirname, 'src/claude-acp-entry.ts'),
         'deepseek-acp': path.resolve(__dirname, 'src/deepseek-acp-entry.ts'),

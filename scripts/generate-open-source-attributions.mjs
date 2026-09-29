@@ -15,6 +15,32 @@ const NO_ATTRIBUTION_LICENSE_TOKENS = new Set(['0BSD', 'CC0-1.0', 'UNLICENSE', '
 
 const VENDORED_ATTRIBUTIONS = [
   {
+    id: 'vendored-vscode-fuzzy-scorer',
+    kind: 'vendored',
+    scope: 'vendored-source',
+    name: 'Visual Studio Code fuzzy scorer',
+    license: 'MIT',
+    homepage:
+      'https://github.com/microsoft/vscode/blob/a92c2f9316d5454e35bb4c2958fdc0f23bc87d5d/src/vs/base/common/fuzzyScorer.ts',
+    author: 'Microsoft Corporation',
+    description: 'Vendored fuzzy scoring algorithm used for mention candidate matching.',
+    assets: ['Fuzzy scorer'],
+    noticePath: 'packages/components/src/components/mentions/vscode-fuzzy-score.LICENSE.txt',
+  },
+  {
+    id: 'vendored-virtua',
+    kind: 'vendored',
+    scope: 'vendored-source',
+    name: 'Virtua',
+    license: 'MIT',
+    homepage: 'https://github.com/inokawa/virtua/tree/0.52.7',
+    author: 'inokawa',
+    description:
+      'Keyed list layout from Virtua, adapted for the conversation scroll engine (packages/components/src/lib/conversation-scroll/keyed-layout).',
+    assets: ['Virtua list layout and size cache'],
+    noticePath: 'packages/components/src/lib/conversation-scroll/keyed-layout/LICENSE',
+  },
+  {
     id: 'bundled-theme-vscode-defaults',
     kind: 'vendored',
     scope: 'bundled-theme',

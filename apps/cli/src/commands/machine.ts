@@ -1,4 +1,5 @@
 import { Command } from 'commander';
+import { addDiscoveryOptions, runDiscoveryList, type DiscoveryCommandOptions } from './discovery';
 import {
   getMachineFlockAcpCapabilities,
   getMachineFlockDocId,
@@ -26,16 +27,28 @@ import {
 import { renderTerminalTable } from '@/lib/terminal-table';
 import { listMergedAgentConfigs } from '@/lib/agent-config-machine-flock';
 
-type MachineListOptions = CommonCommandOptions & {
-  onlineOnly?: boolean;
-  includeAcpCapabilities?: boolean;
-  includeAgents?: boolean;
-};
+type MachineListOptions = CommonCommandOptions &
+  DiscoveryCommandOptions & {
+    onlineOnly?: boolean;
+    includeAcpCapabilities?: boolean;
+    includeAgents?: boolean;
+  };
 
 type MachineRateLimits = MachineViewMeta['raceLimits'];
+/**
+ * Machine liveness is THREE-state. A null presence snapshot means the room could not
+ * be joined, which is "unknown", never "offline" (`lib/loro/AGENTS.md`). `online` keeps
+ * its original meaning — KNOWN online — and `onlineStatus` is additive so a `--json`
+ * consumer can tell "we checked and it is down" from "we could not check". Previously
+ * only a stderr warning carried that distinction, so anything parsing stdout recorded
+ * an unreachable presence room as a confident offline.
+ */
+type MachineOnlineStatus = 'online' | 'offline' | 'unknown';
+
 type MachineListEntry = MachineMeta &
   Pick<MachineViewMeta, 'acpCapabilities' | 'raceLimits'> & {
     online: boolean;
+    onlineStatus: MachineOnlineStatus;
     agentConfigs?: AgentConfigMeta[];
   };
 
@@ -72,16 +85,18 @@ export function formatMachineCli(machine: Pick<MachineMeta, 'supportRegistryAgen
   return unique.length > 0 ? unique.join(',') : '-';
 }
 
-function toMachineListEntry(
+export function toMachineListEntry(
   machine: MachineMeta,
-  onlineMachineIds: ReadonlySet<MachineId>
+  onlineMachineIds: ReadonlySet<MachineId> | null
 ): MachineListEntry {
   const legacy = machine as MachineLegacyMetaFields;
+  const online = onlineMachineIds?.has(machine.id) === true;
   return {
     ...machine,
     acpCapabilities: legacy.acpCapabilities,
     raceLimits: legacy.raceLimits ?? {},
-    online: onlineMachineIds.has(machine.id),
+    online,
+    onlineStatus: onlineMachineIds === null ? 'unknown' : online ? 'online' : 'offline',
   };
 }
 
@@ -231,7 +246,7 @@ function printHumanMachineList(
         const row = [
           machine.id,
           machine.id === currentMachineId ? `${machine.name} (current)` : machine.name,
-          machine.online ? 'online' : 'offline',
+          machine.onlineStatus,
           formatMachineCli(machine),
         ];
         if (includeAgents) {
@@ -246,15 +261,34 @@ function printHumanMachineList(
 export const machineCommand = new Command('machine')
   .description('Inspect registered machines')
   .addCommand(
-    new Command('list')
+    addDiscoveryOptions(new Command('list'))
       .description('List machines in a workspace')
       .option('--workspace <selector>', 'Target workspace id, slug, or name')
       .option('--online-only', 'Only include machines with a recent heartbeat')
+      .option('--online-status <state>', 'online, offline or unknown')
       .option('--json', 'Print JSON output')
       .option('--include-acp-capabilities', 'Include acpCapabilities in JSON output')
       .option('--include-agents', 'Include agent config summaries per machine')
       .option('--debug', 'Enable debug output')
       .action(async (options: MachineListOptions) => {
+        if (!options.includeAgents && !options.includeAcpCapabilities) {
+          await runDiscoveryList('machine', {
+            ...options,
+            onlineStatus: options.onlineOnly ? 'online' : options.onlineStatus,
+          });
+          return;
+        }
+        if (
+          options.query ||
+          options.cursor ||
+          options.limit ||
+          options.allPages ||
+          options.onlineStatus
+        ) {
+          throw new Error(
+            'Detailed legacy machine output cannot be combined with catalog paging/filter options. Use agent-config list/get for capabilities.'
+          );
+        }
         await runOneShotCommand('machine', options, async () => {
           const auth = getAuthContextOrThrow('machine');
           const workspace = await resolveWorkspaceOrThrow(auth, options.workspace);
@@ -266,7 +300,7 @@ export const machineCommand = new Command('machine')
             const onlineMachineIds = await manager.getOnlineMachineIds();
             if (onlineMachineIds === null) {
               console.error(
-                'Warning: presence room unavailable; machine online status is unknown and shown as offline.'
+                'Warning: presence room unavailable; machine online status is unknown, reported as onlineStatus "unknown".'
               );
             }
             const onlineIds = onlineMachineIds ?? new Set<MachineId>();
@@ -277,7 +311,7 @@ export const machineCommand = new Command('machine')
               onlineIds,
               auth.machineId
             )
-              .map((machine) => toMachineListEntry(machine, onlineIds))
+              .map((machine) => toMachineListEntry(machine, onlineMachineIds))
               .filter((machine) => !options.onlineOnly || machine.online);
 
             if (options.includeAgents === true) {

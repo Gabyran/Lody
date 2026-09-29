@@ -1,3 +1,4 @@
+import { prepareRendererSendsForExit } from './services/renderer-send-lifecycle'
 import { app, BrowserWindow, type WebContents } from 'electron'
 import { promises as fs } from 'node:fs'
 import path from 'node:path'
@@ -23,7 +24,6 @@ export type ReloadTarget =
 type RendererWatchdogState = {
   reloadTarget: ReloadTarget | null
   mountTimer: NodeJS.Timeout | null
-  unresponsiveTimer: NodeJS.Timeout | null
   hasNotifiedMounted: boolean
   inRecovery: boolean
 }
@@ -36,7 +36,6 @@ function getState(window: BrowserWindow): RendererWatchdogState {
     state = {
       reloadTarget: null,
       mountTimer: null,
-      unresponsiveTimer: null,
       hasNotifiedMounted: false,
       inRecovery: false
     }
@@ -82,27 +81,6 @@ export function clearMountWatchdog(window: BrowserWindow): void {
   }
 }
 
-export function startUnresponsiveWatchdog(
-  window: BrowserWindow,
-  options: { timeoutMs: number; onTimeout: () => void }
-): void {
-  const state = getState(window)
-  if (state.unresponsiveTimer) clearTimeout(state.unresponsiveTimer)
-  state.unresponsiveTimer = setTimeout(() => {
-    state.unresponsiveTimer = null
-    if (window.isDestroyed()) return
-    options.onTimeout()
-  }, options.timeoutMs)
-}
-
-export function clearUnresponsiveWatchdog(window: BrowserWindow): void {
-  const state = getState(window)
-  if (state.unresponsiveTimer) {
-    clearTimeout(state.unresponsiveTimer)
-    state.unresponsiveTimer = null
-  }
-}
-
 function loadTarget(window: BrowserWindow, target: ReloadTarget): Promise<void> {
   if (target.type === 'url') {
     return window.loadURL(target.url)
@@ -110,11 +88,28 @@ function loadTarget(window: BrowserWindow, target: ReloadTarget): Promise<void> 
   return window.loadFile(target.filePath, target.hash ? { hash: target.hash } : undefined)
 }
 
-export function requestRendererReload(window: BrowserWindow): void {
+export function requestRendererReload(
+  window: BrowserWindow,
+  options: { ignoreCache?: boolean } = {}
+): Promise<void> {
+  if (window.isDestroyed()) return Promise.resolve()
+  return prepareRendererSendsForExit('reload', window)
+    .then((allowed) => {
+      if (allowed && !window.isDestroyed()) reloadRendererAfterCleanup(window, options.ignoreCache)
+    })
+    .catch((error: unknown) => console.error('[Electron] Reload cleanup failed', error))
+}
+
+function reloadRendererAfterCleanup(window: BrowserWindow, ignoreCache = false): void {
   if (window.isDestroyed()) return
   const state = getState(window)
+  const wasInRecovery = state.inRecovery
   state.hasNotifiedMounted = false
   state.inRecovery = false
+  if (ignoreCache && !wasInRecovery) {
+    window.webContents.reloadIgnoringCache()
+    return
+  }
   const target = state.reloadTarget
   if (target) {
     void loadTarget(window, target).catch((error) => {
@@ -216,7 +211,6 @@ export function disposeWatchdogState(window: BrowserWindow): void {
   const state = watchdogStates.get(window)
   if (!state) return
   if (state.mountTimer) clearTimeout(state.mountTimer)
-  if (state.unresponsiveTimer) clearTimeout(state.unresponsiveTimer)
   watchdogStates.delete(window)
 }
 

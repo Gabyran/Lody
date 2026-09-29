@@ -1,7 +1,7 @@
 import { useCallback, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useOrganization } from '@/hooks/useOrganization';
-import { Tabs, TabsList, TabsTrigger } from '@/ui/tabs';
+import { Tabs } from '@lody/ui/tabs';
 import {
   UsageStackedAreaChart,
   type StackedAreaBucket,
@@ -16,6 +16,7 @@ import {
   type SettingsUsageTimelineData,
 } from '@/components/settings/settings-data-cache';
 import { UsageCalendarVisualization } from '@/components/settings/usage-calendar-visualization';
+import { UsageCalendarSkeleton } from '@/components/settings/usage-calendar-skeleton';
 import { formatUsageTimelineBucketLabel } from '@/components/settings/usage-timeline-bucket-label';
 import { formatCompactNumber, formatUsdAmount } from '@/lib/format-compact-number';
 import { toIntlLocaleOrEn } from '@/lib/intl-locale';
@@ -80,6 +81,7 @@ export function MobileStatsSettings() {
   );
 
   const usageTimeline = usageTimelineByRange[range];
+  const loading = Boolean(workspaceId) && !usageTimeline;
 
   const activeTotals = usageTimeline?.totals;
 
@@ -124,28 +126,19 @@ export function MobileStatsSettings() {
     <div className="pb-6 pt-1">
       <MobileSettingsSection title={activeOrganization?.name || t('workspace.usage.title')}>
         <div className="px-3 py-3">
-          <Tabs
+          <Tabs.Root
             value={range}
             onValueChange={(nextValue) => {
               setRange(nextValue as SettingsUsageRange);
             }}
-            className="w-full"
           >
-            <TabsList className="grid w-full grid-cols-4">
-              <TabsTrigger value="day" className="h-full">
-                {t('workspace.usage.tabs.day')}
-              </TabsTrigger>
-              <TabsTrigger value="week" className="h-full">
-                {t('workspace.usage.tabs.week')}
-              </TabsTrigger>
-              <TabsTrigger value="month" className="h-full">
-                {t('workspace.usage.tabs.month')}
-              </TabsTrigger>
-              <TabsTrigger value="total" className="h-full">
-                {t('workspace.usage.tabs.total')}
-              </TabsTrigger>
-            </TabsList>
-          </Tabs>
+            <Tabs.List size="large" stretch>
+              <Tabs.Tab value="day">{t('workspace.usage.tabs.day')}</Tabs.Tab>
+              <Tabs.Tab value="week">{t('workspace.usage.tabs.week')}</Tabs.Tab>
+              <Tabs.Tab value="month">{t('workspace.usage.tabs.month')}</Tabs.Tab>
+              <Tabs.Tab value="total">{t('workspace.usage.tabs.total')}</Tabs.Tab>
+            </Tabs.List>
+          </Tabs.Root>
         </div>
       </MobileSettingsSection>
 
@@ -166,16 +159,22 @@ export function MobileStatsSettings() {
         </div>
       </MobileSettingsSection>
 
-      {usageCalendar ? (
+      {/* While a workspace is selected, a missing calendar only means its query
+         is still in flight — keep the section's shape with the skeleton. */}
+      {workspaceId ? (
         <MobileSettingsSection noCard>
           <div className="mx-3">
-            <UsageCalendarVisualization
-              calendar={usageCalendar}
-              workspaceName={activeOrganization?.name}
-              dayDetail={usageDay}
-              dayDetailLoading={usageDayLoading}
-              onSelectedDayChange={setSelectedUsageDayMs}
-            />
+            {usageCalendar ? (
+              <UsageCalendarVisualization
+                calendar={usageCalendar}
+                workspaceName={activeOrganization?.name}
+                dayDetail={usageDay}
+                dayDetailLoading={usageDayLoading}
+                onSelectedDayChange={setSelectedUsageDayMs}
+              />
+            ) : (
+              <UsageCalendarSkeleton range={range} />
+            )}
           </div>
         </MobileSettingsSection>
       ) : null}
@@ -192,6 +191,8 @@ export function MobileStatsSettings() {
             emptyText={t('workspace.usage.empty', 'No usage data in this range')}
             valueFormatter={formatTokensCompact}
             tooltipValueFormatter={formatTokensCompact}
+            loading={loading}
+            loadingText={t('workspace.usage.loading', 'Loading usage data...')}
           />
         </div>
       </MobileSettingsSection>
@@ -204,6 +205,8 @@ export function MobileStatsSettings() {
             emptyText={t('workspace.usage.empty', 'No usage data in this range')}
             valueFormatter={formatTokensCompact}
             tooltipValueFormatter={formatTokensCompact}
+            loading={loading}
+            loadingText={t('workspace.usage.loading', 'Loading usage data...')}
           />
         </div>
       </MobileSettingsSection>
@@ -211,11 +214,6 @@ export function MobileStatsSettings() {
       {!workspaceId && (
         <div className="mx-3 mt-5 rounded-2xl border border-dashed border-border/60 bg-card p-4 text-sm text-muted-foreground">
           {t('workspace.usage.workspaceRequired', 'Select a workspace to view usage')}
-        </div>
-      )}
-      {workspaceId && !usageTimeline && (
-        <div className="mx-3 mt-5 rounded-2xl border border-dashed border-border/60 bg-card p-4 text-sm text-muted-foreground">
-          {t('workspace.usage.loading', 'Loading usage data...')}
         </div>
       )}
     </div>

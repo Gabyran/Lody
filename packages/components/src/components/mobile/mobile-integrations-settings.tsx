@@ -1,17 +1,18 @@
 import { useTranslation } from 'react-i18next';
-import { Button } from '@/ui/button';
-import { Badge } from '@/ui/badge';
-import { ArrowUpRight, Book, Github, Loader2, Search } from 'lucide-react';
+import { Button } from '@lody/ui/button';
+import { Badge } from '@lody/ui/badge';
+import { ArrowUpRight, Book, Github, Search } from 'lucide-react';
+import { Spinner } from '@lody/ui/spinner';
 import { useCloudAction, useCloudMutation } from '@lody/platform/react';
 import { useAtomValue } from 'jotai';
 import { currentWorkspaceSlugAtom } from '@/atoms';
 import { cloudOperations } from '@/lib/cloud-api-operations';
 import { cn } from '@/lib/utils';
 import { useAppCapability } from '@/lib/app-platform';
-import { Switch } from '@/ui/switch';
-import { Input } from '@/ui/input';
+import { Switch } from '@lody/ui/switch';
+import { Input } from '@lody/ui/input';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { toast } from 'sonner';
+import { toast } from '@/lib/toast';
 import {
   MobileSettingsRow,
   MobileSettingsRowGroup,
@@ -88,7 +89,9 @@ function MobileCloudIntegrationsSettings() {
   const setPersonalOperationPreference = useCloudMutation(
     cloudOperations.github.setPersonalOperationPreference
   );
-  const refreshPersonalGitHubProfile = useCloudAction(cloudOperations.github.refreshPersonalGitHubProfile);
+  const refreshPersonalGitHubProfile = useCloudAction(
+    cloudOperations.github.refreshPersonalGitHubProfile
+  );
   const [connectingToGitHub, setConnectingToGitHub] = useState(false);
   const [updatingPersonalPreference, setUpdatingPersonalPreference] = useState(false);
   const [authorizingPersonalGitHub, setAuthorizingPersonalGitHub] = useState(false);
@@ -349,15 +352,13 @@ function MobileCloudIntegrationsSettings() {
           >
             {canManage ? (
               <Button
-                size="sm"
-                className="inline-flex items-center gap-1 whitespace-nowrap"
-                variant="default"
+                size="small"
                 onClick={() => {
                   void handleConnectGitHub();
                 }}
                 disabled={showGitHubConnectSpinner || !workspaceAuthReady}
               >
-                {showGitHubConnectSpinner ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : null}
+                {showGitHubConnectSpinner ? <Spinner className="h-3.5 w-3.5" /> : null}
                 {t('settings.integrations.github.connect')}
                 {!showGitHubConnectSpinner ? <ArrowUpRight className="h-3.5 w-3.5" /> : null}
               </Button>
@@ -386,7 +387,7 @@ function MobileCloudIntegrationsSettings() {
             )}
           >
             {updatingPersonalPreference ? (
-              <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
+              <Spinner className="h-4 w-4 text-muted-foreground" />
             ) : (
               <Switch
                 checked={personalIdentityEnabled}
@@ -437,7 +438,7 @@ function MobileCloudIntegrationsSettings() {
         title={t('settings.integrations.github.authorizedReposTitle', 'Authorized Repositories')}
         actions={
           repos.length > 0 ? (
-            <Badge variant="outline" className="text-[11px]">
+            <Badge>
               {searchQuery && filteredRepos.length !== repos.length
                 ? `${filteredRepos.length} / ${repos.length}`
                 : `${enabledCount} / ${repos.length}`}{' '}
@@ -462,7 +463,7 @@ function MobileCloudIntegrationsSettings() {
         ) : null}
         {workspaceReposLoading ? (
           <div className="flex items-center justify-center gap-2 px-4 py-6 text-[0.9rem] text-muted-foreground">
-            <Loader2 className="h-4 w-4 animate-spin" />
+            <Spinner className="h-4 w-4" />
             {t('settings.integrations.github.loading')}
           </div>
         ) : repos.length === 0 ? (
@@ -488,11 +489,7 @@ function MobileCloudIntegrationsSettings() {
                     <span className="truncate text-[0.95rem] font-medium text-foreground">
                       {repo.repoFullName}
                     </span>
-                    {repo.private && (
-                      <Badge variant="outline" className="px-1 py-0 text-[10px]">
-                        {t('settings.integrations.github.private')}
-                      </Badge>
-                    )}
+                    {repo.private && <Badge>{t('settings.integrations.github.private')}</Badge>}
                   </div>
                 }
               >

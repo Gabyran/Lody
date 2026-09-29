@@ -11,6 +11,7 @@ import {
 } from 'react';
 import { useTranslation } from 'react-i18next';
 import { ChevronRight, CloudOff, FileText, FolderOpen, Home, Loader2 } from 'lucide-react';
+import { Spinner } from '@/ui/spinner';
 import type { FileTreeItem } from '@lody/shared';
 
 import { useAtomValue } from 'jotai';
@@ -19,6 +20,7 @@ import { FileIcon, FolderIcon } from '@/components/icons/file-icons';
 import { MobileEdgeBackSwipeZone } from '@/components/mobile/mobile-edge-back-swipe';
 import { SessionFileImagePreview } from '@/components/sessions/session-file-image-preview';
 import { MarkdownRenderer } from '@/components/ai-gui/markdown-renderer';
+import { MarkdownFileResources } from '@/components/ai-gui/markdown-file-image';
 import { SessionMonacoTextViewer } from '@/components/sessions/session-monaco-text-viewer';
 import { useFileWorkspaceTree } from '@/hooks/use-code-session';
 import { isNativeAppShell } from '@/lib/native-platform';
@@ -640,7 +642,7 @@ function MobileFilePreview({
           });
           return;
         }
-        setContent({ status: 'ready', path, snapshot: result.snapshot });
+        setContent({ status: 'ready', path: result.entry.path, snapshot: result.snapshot });
       })
       .catch((error: unknown) => {
         if (cancelled) return;
@@ -723,13 +725,20 @@ function MobileFilePreview({
     );
   }
 
-  return (
+  const textPreview = (
     <MobileTextPreview
-      path={path}
+      path={content.path}
       text={snapshot.text}
       onScrollActivity={onScrollActivity}
       bottomClearanceClassName={bottomClearanceClassName}
     />
+  );
+  return provider ? (
+    <MarkdownFileResources provider={provider} documentPath={content.path} automatic={false} active>
+      {textPreview}
+    </MarkdownFileResources>
+  ) : (
+    textPreview
   );
 }
 
@@ -806,12 +815,18 @@ function StatusPanel({
   icon: Icon,
   title,
   description,
-  spin,
+  spin = false,
   tone = 'muted',
 }: {
   readonly icon: typeof FileText;
   readonly title: ReactNode;
   readonly description?: ReactNode;
+  /**
+   * Rotates the icon: the panel is a loading state. Defaults to false, and
+   * MUST keep a default here — `Spinner` treats an omitted `spinning` as a
+   * loading indicator, so forwarding this prop while it is `undefined` would
+   * spin the resting states' icons forever.
+   */
   readonly spin?: boolean;
   readonly tone?: 'muted' | 'destructive';
 }) {
@@ -822,7 +837,7 @@ function StatusPanel({
         tone === 'destructive' ? 'text-destructive' : 'text-muted-foreground'
       )}
     >
-      <Icon className={cn('h-6 w-6', spin && 'animate-spin')} aria-hidden />
+      <Spinner icon={Icon} spinning={spin} className="h-6 w-6" aria-hidden />
       <span className="text-[0.95rem]">{title}</span>
       {description ? (
         <span className="text-[0.8125rem] text-muted-foreground">{description}</span>

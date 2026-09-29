@@ -4,18 +4,26 @@ import type { LodyAuthClient } from './lib/auth';
 
 export type RouterContext = {
   authClient: LodyAuthClient;
-  desktopAuth?: {
-    completeCallback: (token: string) => Promise<void>;
-    isCallbackActive: () => boolean;
-  };
 };
 
 type CreateRouterOptions = {
   authClient: LodyAuthClient;
-  desktopAuth?: RouterContext['desktopAuth'];
   basepath?: string;
   history?: Parameters<typeof createTanstackRouter>[0]['history'];
 };
+
+const CONVERSATION_PATH = /\/sessions\/[^/]+\/?$/;
+
+/**
+ * The router restores scroll by CSS selector per URL: it records every element
+ * that scrolled and writes `scrollTop` back after the next render. A
+ * conversation's viewport is owned by the conversation scroll engine
+ * (`lib/conversation-scroll`), its only writer; a second writer fights it and
+ * costs a storage write per switch.
+ */
+export function shouldRouterRestoreScroll(pathname: string): boolean {
+  return !CONVERSATION_PATH.test(pathname);
+}
 
 export const createRouter = (options: CreateRouterOptions) => {
   const router = createTanstackRouter({
@@ -23,10 +31,9 @@ export const createRouter = (options: CreateRouterOptions) => {
     basepath: options.basepath ?? '',
     history: options.history,
     defaultPreload: 'intent',
-    scrollRestoration: true,
+    scrollRestoration: ({ location }) => shouldRouterRestoreScroll(location.pathname),
     context: {
       authClient: options.authClient,
-      desktopAuth: options.desktopAuth,
     },
   });
   return router;

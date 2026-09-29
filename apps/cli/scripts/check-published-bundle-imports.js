@@ -23,6 +23,7 @@ const dependencyBlocks = [
 const packageJson = JSON.parse(fs.readFileSync(packageJsonPath, 'utf8'));
 const workspacePackageNames = new Set();
 const requiredPublishedRuntimeDependencies = [
+  '@napi-rs/keyring',
   'better-sqlite3',
   'loro-crdt',
   '@lydell/node-pty',
@@ -276,7 +277,7 @@ function runDeepSeekAdapterBundleSmoke() {
     process.exit(1);
   }
 
-  for (const presetId of ['standard', 'code', 'minimal', 'cordis']) {
+  for (const presetId of ['standard', 'ptc', 'minimal', 'cordis']) {
     const presetPath = path.join(distDir, 'deepseek-agent-presets', presetId, 'agent.cordis.yml');
     if (!fs.existsSync(presetPath)) {
       console.error(`Published CLI DeepSeek preset is missing: ${presetPath}`);

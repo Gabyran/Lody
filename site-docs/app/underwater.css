@@ -1196,6 +1196,13 @@
   }
 }
 
+/* First-screen decorative motion stays paused until load + idle so the H1
+   LCP box is not competing with looping CSS. Reduced-motion still wins. */
+html:not(.uw-motion-ready) .underwater-hero__scroll-chevron,
+html:not(.uw-motion-ready) .uw-agents__banner-track {
+  animation-play-state: paused;
+}
+
 @media (prefers-reduced-motion: reduce) {
   .underwater-btn {
     transition: none;
@@ -1845,6 +1852,24 @@
   line-height: var(--uw-body-lh);
 }
 
+.uw-section-docs {
+  margin: 0.7rem 0 0;
+}
+
+.uw-section-docs a {
+  color: hsl(var(--landing-ink-muted));
+  font-family: var(--lody-docs-font-sans);
+  font-size: 0.9rem;
+  font-weight: 500;
+  text-decoration: none;
+}
+
+.uw-section-docs a:hover {
+  color: hsl(var(--landing-ink));
+  text-decoration: underline;
+  text-underline-offset: 0.15em;
+}
+
 /* Team beats under power header — plain list, not chips or a second banner. */
 .uw-power__points {
   display: flex;
@@ -1996,12 +2021,6 @@
 
 .uw-power__demo-inner::-webkit-scrollbar {
   display: none;
-}
-
-/* PrTabView owns a nested Radix viewport. It is moved by the same page-scroll
-   coordinator and its scrollbar stays hidden so the frame reads as a scene. */
-.uw-power__demo [data-pr-content-scroll-area] [data-orientation='vertical'] {
-  opacity: 0;
 }
 
 /* Children fill the frame; PR uses flex+ScrollArea, Usage scrolls the inner. */

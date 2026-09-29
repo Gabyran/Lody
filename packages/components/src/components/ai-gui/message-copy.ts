@@ -29,7 +29,34 @@ const isNeverCollapsedAssistantItem = (content: MessageContent | undefined): boo
   content?.type === 'plan' ||
   content?.type === 'goal' ||
   content?.type === 'proposed_plan' ||
+  // A warning/failure the stream folded back onto its emitting turn trails the
+  // answer the same way an attachment does. Left out, a turn that ends in one
+  // reports no visible answer and folds its own reply into "Worked for …".
+  content?.type === 'system_notice' ||
   (content?.type === 'tool_call' && content.kind === 'switch_mode');
+
+/**
+ * The answer is the final contiguous run of text before the never-collapsed
+ * tail, not necessarily the last item. Every adjacent text block in that run
+ * stays visible; a non-text item is the boundary between work and the answer.
+ */
+const getFinalTextRunStart = (items: MessageContent[]): number => {
+  let index = items.length - 1;
+
+  while (index >= 0 && isNeverCollapsedAssistantItem(items[index])) {
+    index -= 1;
+  }
+
+  if (items[index]?.type !== 'text') {
+    return items.length;
+  }
+
+  while (index > 0 && items[index - 1]?.type === 'text') {
+    index -= 1;
+  }
+
+  return index;
+};
 
 export const shouldCollapseAssistantMessageItem = ({
   content,
@@ -43,33 +70,15 @@ export const shouldCollapseAssistantMessageItem = ({
   isTurnFinished: boolean;
 }): boolean => {
   const itemCount = items.length;
-  const visibleTextIndex = getTextIndexBeforeTrailingNeverCollapsedItems(items);
+  const visibleTextRunStart = getFinalTextRunStart(items);
 
   return (
     isTurnFinished &&
     itemCount > 1 &&
     index < itemCount - 1 &&
-    index !== visibleTextIndex &&
+    !(content.type === 'text' && index >= visibleTextRunStart) &&
     !isNeverCollapsedAssistantItem(content)
   );
-};
-
-/**
- * The answer is the last text BEFORE the never-collapsed tail, not necessarily
- * the last item — it must not be demoted to process output just because a plan
- * or an attachment follows it.
- */
-const getTextIndexBeforeTrailingNeverCollapsedItems = (items: MessageContent[]): number => {
-  let index = items.length - 1;
-  if (!isNeverCollapsedAssistantItem(items[index])) {
-    return -1;
-  }
-
-  while (index >= 0 && isNeverCollapsedAssistantItem(items[index])) {
-    index -= 1;
-  }
-
-  return items[index]?.type === 'text' ? index : -1;
 };
 
 // Copyable text = plain `text` answers plus `proposed_plan` markdown. The plan
@@ -96,7 +105,7 @@ export const getTextContentFromMessageItems = (items: MessageContent[]): string 
  *
  * The other kinds stay expanded on purpose: a pasted-text span IS the content
  * the user wants when they copy, and a skill or session mention expands to a
- * path or an id that remains meaningful pasted elsewhere.
+ * path or a `session://` link that remains meaningful pasted elsewhere.
  */
 const COPY_AS_LABEL_SPAN_KINDS: ReadonlySet<MessageTextSpanKind> = new Set(['agent_role']);
 

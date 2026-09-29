@@ -1,7 +1,10 @@
 import * as React from 'react';
 import { createPortal } from 'react-dom';
+import * as stylex from '@stylexjs/stylex';
+import { space } from '@lody/ui/tokens/scales.stylex';
 import { observeResizeOnAnimationFrame } from '@/lib/resize-observer';
-import { cn } from '@/lib/utils';
+import { withClassName } from '@/lib/stylex';
+import { mentionSurface } from './mention-surface';
 
 /* Viewport breakpoint that flips the mention menu from the desktop
    floating popover to the mobile docked panel. 640px = Tailwind `sm`;
@@ -33,6 +36,20 @@ const PANEL_TOP_INSET = 56;
 /* Absolute cap so the panel stays a compact strip even when there's
    lots of room above the composer (the list scrolls past this). */
 const PANEL_MAX_HEIGHT = 220;
+
+const styles = stylex.create({
+  /**
+   * The docked strip is the only scroller: the menu's own list scroller is off
+   * on mobile, because nested scrollers made touch scrolling flaky. It rises
+   * from below, toward the composer it sits on — the rise's default direction.
+   */
+  panel: {
+    insetInline: space[2],
+    zIndex: 60,
+    overflowY: 'auto',
+    overscrollBehavior: 'contain',
+  },
+});
 
 /**
  * Mobile presentation for the mention menu. Instead of a floating
@@ -78,8 +95,8 @@ export function MentionMobilePanel({
   anchorRef: React.RefObject<HTMLElement | null>;
   children: React.ReactNode;
 }) {
-  /* The portal target: the enclosing vaul drawer when present (so we're
-     inside react-remove-scroll's allowed subtree), else document.body. */
+  /* Keep the portal inside the nearest drawer/dialog interaction and scroll
+     boundary; use document.body for a normal composer. */
   const [container, setContainer] = React.useState<HTMLElement | null>(null);
   /* `bottom` is relative to `container`'s box (the drawer is the
      containing block); `maxHeight` caps the strip. Null until measured
@@ -95,20 +112,27 @@ export function MentionMobilePanel({
     const input = anchorRef.current;
     if (!input || typeof window === 'undefined') return undefined;
 
-    const drawer = input.closest<HTMLElement>('[data-vaul-drawer]');
-    const target = drawer ?? document.body;
+    const layer = input.closest<HTMLElement>('[data-vaul-drawer], [data-lody-dialog-content]');
+    const target = layer ?? document.body;
     setContainer(target);
 
     const measure = () => {
       const composerRect = input.getBoundingClientRect();
-      /* When portaled into the drawer, `bottom` is measured from the
-         drawer's bottom edge (its will-change makes it the fixed
-         containing block); from the viewport bottom otherwise. */
-      const referenceBottom = drawer ? drawer.getBoundingClientRect().bottom : window.innerHeight;
+      /* The positioned modal owns absolute coordinates; the body fallback
+         uses fixed viewport coordinates. */
+      const layerRect = layer?.getBoundingClientRect();
+      const referenceBottom = layerRect?.bottom ?? window.innerHeight;
       const bottom = Math.max(0, referenceBottom - composerRect.top + PANEL_TO_COMPOSER_GAP);
       const maxHeight = Math.min(
         PANEL_MAX_HEIGHT,
-        Math.max(120, composerRect.top - PANEL_TOP_INSET)
+        layerRect
+          ? Math.max(
+              0,
+              composerRect.top -
+                Math.max(PANEL_TOP_INSET, layerRect.top + PANEL_TO_COMPOSER_GAP) -
+                PANEL_TO_COMPOSER_GAP
+            )
+          : Math.max(120, composerRect.top - PANEL_TOP_INSET)
       );
       setMetrics({ bottom, maxHeight });
     };
@@ -116,44 +140,38 @@ export function MentionMobilePanel({
     const raf1 = requestAnimationFrame(measure);
     const raf2 = requestAnimationFrame(() => requestAnimationFrame(measure));
     window.addEventListener('resize', measure);
+    window.addEventListener('scroll', measure, true);
     window.addEventListener('lody:keyboard-resize', measure as EventListener);
     window.visualViewport?.addEventListener('resize', measure);
     window.visualViewport?.addEventListener('scroll', measure);
     const cleanupResizeObserver = observeResizeOnAnimationFrame(input, () => measure());
+    const cleanupLayerObserver = layer ? observeResizeOnAnimationFrame(layer, measure) : undefined;
 
     return () => {
       cancelAnimationFrame(raf1);
       cancelAnimationFrame(raf2);
       window.removeEventListener('resize', measure);
+      window.removeEventListener('scroll', measure, true);
       window.removeEventListener('lody:keyboard-resize', measure as EventListener);
       window.visualViewport?.removeEventListener('resize', measure);
       window.visualViewport?.removeEventListener('scroll', measure);
       cleanupResizeObserver();
+      cleanupLayerObserver?.();
     };
   }, [open, anchorRef]);
 
   if (!open || !container) return null;
 
-  /* Absolute when docked inside the drawer (resolves against the
-     fixed drawer); fixed only for the document.body fallback. */
-  const isInDrawer = container !== document.body;
+  /* Absolute inside a positioned modal; fixed for the body fallback. */
+  const isInModal = container !== document.body;
 
   return createPortal(
-    /* Single scroll container (see the `.mention-mobile-panel
-       .scrollbar-pro` reset in index.css that flattens the menu's inner
-       260px scroller into this one — nested scrollers made touch scroll
-       flaky). */
     <div
       role="listbox"
       aria-orientation="vertical"
-      className={cn(
-        'mention-mobile-panel inset-x-2 z-[60] overflow-y-auto overscroll-contain rounded-2xl',
-        'border border-border/60 bg-popover text-popover-foreground shadow-xl',
-        // Plain fade — never fights vaul's transforms.
-        'animate-in fade-in-0 slide-in-from-bottom-2 duration-150'
-      )}
+      {...withClassName(stylex.props(mentionSurface.surface, styles.panel))}
       style={{
-        position: isInDrawer ? 'absolute' : 'fixed',
+        position: isInModal ? 'absolute' : 'fixed',
         pointerEvents: 'auto',
         // Momentum scroll on iOS.
         WebkitOverflowScrolling: 'touch',

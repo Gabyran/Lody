@@ -1,0 +1,208 @@
+# `src/hooks` — background
+
+Binding rules for this directory live in [AGENTS.md](AGENTS.md); this file keeps
+the reasoning behind them so the rules can stay short. It explains only the hooks
+that carry an invariant — the directory itself is the list of hooks.
+
+## Session submission
+
+`use-session-actions.ts` binds admission, analytics, and Jotai observations to
+`lib/session-submission.ts`. The latter owns the ordinary Promise entry points
+for creation, initial history, continuation, dispatch, and guide. It has no React
+lifetime or second writer. The workspace journal durably accepts the full input before releasing the
+composer, prepares attachments on Send, and serializes same-session submission.
+History and activation are committed locally; synchronization retries in the
+background on startup/reconnect without blocking archive or ordinary exit.
+Archive retains and pauses unfinished attachment drafts; restore resumes them.
+Deletion removes the matching outbox and joins its writes before the tombstone.
+`use-session-preparation` holds an owned warmup lease; attachment takeover cancels
+and joins it. See the [attachment draft Spec](../../../../specs/session-files.md).
+
+| Area                   | Entry point                                                                                | Responsibility                                              |
+| ---------------------- | ------------------------------------------------------------------------------------------ | ----------------------------------------------------------- |
+| Session lifecycle      | [`use-session-actions.ts`](use-session-actions.ts)                                         | Bind operation targets and writes to one workspace runtime. |
+| Workspace catalogs     | [`use-agent-role-schema-reconciliation.ts`](use-agent-role-schema-reconciliation.ts)       | Reconcile owned Roles after matching runtime probes.        |
+| Conversation rendering | [`use-conversation-stream-items.ts`](use-conversation-stream-items.ts), [`use-session-doc.ts`](use-session-doc.ts) | Coordinate the hydration window and history publication. |
+
+## Session lifecycle
+
+`use-session-actions.ts` reads archive, restore, and archived-root deletion targets
+through `WorkspaceRuntime.readSessionOperationTargets`. The runtime owns source
+readiness and the Repo snapshot; the hook checks runtime identity before writing
+through its captured writer. UI projection lag cannot change the target set.
+Later-created Sessions fall outside that snapshot, and accepted writes are not
+rolled back after a later failure. Exact deletion and ordinary Tab close bypass
+discovery. The [relation Spec](../../../../specs/session-relations.md) owns cascade
+and failure semantics.
+
+## Default conversation draft
+
+`use-empty-session-draft.ts` materializes the empty conversation URL sentinel only
+after metadata hydration. It reuses an existing local draft or inserts one before
+selecting its URL; replayed effects must not create duplicate drafts. It never owns
+mobile viewer selection or creates a shared Session.
+
+## Horizontal wheel scrolling
+
+`use-horizontal-wheel-scroll.ts` is the one owner for converting a plain vertical
+mouse wheel into horizontal movement. It uses a non-passive native listener because
+React delegates wheel events passively, and releases native horizontal gestures,
+browser zoom, nested content selected by the caller, and movement at either edge.
+Compact tab strips use this behavior so their delta-mode normalization and edge
+handling cannot drift.
+
+## Workspace membership refresh
+
+The cross-domain Better Auth `updateSession()` action returns `void`: it notifies
+the session store synchronously. Chaining `.then()` crashes after a successful
+ownership transfer, before organization permissions refresh. The membership hook
+therefore calls it directly and separately notifies `$activeOrgSignal`. Its tests
+use the plugin's actual action so a Promise-returning mock cannot hide this error.
+
+## Conversation scrolling
+
+The conversation viewport is owned by the conversation scroll engine
+(`lib/conversation-scroll`, rules in its `AGENTS.md`), which replaced
+`use-sticky-scroll.ts` and the Virtua list after seven fixes to the same blank-pane
+class. Why and how: the
+[scroll-engine note](../../../../.agents/notes/implemented/architecture/2026-09-27-conversation-scroll-engine.md).
+`scroll-debug-log.ts` still keeps a geometry-only timeline
+(`window.__lodyScrollLog.dump()`; console output with
+`localStorage['lody:debug-scroll'] = '1'`), and the engine keeps an always-on cycle
+log (`window.__lodyScrollEngineLog.dump()`).
+
+`use-conversation-stream-items.ts` keys readiness and the visible hydration range by
+`factSource ?? view`. Accepted-history projection wrappers may change while the
+underlying conversation stays the same; resetting on wrapper identity would discard
+an off-tail reading window. A new underlying source, even with the same session id,
+must pass initial loading again. Before the first viewport report, the window is the
+retained tail plus the turn of the engine's restored reading anchor, so a restored
+position opens on real rows instead of placeholders.
+
+The rendered body set belongs to the reading window, the retained 40-turn tail,
+and native text selection. Other consumers may hydrate the same cache for facts,
+search or outline previews, but those bodies remain placeholders in the stream.
+Keeping the entry tail leased prevents the first narrower viewport report from
+making already displayed rows evictable. Selection publishes retained turn IDs
+before a scroll-driven window change; releasing selection removes that exception.
+A loaded user predecessor still supplies assistant configuration even when its
+own rendered row is a placeholder. See the
+[background hydration decision](../../../../.agents/notes/implemented/bug-fix/2026-09-22-background-hydration-render-window.md).
+
+## `useWorkspaceBadge`
+
+`workspaceBadgeAtom` derives an absolute count from complete active-session metadata
+and fresh presence, sharing the sidebar's parent/child activity summary. The elected
+workspace window publishes changes immediately, reasserts the snapshot every 30 seconds,
+and reconciles on focus or visibility restoration. The interval reads the current atom
+and never restarts because the count changed; failed IPC gets another opportunity even
+when the authoritative count stays zero. Main replaces contributions, and removes stale
+ones on renderer crash/reload or window close. See the
+[desktop window contract](../../../../specs/desktop-windows.md).
+
+## `useStableSession`
+
+A single HTTP 401 can be a stale response, so it is verified once against the
+current credential; only a second 401 for the unchanged local token proves the
+session is gone. Native login writes its Capacitor credential and the local token
+non-atomically, so `nativeSignInInProgressAtom` fences the window between the first
+sign-in request and successful page replacement. Timeouts, 5xx, and
+`Client disconnected` are transport failures: signing out on them would eject a user
+whose session is fine.
+
+## Workspace catalog hooks
+
+`use-agent-role-schema-reconciliation.ts` runs from the ready workspace shell's
+window owner. It silently reconciles owned Roles after fresh, matching runtime
+probes, without requiring the Role editor. Repeated startup is idempotent; offline
+targets and failed probes remain retryable. See the
+[reconciliation Spec](../../../../specs/agent-role-schema-reconciliation.md).
+
+The workspace catalog is ONE small document, but a consumer mounts for every visible
+session plus every hidden child tab and side chat, so per-mount leases multiply room
+joins and duplicate row maps for a single list — the same problem
+`use-machine-flock-rows.ts` ref-counts away. The shared snapshot is also
+identity-stable across mounts, which is what lets the selection and composer-menu
+memos built on it actually hit.
+
+Catalog `upsert`/`remove` resolve on durability because a dialog that awaited the
+upload sat open for the whole round trip, and the row it had already written showed
+up in the catalog underneath it — so the open create form reported its own name as
+taken (`resolveAgentRoleNameCheckExemption`) moments before closing on success.
+
+Hiding a private Agent Role in the UI is not an access check, and an availability
+rule copied into a component is one that can drift into a silent fallback; both stay
+in the shared `listAccessibleAgentRoles` / `resolveAgentRoleAvailability` helpers.
+
+## `use-session-doc.ts`
+
+Session history snapshots are state, not an event log. Rendering every intermediate
+ACP/CRDT snapshot can queue minutes of React work behind a long active turn and
+retain every obsolete history tree, so history-only bursts coalesce to the latest
+snapshot once per animation frame while control state stays synchronous.
+
+## `use-app-store-review-prompt.ts`
+
+The stored list of the newest 50 completed-turn timestamps answers the whole
+threshold — if the oldest of the newest N is already outside the window then fewer
+than N are inside it — and its last element doubles as the watermark that makes a
+repeated history scan idempotent. That replaced v1's list of up to 512
+`sessionId:turnId` strings re-serialized on every completed turn, and it is why the
+recording effect can pass the whole outcomes array instead of diffing against a
+per-mount observed set.
+
+Because that watermark is a stored timestamp, no stored time may be in the future:
+turn times come from the agent machine's clock and `nowMs` from the phone's, so a
+stored future value would swallow every genuinely newer turn until real time caught
+up. Future input is deferred rather than lost (the next history update re-scans the
+session), and stored future times are dropped so a phone clock corrected backwards
+heals on the next turn. The scheme under-counts by design: a session opened older
+than the watermark does not backfill, which can never manufacture eligibility.
+
+StoreKit already caps the sheet at three per device per 365 days, so a second rate
+limiter here only makes the prompt unreachable — exactly what v1's active-day and
+72h-any-failure gates did. StoreKit reports nothing back and every gate is
+device-local, so `mobile/app_store_review_prompt_requested` / `_blocked` are the only
+evidence that the path works at all. A candidate turn arrives on every completed
+turn, so an undeduplicated `blocked` event would be among the noisiest in the
+product, while deduplicating on the user alone would let the first gate mask the
+rest.
+
+## Code Collab file-index hooks
+
+Owner-session resources are borrowed from the workspace-owned Effect `ScopedCache`
+so that opening, scanning, subscribing, and joining happen once per session rather
+than once per React mount. A recreated cache resource restarts its local revision
+counter, which is why resource identity is part of provider memoization.
+Local-machine RPC snapshots seed the shared resource before it becomes visible, so
+first paint stays local while later Flock events remain deduplicated.
+
+## `use-safe-area-insets.ts`
+
+`DropdownMenuContent` and `PopoverContent` run this hook even when closed, so a
+session switch mounts hundreds of subscribers. A per-instance `getComputedStyle`
+would force a full-document style recalculation after the commit dirtied style.
+
+## `use-keyboard-navigation.ts`
+
+A session switch renders synchronously for longer than the key repeat interval, so a
+held shortcut would otherwise queue renders nobody sees. The one-navigation-per-
+painted-frame rule is a frame budget, not a time-based debounce.
+
+## `use-lody-live-activity.ts`
+
+`atoms/doc-meta` republishes the session and agent-config arrays once per flushed
+batch, so a cold start reset the 250ms timer before it ever fired while every batch
+still paid for a full summary rebuild — hence the leading-edge throttle on the input,
+anchored to the last emit. The permission candidate is a fresh object per scan, so
+depending on it re-runs the payload memo every render.
+
+The 250ms bridge debounce stays for a different job: a flush lands in the commit
+after the change that requested it, and without the debounce the bridge gets both,
+the stale one marking the alert shown so the fresh one is dropped by the
+already-alerted early return.
+
+`iosLiveActivitiesEnabledAtom` defaults to true, so without the native-shell check
+every desktop build would rebuild a summary it can never show. The activity id is
+derived outside that gate so the disable and unmount paths can still end an activity
+the payload no longer describes.

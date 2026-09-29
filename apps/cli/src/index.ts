@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // MUST stay the first import: it exits with a readable message on the runtimes where
-// the SQLite binding cannot load — Node < 22.14 segfaults rather than throwing, and
+// the SQLite binding cannot load — Node-API < 10 segfaults rather than throwing, and
 // 32-bit ARM has no prebuild. See utils/sqlite-runtime-support.ts.
 import './utils/sqlite-runtime-support';
 import './instrument';
@@ -13,6 +13,7 @@ import { loginCommand } from './commands/login';
 import { logoutCommand } from './commands/logout';
 import { projectCommand } from './commands/project';
 import { sessionCommand } from './commands/session';
+import { scheduleCommand } from './commands/schedule';
 import { syncCommand } from './commands/sync';
 import { workspaceCommand } from './commands/workspace';
 import { agentConfigCommand } from './commands/agent-config';
@@ -25,6 +26,8 @@ import { daemonRunnerCommand } from './commands/daemon-runner';
 import { internalCommand } from './commands/internal';
 import { feedbackCommand } from './commands/feedback';
 import { mcpCommand } from './commands/mcp';
+import { agentRoleCommand } from './commands/discovery';
+import { operationCommand } from './commands/operation';
 import { loadEnv } from './utils/const';
 import { getLogger } from './utils/logger';
 import { registerProcessErrorHandlers, reportError } from './utils/telemetry';
@@ -54,10 +57,13 @@ program.addCommand(startCommand);
 program.addCommand(appCommand);
 program.addCommand(projectCommand);
 program.addCommand(sessionCommand);
+program.addCommand(scheduleCommand);
 program.addCommand(syncCommand);
 program.addCommand(workspaceCommand);
 program.addCommand(agentConfigCommand);
 program.addCommand(mcpCommand);
+program.addCommand(agentRoleCommand);
+program.addCommand(operationCommand);
 program.addCommand(machineCommand);
 program.addCommand(exportCommand);
 program.addCommand(reviewCommand);

@@ -1,5 +1,5 @@
 import { createFileRoute, Navigate, Outlet, useLocation } from '@tanstack/react-router';
-import { lazy, useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useOrganization } from '@/hooks/useOrganization';
 import { useAtomValue, useSetAtom } from 'jotai';
@@ -27,24 +27,22 @@ import {
 } from '@/lib/posthog-analytics';
 import { identifyPostHogUser } from '@/lib/posthog-identity';
 import { scheduleOneSignalTask } from '@/lib/onesignal';
+import { PreloadedMainLayout } from '@/components/preloaded-main-layout';
 import { RouteSuspense } from '@/components/route-suspense';
 import { RouteMessage } from '@/components/route-message';
 import { LoadingPlaceholder } from '@/components/loading-placeholder';
+import { BootShell } from '@/components/boot-shell';
 import { useVisibleMachineMetas } from '@/hooks/use-visible-machine-metas';
 import { useFireOncePerKey } from '@/hooks/use-fire-once';
 import { writeLastAppRoutePath } from '@/lib/last-app-route';
-import { useWorkspaceBadge } from '@/hooks/use-workspace-badge';
 import { type LodyLiveActivityBridge, useLodyLiveActivity } from '@/hooks/use-lody-live-activity';
 import { isNativeIOSAppShell } from '@/lib/native-platform';
 import { isLocalAppPlatform } from '@/lib/app-platform';
 import { useResolvedWorkspaceScope } from '../../hooks/use-resolved-workspace-scope';
+import { WorkspaceSyncStuckReporter } from '@/components/workspace-sync-stuck-reporter';
+import { useBillingOverviewPreload } from '../../hooks/use-billing-overview-preload';
 
 const AUTH_ROUTE_ONESIGNAL_LOGIN_IDLE_TIMEOUT_MS = 10_000;
-
-const LazyMainLayout = lazy(async () => {
-  const module = await import('@/components/main-layout');
-  return { default: module.MainLayout };
-});
 
 function normalizeConvexSiteUrl(rawUrl: string | undefined): string | null {
   const trimmed = rawUrl?.trim();
@@ -76,22 +74,20 @@ function MainLayoutComponent() {
 }
 
 function LocalPlatformLayoutContent({ workspaceName }: { workspaceName: string }) {
-  // Same dock-badge / live-activity wiring as the cloud layout.
-  useWorkspaceBadge();
-  useLodyLiveActivity({ workspaceName });
-
   return (
-    <RouteSuspense>
-      <LazyMainLayout>
-        <AuthedWorkspaceRouteTracker />
-        <Outlet />
-        <ElectronSessionCompletionNotifier />
-        <ElectronMenuHandler />
-        <AppCommands />
-        <CommandPalette />
-        <AutoArchivePrWatcher />
-      </LazyMainLayout>
-    </RouteSuspense>
+    <>
+      {/* Same dock-badge / live-activity wiring as the cloud layout. */}
+      <LodyLiveActivityHost workspaceName={workspaceName} />
+      <WorkspaceSyncStuckReporter />
+      {/* The boot shell holds the window's first frame until the layout chunk
+          arrives, on every route: an empty fallback would blank the window
+          between the static frame and the layout. */}
+      <RouteSuspense fallback={<BootShell />}>
+        <PreloadedMainLayout>
+          <AuthenticatedWorkspaceContent />
+        </PreloadedMainLayout>
+      </RouteSuspense>
+    </>
   );
 }
 
@@ -291,6 +287,7 @@ function CloudMainLayoutComponent({ workspaceName }: { workspaceName: string }) 
   if (!sessionSettled) {
     return (
       <LoadingPlaceholder
+        variant="boot"
         title={t('workspace.route.signingInTitle')}
         description={t('workspace.route.signingInDescription')}
       />
@@ -300,6 +297,7 @@ function CloudMainLayoutComponent({ workspaceName }: { workspaceName: string }) 
   if (isPending || isRetrying) {
     return (
       <LoadingPlaceholder
+        variant="boot"
         title={t('workspace.route.signingInTitle')}
         description={t('workspace.route.signingInDescription')}
       />
@@ -323,7 +321,33 @@ function CloudMainLayoutComponent({ workspaceName }: { workspaceName: string }) 
   return <AuthedLayoutContent hasLocalToken={false} workspaceName={workspaceName} />;
 }
 
+/**
+ * Owns the dock-badge / Live Activity subscriptions (every session, presence and
+ * its clock). A leaf that renders nothing, so their frequent updates re-render
+ * only this component instead of the whole workspace layout.
+ */
+function LodyLiveActivityHost({ workspaceName }: { workspaceName: string }) {
+  useLodyLiveActivity({ workspaceName });
+  return null;
+}
+
 function AuthedLayoutContent({
+  hasLocalToken,
+  workspaceName,
+}: {
+  hasLocalToken: boolean;
+  workspaceName: string;
+}) {
+  return (
+    <>
+      <LodyLiveActivityHost workspaceName={workspaceName} />
+      <WorkspaceSyncStuckReporter />
+      <AuthedLayoutRoutes hasLocalToken={hasLocalToken} workspaceName={workspaceName} />
+    </>
+  );
+}
+
+function AuthedLayoutRoutes({
   hasLocalToken,
   workspaceName,
 }: {
@@ -335,17 +359,14 @@ function AuthedLayoutContent({
     organizations,
     organizationsLoading,
     error: organizationsError,
+    refetchOrganizations,
+    refetchActiveOrganization,
   } = useOrganization({ targetSlug: workspaceName });
   const user = useAtomValue(userAtom);
   const { workspaceId: currentWorkspaceId } = useResolvedWorkspaceScope();
+  useBillingOverviewPreload(user ? currentWorkspaceId : null);
   const [orgSettled, setOrgSettled] = useState(!organizationsLoading);
   const [userSettled, setUserSettled] = useState(Boolean(user) && Boolean(currentWorkspaceId));
-
-  // Push this workspace's owned-by-me unread/waiting counts to the Electron
-  // dock badge. No-op on web. Mounted at the workspace layout so it lives
-  // for the entire authenticated session (one subscriber per window).
-  useWorkspaceBadge();
-  useLodyLiveActivity({ workspaceName });
 
   useEffect(() => {
     if (!organizationsLoading) {
@@ -367,29 +388,22 @@ function AuthedLayoutContent({
     if (!currentWorkspaceId) {
       return (
         <RouteSuspense>
-          <LazyMainLayout workspaceReady={false}>
+          <PreloadedMainLayout workspaceReady={false}>
             <LoadingPlaceholder
               variant="content"
               title={t('workspace.route.switchingTitle')}
               description={t('workspace.route.switchingDescription')}
             />
-          </LazyMainLayout>
+          </PreloadedMainLayout>
         </RouteSuspense>
       );
     }
 
     return (
       <RouteSuspense>
-        <LazyMainLayout>
-          <AuthedWorkspaceRouteTracker />
-          <Outlet />
-          <ElectronSessionCompletionNotifier />
-          <ElectronMenuHandler />
-          <AppCommands />
-          <CommandPalette />
-          <AutoArchivePrWatcher />
-          <WorkspaceCheckoutPendingDialog />
-        </LazyMainLayout>
+        <PreloadedMainLayout>
+          <AuthenticatedWorkspaceContent showWorkspaceCheckout />
+        </PreloadedMainLayout>
       </RouteSuspense>
     );
   }
@@ -397,6 +411,7 @@ function AuthedLayoutContent({
   if (!orgSettled || !userSettled) {
     return (
       <LoadingPlaceholder
+        variant="boot"
         title={t('workspace.route.loadingTitle')}
         description={t('workspace.route.setupLoadingDescription')}
       />
@@ -408,6 +423,10 @@ function AuthedLayoutContent({
       <RouteMessage
         title={t('workspace.route.loadingWorkspacesErrorTitle')}
         description={t('workspace.route.loadingWorkspacesErrorDescription')}
+        onRetry={() => {
+          void refetchOrganizations();
+          void refetchActiveOrganization();
+        }}
       />
     );
   }
@@ -415,6 +434,7 @@ function AuthedLayoutContent({
   if (organizationsLoading) {
     return (
       <LoadingPlaceholder
+        variant="boot"
         title={t('workspace.route.loadingWorkspacesTitle')}
         description={t('workspace.route.loadingWorkspacesDescription')}
       />
@@ -426,6 +446,10 @@ function AuthedLayoutContent({
       <RouteMessage
         title={t('workspace.route.loadingWorkspacesErrorTitle')}
         description={t('workspace.route.loadingWorkspacesErrorDescription')}
+        onRetry={() => {
+          void refetchOrganizations();
+          void refetchActiveOrganization();
+        }}
       />
     );
   }
@@ -437,6 +461,7 @@ function AuthedLayoutContent({
   if (!user || !currentWorkspaceId) {
     return (
       <LoadingPlaceholder
+        variant="boot"
         title={t('workspace.route.loadingTitle')}
         description={t('workspace.route.setupLoadingDescription')}
       />
@@ -445,16 +470,29 @@ function AuthedLayoutContent({
 
   return (
     <RouteSuspense>
-      <LazyMainLayout>
-        <AuthedWorkspaceRouteTracker />
-        <Outlet />
-        <ElectronSessionCompletionNotifier />
-        <ElectronMenuHandler />
-        <CommandPalette />
-        <AutoArchivePrWatcher />
-        <WorkspaceCheckoutPendingDialog />
-      </LazyMainLayout>
+      <PreloadedMainLayout>
+        <AuthenticatedWorkspaceContent showWorkspaceCheckout />
+      </PreloadedMainLayout>
     </RouteSuspense>
+  );
+}
+
+function AuthenticatedWorkspaceContent({
+  showWorkspaceCheckout = false,
+}: {
+  showWorkspaceCheckout?: boolean;
+}) {
+  return (
+    <>
+      <AuthedWorkspaceRouteTracker />
+      <Outlet />
+      <ElectronSessionCompletionNotifier />
+      <ElectronMenuHandler />
+      <AppCommands />
+      <CommandPalette />
+      <AutoArchivePrWatcher />
+      {showWorkspaceCheckout && <WorkspaceCheckoutPendingDialog />}
+    </>
   );
 }
 

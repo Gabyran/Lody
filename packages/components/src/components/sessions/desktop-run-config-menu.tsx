@@ -1,4 +1,5 @@
 import { useMemo, type ReactNode } from 'react';
+import * as stylex from '@stylexjs/stylex';
 import { useAtomValue } from 'jotai';
 import { Bot, Check, ListChecks, LockKeyhole, Monitor, Plus, ShieldAlert, Zap } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
@@ -33,6 +34,7 @@ import {
 } from '@/components/shared/acp-selector-options';
 import type { AcpSessionSelectOption } from '@/components/shared/acp-session-select';
 import type { AgentSelection } from '@/components/shared/agent-selector';
+import { composerSurface as surface } from '@/components/shared/composer-surface';
 import { MenuOptionSearchList } from '@/components/shared/menu-option-search-list';
 import {
   DEEPSEEK_DELEGATION_DISCUSSION_URL,
@@ -48,20 +50,13 @@ import {
 } from '@/lib/composer-agent-roles';
 import { cn } from '@/lib/utils';
 import { useOnlineMachines } from '@/hooks/use-online-machines';
-import { Badge } from '@/ui/badge';
-import { Switch } from '@/ui/switch';
-import { Tooltip, TooltipContent, TooltipTrigger } from '@/ui/tooltip';
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuLabel,
-  DropdownMenuSeparator,
-  DropdownMenuSub,
-  DropdownMenuSubContent,
-  DropdownMenuSubTrigger,
-  DropdownMenuTrigger,
-} from '@/ui/dropdown-menu';
+import { Badge } from '@lody/ui/badge';
+import { Button } from '@lody/ui/button';
+import { Switch } from '@lody/ui/switch';
+import { colors } from '@lody/ui/tokens/colors.stylex';
+import { control, space } from '@lody/ui/tokens/scales.stylex';
+import { Tooltip } from '@lody/ui/tooltip';
+import { Menu } from '@/ui/menu';
 
 /**
  * Desktop composer run-config controls. Two buttons on the composer footer:
@@ -77,55 +72,92 @@ import {
  * Both menus use the app-wide DropdownMenu surface.
  */
 
-/* Option row with a trailing check for the selected value; description under
-   the label when present. Selecting keeps the menu (and submenu) OPEN — same
-   as the Plan/Fast toggle rows — so several run knobs can be adjusted in one
-   visit; the check mark moving is the feedback. Dismiss via Esc/outside. */
+const styles = stylex.create({
+  /** A row's current value, after its name: the secondary label, truncating. */
+  rowValue: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: space[1.5],
+    flexShrink: 1,
+    minWidth: 0,
+    maxWidth: '10rem',
+    marginInlineStart: 'auto',
+    paddingInlineStart: space[4],
+    color: colors.secondaryLabel,
+    fontWeight: 400,
+  },
+  agentValue: { maxWidth: '9rem' },
+  machineName: { maxWidth: '8rem' },
+  roleName: { maxWidth: '11rem' },
+  agentName: { maxWidth: '9rem' },
+  /** The permission trigger is always the compact face: its icon alone. */
+  iconOnly: {
+    flexShrink: 0,
+    width: control.small,
+    gap: 0,
+    paddingInline: 0,
+    justifyContent: 'center',
+  },
+  /* The icon-only trigger's glyph leads the shared column instead of sitting
+     centred: one start step lands its box at the trigger edge + one item pad,
+     the same 16px box a labeled trigger's leading glyph holds. */
+  iconOnlyGlyphLead: { marginInlineStart: space[1] },
+  /** The model keeps its tail when it truncates: `provider/model` loses the prefix. */
+  modelName: { maxWidth: '10rem', direction: 'rtl' },
+  /** The "create a Role" mark at the end of the empty Role row. */
+  createMark: {
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    flexShrink: 0,
+    width: '20px',
+    height: '20px',
+    color: colors.tertiaryLabel,
+  },
+  /** A note in a menu: it wraps, so it is not a row's one line. */
+  note: {
+    display: 'flex',
+    alignItems: 'flex-start',
+    gap: space[2],
+    maxWidth: '18rem',
+    paddingBlock: space[1.5],
+    whiteSpace: 'normal',
+    fontWeight: 400,
+  },
+});
+
+/* Option-only submenus hug the longest label instead of inheriting the
+   200px surface floor. 108px is the floor so a short name is not a sliver;
+   `max-w-80` still caps a long provider list. */
+const COMPACT_OPTION_SUBMENU_CLASS = 'w-max min-w-[108px] max-w-80';
+
+/* Option row with a trailing check. Title only — no description — so submenus
+   stay as compact as the parent. Selecting keeps the menu OPEN. */
 function OptionItem({
   icon,
   label,
-  description,
   selected,
   disabled,
   onSelect,
 }: {
   icon?: ReactNode;
   label: string;
-  description?: string;
   selected: boolean;
   disabled?: boolean;
   onSelect: () => void;
 }) {
   return (
-    <DropdownMenuItem
+    <Menu.Item
       disabled={disabled}
       role="menuitemradio"
       aria-checked={selected}
-      onSelect={(event) => {
-        event.preventDefault();
-        onSelect();
-      }}
-      // Tighter vertical rhythm than the default menu item (py-2): these rows
-      // carry a two-line label + description, so a smaller pad keeps the list
-      // from getting tall enough to overflow.
-      className="items-start gap-2 py-1"
+      closeOnClick={false}
+      onClick={onSelect}
+      icon={icon}
+      endContent={selected ? <Check {...stylex.props(surface.glyph14)} aria-hidden="true" /> : null}
     >
-      {/* Center the icon/check on the label's first line box (text-[0.8rem] +
-          leading-tight = 16px): vertically centered on single-line rows, and
-          hugging the first line when a description wraps below. */}
-      {icon ? <span className="flex h-4 shrink-0 items-center">{icon}</span> : null}
-      <span className="flex min-w-0 flex-1 flex-col gap-0.5">
-        <span className={cn('truncate leading-tight', selected && 'font-medium')}>{label}</span>
-        {description ? (
-          <span className="text-xs leading-snug text-muted-foreground">{description}</span>
-        ) : null}
-      </span>
-      {selected ? (
-        <span className="flex h-4 shrink-0 items-center">
-          <Check className="h-3.5 w-3.5" aria-hidden="true" />
-        </span>
-      ) : null}
-    </DropdownMenuItem>
+      {label}
+    </Menu.Item>
   );
 }
 
@@ -143,13 +175,13 @@ function ValueSubTrigger({
   disabled?: boolean;
 }) {
   return (
-    <DropdownMenuSubTrigger className="pr-1.5" disabled={disabled}>
-      <span className="min-w-0 flex-1 truncate">{label}</span>
-      <span className="ml-4 flex min-w-0 max-w-40 items-center gap-1.5 text-xs text-muted-foreground">
+    <Menu.SubmenuTrigger disabled={disabled}>
+      {label}
+      <span {...stylex.props(styles.rowValue)}>
         {icon}
-        <span className="min-w-0 truncate">{value}</span>
+        <span {...stylex.props(surface.truncate)}>{value}</span>
       </span>
-    </DropdownMenuSubTrigger>
+    </Menu.SubmenuTrigger>
   );
 }
 
@@ -167,40 +199,40 @@ function ToggleItem({
   onToggle: () => void;
 }) {
   return (
-    <DropdownMenuItem
+    <Menu.Item
       role="menuitemcheckbox"
       aria-checked={checked}
-      onSelect={(event) => {
-        event.preventDefault();
-        onToggle();
-      }}
+      closeOnClick={false}
+      onClick={onToggle}
+      icon={icon}
+      endContent={
+        <Switch
+          checked={checked}
+          aria-hidden="true"
+          tabIndex={-1}
+          className="pointer-events-none shrink-0"
+        />
+      }
     >
-      <span
-        className={cn(
-          'flex h-4 w-4 shrink-0 items-center justify-center',
-          checked ? 'text-foreground' : 'text-muted-foreground'
-        )}
-      >
-        {icon}
-      </span>
-      <span className="min-w-0 flex-1 truncate">{label}</span>
-      <Switch
-        checked={checked}
-        aria-hidden="true"
-        tabIndex={-1}
-        className="pointer-events-none ml-4 shrink-0"
-      />
-    </DropdownMenuItem>
+      {label}
+    </Menu.Item>
   );
 }
 
-/* Shared trigger chrome for both footer buttons. */
-const TRIGGER_CLASS = cn(
-  'inline-flex h-7 min-w-0 select-none items-center gap-1.5 rounded-[4px] px-2 text-xs leading-tight',
-  'text-muted-foreground transition-colors hover:bg-muted hover:text-foreground',
-  'data-[state=open]:bg-muted data-[state=open]:text-foreground',
-  'disabled:cursor-default disabled:opacity-70'
-);
+/* Shared trigger chrome for both footer buttons: the composer's ghost trigger.
+   Its compact (label-hidden) face is a 28px square so plus / model / mode share
+   the same hit box and gap. */
+const triggerClassName = (state: { open: boolean }) =>
+  stylex.props(surface.trigger, surface.triggerCompact, state.open && surface.triggerOpen)
+    .className ?? '';
+
+const iconOnlyTriggerClassName = (state: { open: boolean }) =>
+  stylex.props(
+    surface.trigger,
+    surface.triggerCompact,
+    styles.iconOnly,
+    state.open && surface.triggerOpen
+  ).className ?? '';
 
 export type DesktopMachineMenuOption = {
   value: MachineId;
@@ -236,95 +268,76 @@ export function DesktopMachineMenu({
   const isDisabled = disabled || (options.length === 0 && !onAddMachine);
 
   return (
-    <DropdownMenu>
-      <DropdownMenuTrigger asChild>
-        <button
-          type="button"
-          className={cn(
-            'inline-flex h-6 min-w-0 select-none items-center gap-1.5 rounded-md bg-input/60 px-2 dark:bg-foreground/[0.08]',
-            'text-xs font-normal leading-tight text-foreground/80 transition-colors [&_svg]:text-current [&_svg]:opacity-100',
-            'hover:bg-input hover:text-foreground data-[state=open]:bg-input data-[state=open]:text-foreground dark:hover:bg-foreground/[0.12] dark:data-[state=open]:bg-foreground/[0.12]',
-            'disabled:cursor-default disabled:opacity-70'
-          )}
-          disabled={isDisabled}
-          title={disabledReason}
-          aria-label={t('chat.machineSelector.placeholder', 'Machine')}
-        >
-          <Monitor className="h-4 w-4 shrink-0" aria-hidden="true" />
-          <span className="max-w-32 truncate">{label}</span>
-          {selectedIsLocal ? (
-            <Badge variant="secondary" className="shrink-0 px-1.5 py-0 text-[10px]">
-              {t('chat.machineSelector.local', 'Local')}
-            </Badge>
-          ) : null}
-          {selectedOption?.isPrivate ? (
-            <LockKeyhole
-              className="h-3.5 w-3.5 shrink-0 text-muted-foreground"
-              aria-hidden="true"
-            />
-          ) : null}
-        </button>
-      </DropdownMenuTrigger>
-      <DropdownMenuContent
+    <Menu.Root>
+      <Menu.Trigger
+        disabled={isDisabled}
+        title={disabledReason}
+        aria-label={t('chat.machineSelector.placeholder', 'Machine')}
+        render={<Button type="button" variant="secondary" size="mini" />}
+      >
+        <Monitor {...stylex.props(surface.glyph14)} aria-hidden="true" />
+        <span {...stylex.props(surface.truncate, styles.machineName)}>{label}</span>
+        {selectedIsLocal ? <Badge>{t('chat.machineSelector.local', 'Local')}</Badge> : null}
+        {selectedOption?.isPrivate ? (
+          <LockKeyhole {...stylex.props(surface.glyph12, surface.hint)} aria-hidden="true" />
+        ) : null}
+      </Menu.Trigger>
+      <Menu.Content
         side="top"
         align="start"
-        avoidCollisions={false}
+        collisionAvoidance={{ side: 'none', align: 'none', fallbackAxisSide: 'none' }}
         className="min-w-52 max-w-72"
       >
-        <DropdownMenuLabel className="px-2.5 pb-1 pt-1.5 text-[0.68rem] font-medium tracking-wide text-muted-foreground/70">
-          {t('chat.machineSelector.placeholder', 'Machine')}
-        </DropdownMenuLabel>
+        <Menu.GroupLabel>{t('chat.machineSelector.placeholder', 'Machine')}</Menu.GroupLabel>
         {options.map((option) => (
-          <DropdownMenuItem
+          <Menu.Item
             key={option.value}
             disabled={option.disabled}
-            onSelect={() => onChange(option.value)}
+            onClick={() => onChange(option.value)}
+            icon={<Monitor {...stylex.props(surface.glyph16)} aria-hidden="true" />}
+            endContent={
+              option.value === value ? (
+                <Check {...stylex.props(surface.glyph14)} aria-hidden="true" />
+              ) : null
+            }
           >
-            <Monitor className="h-4 w-4 shrink-0 text-muted-foreground" aria-hidden="true" />
-            <span
-              className={cn('min-w-0 flex-1 truncate', option.value === value && 'font-medium')}
-            >
-              {option.label}
-            </span>
+            {option.label}
             {option.value === visibleLocalMachineId ? (
-              <Badge variant="secondary" className="shrink-0 px-1.5 py-0 text-[10px]">
-                {t('chat.machineSelector.local', 'Local')}
-              </Badge>
+              <Badge>{t('chat.machineSelector.local', 'Local')}</Badge>
             ) : null}
             {option.isPrivate ? (
-              <Tooltip delayDuration={250}>
-                <TooltipTrigger asChild>
-                  <span className="inline-flex shrink-0 items-center gap-1 rounded border border-border/70 px-1.5 py-0.5 text-[0.64rem] font-medium text-muted-foreground">
-                    <LockKeyhole className="h-3 w-3" aria-hidden="true" />
-                    {t('sharing.private', 'Private')}
-                  </span>
-                </TooltipTrigger>
-                <TooltipContent side="right" className="max-w-64 text-xs">
+              <Tooltip.Root>
+                <Tooltip.Trigger
+                  delay={250}
+                  render={
+                    <Badge icon={<LockKeyhole size="100%" aria-hidden="true" />}>
+                      {t('sharing.private', 'Private')}
+                    </Badge>
+                  }
+                />
+                <Tooltip.Content side="right" className="max-w-64">
                   {t(
                     'sharing.machinePrivateHelp',
                     'Only you can use this machine. Share it from machine settings so teammates can see its shared projects and conversations.'
                   )}
-                </TooltipContent>
-              </Tooltip>
+                </Tooltip.Content>
+              </Tooltip.Root>
             ) : null}
-            {option.value === value ? (
-              <Check className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
-            ) : null}
-          </DropdownMenuItem>
+          </Menu.Item>
         ))}
         {onAddMachine ? (
           <>
-            {options.length > 0 ? <DropdownMenuSeparator /> : null}
-            <DropdownMenuItem onSelect={onAddMachine}>
-              <Plus className="h-4 w-4 shrink-0 text-muted-foreground" aria-hidden="true" />
-              <span className="min-w-0 flex-1 truncate">
-                {t('machinePairing.addMachine', 'Add machine')}
-              </span>
-            </DropdownMenuItem>
+            {options.length > 0 ? <Menu.Separator /> : null}
+            <Menu.Item
+              onClick={onAddMachine}
+              icon={<Plus {...stylex.props(surface.glyph16)} aria-hidden="true" />}
+            >
+              {t('machinePairing.addMachine', 'Add machine')}
+            </Menu.Item>
           </>
         ) : null}
-      </DropdownMenuContent>
-    </DropdownMenu>
+      </Menu.Content>
+    </Menu.Root>
   );
 }
 
@@ -545,27 +558,25 @@ export function DesktopRunConfigMenu({
   const configFaceParts: ReactNode[] = [];
   if (modelLabel) {
     configFaceParts.push(
-      <span key="model" className="block min-w-0 max-w-40 truncate text-left [direction:rtl]">
+      <span key="model" {...stylex.props(surface.faceText, styles.modelName)}>
         <span dir="ltr">{modelLabel}</span>
       </span>
     );
   }
   if (thinkingLabel) {
     configFaceParts.push(
-      <span key="thinking" className="shrink-0">
+      <span key="thinking" {...stylex.props(surface.faceFixed)}>
         {thinkingLabel}
       </span>
     );
   }
   if (planOn) {
     configFaceParts.push(
-      <ListChecks key="plan" className="h-3.5 w-3.5 shrink-0 text-primary" aria-hidden="true" />
+      <ListChecks key="plan" {...stylex.props(surface.faceLive)} aria-hidden="true" />
     );
   }
   if (fastOn) {
-    configFaceParts.push(
-      <Zap key="fast" className="h-3.5 w-3.5 shrink-0 text-primary" aria-hidden="true" />
-    );
+    configFaceParts.push(<Zap key="fast" {...stylex.props(surface.faceLive)} aria-hidden="true" />);
   }
   /* Permission joins the face ONLY behind a Role, and only one the Role pins:
      otherwise the standalone permission button is showing the same value a step
@@ -588,12 +599,12 @@ export function DesktopRunConfigMenu({
     const warning = classifyPermissionModeFace(permissionFace.value);
     configFaceParts.push(
       warning.kind !== 'hidden' && warning.tone === 'warning' ? (
-        <span key="permission" className="flex shrink-0 items-center gap-1 text-status-warning">
-          <ShieldAlert className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+        <span key="permission" {...stylex.props(surface.faceGroup, surface.faceWarning)}>
+          <ShieldAlert {...stylex.props(surface.glyph14)} aria-hidden="true" />
           {permissionFace.label}
         </span>
       ) : (
-        <span key="permission" className="shrink-0">
+        <span key="permission" {...stylex.props(surface.faceFixed)}>
           {permissionFace.label}
         </span>
       )
@@ -626,19 +637,11 @@ export function DesktopRunConfigMenu({
   if (!hasAnyRow) return null;
 
   const runConfigButtonAriaLabel = t('chat.runConfig.buttonAriaLabel', 'Run configuration');
-  const triggerButton = (
-    <button
-      type="button"
-      className={cn(
-        TRIGGER_CLASS,
-        disabledReason &&
-          'cursor-default opacity-70 hover:bg-transparent hover:text-muted-foreground'
-      )}
-      aria-label={runConfigButtonAriaLabel}
-      aria-disabled={disabledReason ? true : undefined}
-    >
+  /* The face, shared by the menu trigger and the inert (tooltip-only) button. */
+  const triggerFace = (
+    <>
       {selectedRole ? (
-        <span className="shrink-0 text-sm leading-none" aria-hidden="true">
+        <span {...stylex.props(surface.emoji)} aria-hidden="true">
           {getAgentRoleEmoji(selectedRole)}
         </span>
       ) : selectedAgentConfig ? (
@@ -647,318 +650,366 @@ export function DesktopRunConfigMenu({
           agentType={selectedAgentConfig.agentType}
           brandId={selectedAgentConfig.brandId}
           env={selectedAgentConfig.env}
-          className="h-4 w-4 shrink-0"
+          className={stylex.props(surface.glyph16).className}
         />
       ) : fallbackAgent?.cliType && fallbackAgent.agentType ? (
         <AgentIcon
           cliType={fallbackAgent.cliType}
           agentType={fallbackAgent.agentType}
-          className="h-4 w-4 shrink-0"
+          className={stylex.props(surface.glyph16).className}
         />
       ) : (
-        <Bot className="h-4 w-4 shrink-0" aria-hidden="true" />
+        <Bot {...stylex.props(surface.glyph16)} strokeWidth={1.5} aria-hidden="true" />
       )}
       {/* A Role names itself and nothing else: it IS the whole run
           configuration, so its values belong beside the button rather than
           crowding the one thing there is to click. */}
       {selectedRole ? (
-        <span className="block min-w-0 max-w-44 truncate text-left">{selectedRole.name}</span>
+        <span {...stylex.props(surface.faceText, styles.roleName)}>{selectedRole.name}</span>
       ) : (
         <>
           {showAgentNameInTrigger ? (
-            <span className="block min-w-0 max-w-36 truncate text-left">
+            <span {...stylex.props(surface.faceText, styles.agentName)}>
               {selectedAgentConfig?.name ?? emptyAgentLabel ?? agentLabel}
             </span>
           ) : null}
           {withFaceDots(configFaceParts, showAgentNameInTrigger)}
         </>
       )}
-    </button>
+    </>
   );
 
   const menu = (
-    <DropdownMenu>
+    <Menu.Root>
       {disabledReason ? (
-        <Tooltip delayDuration={300}>
+        <Tooltip.Root>
           {/* A native disabled button cannot reliably trigger hover/focus events.
               Keep this focusable but outside DropdownMenuTrigger so it stays inert. */}
-          <TooltipTrigger asChild>{triggerButton}</TooltipTrigger>
-          <TooltipContent side="top">{disabledReason}</TooltipContent>
-        </Tooltip>
-      ) : (
-        <DropdownMenuTrigger asChild>{triggerButton}</DropdownMenuTrigger>
-      )}
-      <DropdownMenuContent align="start" className="min-w-56">
-        {onRecentRunConfigSelect ? (
-          <RecentRunConfigMenuGroup
-            items={recentRunConfigs ?? []}
-            onSelect={onRecentRunConfigSelect}
+          <Tooltip.Trigger
+            delay={300}
+            render={
+              <button
+                type="button"
+                aria-label={runConfigButtonAriaLabel}
+                aria-disabled
+                data-run-config-trigger=""
+                {...stylex.props(surface.trigger, surface.triggerCompact, surface.triggerInert)}
+              >
+                {triggerFace}
+              </button>
+            }
           />
-        ) : null}
-        {/* Above Agent, because a Role ANSWERS every row under it at once. With
+          <Tooltip.Content side="top">{disabledReason}</Tooltip.Content>
+        </Tooltip.Root>
+      ) : (
+        <Menu.Trigger
+          aria-label={runConfigButtonAriaLabel}
+          data-run-config-trigger=""
+          className={triggerClassName}
+          render={<button type="button" />}
+        >
+          {triggerFace}
+        </Menu.Trigger>
+      )}
+      <Menu.Content align="start" className="min-w-60">
+        {/* `menuList` reaches the rows back through the popup's inset, so the
+            surface keeps its edge on the trigger while the rows' leading
+            column lands on the trigger's own — one item pad off that edge. */}
+        <div {...stylex.props(surface.menuList)}>
+          {onRecentRunConfigSelect ? (
+            <RecentRunConfigMenuGroup
+              items={recentRunConfigs ?? []}
+              onSelect={onRecentRunConfigSelect}
+            />
+          ) : null}
+          {/* Above Agent, because a Role ANSWERS every row under it at once. With
             no Role to pick yet the row's value is the way to make one, seeded
             with whatever those rows are set to right now. */}
-        {agentRoles ? (
-          agentRoles.items.length === 0 ? (
-            <DropdownMenuItem
-              disabled={!agentRoles.onCreate}
-              onSelect={() => agentRoles.onCreate?.()}
-            >
-              <span className="min-w-0 flex-1 truncate">{roleLabel}</span>
-              <span className="ml-4 inline-flex shrink-0 items-center gap-1 text-xs text-muted-foreground">
-                <Plus className="h-3.5 w-3.5" aria-hidden="true" />
-                {t('chat.runConfig.roles.create', 'New role')}
-              </span>
-            </DropdownMenuItem>
-          ) : (
-            <DropdownMenuSub>
-              <ValueSubTrigger
-                label={roleLabel}
-                value={selectedRole?.name ?? t('chat.runConfig.roles.none', 'None')}
-                icon={
-                  selectedRole ? (
-                    <span className="text-sm leading-none" aria-hidden="true">
-                      {getAgentRoleEmoji(selectedRole)}
-                    </span>
-                  ) : null
+          {agentRoles ? (
+            agentRoles.items.length === 0 ? (
+              <Menu.Item
+                disabled={!agentRoles.onCreate}
+                onClick={() => agentRoles.onCreate?.()}
+                endContent={
+                  <Tooltip.Root>
+                    <Tooltip.Trigger
+                      delay={300}
+                      render={
+                        <span
+                          {...stylex.props(styles.createMark)}
+                          aria-label={t(
+                            'chat.runConfig.roles.createFromSettings',
+                            'Create role from current settings'
+                          )}
+                        >
+                          <Plus {...stylex.props(surface.glyph14)} aria-hidden="true" />
+                        </span>
+                      }
+                    />
+                    <Tooltip.Content side="right">
+                      {t(
+                        'chat.runConfig.roles.createFromSettings',
+                        'Create role from current settings'
+                      )}
+                    </Tooltip.Content>
+                  </Tooltip.Root>
                 }
-              />
-              <DropdownMenuSubContent className="p-0">
-                <ComposerAgentRolePanel
-                  items={agentRoles.items}
-                  machine={agentRoles.machine}
-                  selectedRoleId={agentRoles.selectedRoleId}
-                  onSelect={agentRoles.onSelect}
-                  onCreate={agentRoles.onCreate}
-                  onEdit={agentRoles.onEdit}
+              >
+                {roleLabel}
+              </Menu.Item>
+            ) : (
+              <Menu.Submenu>
+                <ValueSubTrigger
+                  label={roleLabel}
+                  value={selectedRole?.name ?? t('chat.runConfig.roles.none', 'None')}
+                  icon={
+                    selectedRole ? (
+                      <span {...stylex.props(surface.emoji)} aria-hidden="true">
+                        {getAgentRoleEmoji(selectedRole)}
+                      </span>
+                    ) : null
+                  }
                 />
-              </DropdownMenuSubContent>
-            </DropdownMenuSub>
-          )
-        ) : null}
-        {agentOptions.length > 0 || selectedAgentConfig ? (
-          isAgentLocked ? (
-            <DropdownMenuItem disabled>
-              <span className="min-w-0 flex-1 truncate">{agentLabel}</span>
-              <span className="ml-4 flex max-w-36 items-center gap-1.5 text-xs text-muted-foreground">
-                {selectedAgentConfig ? (
-                  <AgentIcon
-                    cliType={selectedAgentConfig.cliType}
-                    agentType={selectedAgentConfig.agentType}
-                    brandId={selectedAgentConfig.brandId}
-                    env={selectedAgentConfig.env}
-                    className="h-3 w-3 shrink-0"
+                <Menu.Content className="max-w-[min(29.5rem,var(--radix-popper-available-width,29.5rem))] overflow-x-hidden">
+                  <ComposerAgentRolePanel
+                    items={agentRoles.items}
+                    machine={agentRoles.machine}
+                    selectedRoleId={agentRoles.selectedRoleId}
+                    onSelect={agentRoles.onSelect}
+                    onCreate={agentRoles.onCreate}
+                    onEdit={agentRoles.onEdit}
                   />
-                ) : null}
-                <span className="truncate">{selectedAgentConfig?.name}</span>
-              </span>
-            </DropdownMenuItem>
-          ) : (
-            <DropdownMenuSub>
-              <ValueSubTrigger label={agentLabel} value={selectedAgentConfig?.name ?? null} />
-              <DropdownMenuSubContent>
-                {agentOptions.map(({ config, machineName }) => (
-                  <OptionItem
-                    key={`${config.id}:${config.machineId}`}
-                    icon={
-                      <AgentIcon
-                        cliType={config.cliType}
-                        agentType={config.agentType}
-                        brandId={config.brandId}
-                        env={config.env}
-                        className="h-4 w-4 shrink-0"
-                      />
-                    }
-                    label={config.name}
-                    description={allowedMachineIds ? undefined : machineName}
-                    selected={
-                      config.id === agentSelection?.agentId &&
-                      config.machineId === agentSelection.machineId
-                    }
-                    onSelect={() =>
-                      onAgentConfigChange?.({
-                        agentId: config.id as AgentSelection['agentId'],
-                        machineId: config.machineId as MachineId,
-                      })
-                    }
-                  />
-                ))}
-              </DropdownMenuSubContent>
-            </DropdownMenuSub>
-          )
-        ) : null}
+                </Menu.Content>
+              </Menu.Submenu>
+            )
+          ) : null}
+          {agentOptions.length > 0 || selectedAgentConfig ? (
+            isAgentLocked ? (
+              <Menu.Item disabled>
+                {agentLabel}
+                <span {...stylex.props(styles.rowValue, styles.agentValue)}>
+                  {selectedAgentConfig ? (
+                    <AgentIcon
+                      cliType={selectedAgentConfig.cliType}
+                      agentType={selectedAgentConfig.agentType}
+                      brandId={selectedAgentConfig.brandId}
+                      env={selectedAgentConfig.env}
+                      className={stylex.props(surface.glyph12).className}
+                    />
+                  ) : null}
+                  <span {...stylex.props(surface.truncate)}>{selectedAgentConfig?.name}</span>
+                </span>
+              </Menu.Item>
+            ) : (
+              <Menu.Submenu>
+                <ValueSubTrigger label={agentLabel} value={selectedAgentConfig?.name ?? null} />
+                <Menu.Content className={COMPACT_OPTION_SUBMENU_CLASS}>
+                  {agentOptions.map(({ config }) => (
+                    <OptionItem
+                      key={`${config.id}:${config.machineId}`}
+                      icon={
+                        <AgentIcon
+                          cliType={config.cliType}
+                          agentType={config.agentType}
+                          brandId={config.brandId}
+                          env={config.env}
+                          className={stylex.props(surface.glyph16).className}
+                        />
+                      }
+                      label={config.name}
+                      selected={
+                        config.id === agentSelection?.agentId &&
+                        config.machineId === agentSelection.machineId
+                      }
+                      onSelect={() =>
+                        onAgentConfigChange?.({
+                          agentId: config.id as AgentSelection['agentId'],
+                          machineId: config.machineId as MachineId,
+                        })
+                      }
+                    />
+                  ))}
+                </Menu.Content>
+              </Menu.Submenu>
+            )
+          ) : null}
 
-        {extraSelectSelectors.map((selector) => {
-          const selectedValue =
-            (resolveConfigOptionValue(
-              selector,
-              configOptionValues?.[selector.configId]
-            ) as string) ?? null;
-          const selectedLabel =
-            selector.options.find((option) => option.value === selectedValue)?.label ??
-            selectedValue;
-          const locked = selector.configId === 'agent_preset' && agentLocked;
-          return (
-            <DropdownMenuSub key={selector.configId}>
-              <ValueSubTrigger label={selector.label} value={selectedLabel} disabled={locked} />
-              <DropdownMenuSubContent>
-                {selector.options.map((option) => (
+          {extraSelectSelectors.map((selector) => {
+            const selectedValue =
+              (resolveConfigOptionValue(
+                selector,
+                configOptionValues?.[selector.configId]
+              ) as string) ?? null;
+            const selectedLabel =
+              selector.options.find((option) => option.value === selectedValue)?.label ??
+              selectedValue;
+            const locked = selector.configId === 'agent_preset' && agentLocked;
+            return (
+              <Menu.Submenu key={selector.configId}>
+                <ValueSubTrigger label={selector.label} value={selectedLabel} disabled={locked} />
+                <Menu.Content className={COMPACT_OPTION_SUBMENU_CLASS}>
+                  {selector.options.map((option) => (
+                    <OptionItem
+                      key={option.value}
+                      label={option.label}
+                      selected={option.value === selectedValue}
+                      disabled={option.disabled || locked}
+                      onSelect={() =>
+                        onConfigOptionChange?.(
+                          selector.configId,
+                          option.value as AcpConfigOptionValue
+                        )
+                      }
+                    />
+                  ))}
+                </Menu.Content>
+              </Menu.Submenu>
+            );
+          })}
+
+          {modelPickerOptions.length > 0 ? (
+            <Menu.Submenu>
+              <ValueSubTrigger label={modelRowLabel} value={modelLabel} />
+              <Menu.Content
+                // The popup is already a column: holding its own overflow keeps the
+                // search row put while only the options under it scroll.
+                className={cn(COMPACT_OPTION_SUBMENU_CLASS, 'overflow-y-hidden')}
+                // Cap the list so a long model list scrolls inside a compact menu
+                // instead of running the full viewport height. Inline (not a max-h-*
+                // class) so it reliably wins over the base content's max-h, and clamps
+                // to the available height so it never overflows off-screen.
+                style={{
+                  maxHeight: 'min(20rem, var(--available-height, 20rem))',
+                }}
+              >
+                {/* A provider can publish dozens of models; past
+                  `OPTION_SEARCH_MIN_OPTIONS` this list gains a fuzzy search row. */}
+                <MenuOptionSearchList
+                  options={modelPickerOptions}
+                  onSelect={(opt) => handleModelSelect(opt.value)}
+                  searchAnalyticsPicker="model"
+                  searchPlaceholder={modelSearchPlaceholder}
+                  emptyText={modelSearchEmptyLabel}
+                  renderOption={(opt, select) => (
+                    <OptionItem
+                      key={opt.value}
+                      label={opt.label}
+                      selected={opt.value === modelValue}
+                      disabled={opt.disabled}
+                      onSelect={select}
+                    />
+                  )}
+                />
+              </Menu.Content>
+            </Menu.Submenu>
+          ) : null}
+
+          {showDeepSeekDelegationWarning ? (
+            <Menu.Item
+              render={
+                <a
+                  href={DEEPSEEK_DELEGATION_DISCUSSION_URL}
+                  target="_blank"
+                  rel="noreferrer"
+                  onClick={(event) => {
+                    event.preventDefault();
+                    void openExternalUrl(DEEPSEEK_DELEGATION_DISCUSSION_URL);
+                  }}
+                >
+                  <span {...stylex.props(styles.note)}>
+                    <DeepSeekDelegationWarningContent />
+                  </span>
+                </a>
+              }
+            />
+          ) : null}
+
+          {interactionSelector ? (
+            <Menu.Submenu>
+              <ValueSubTrigger label={interactionSelector.label} value={interactionLabel} />
+              <Menu.Content className={COMPACT_OPTION_SUBMENU_CLASS}>
+                {interactionSelector.options.map((opt) => (
                   <OptionItem
-                    key={option.value}
-                    label={option.label}
-                    description={option.description}
-                    selected={option.value === selectedValue}
-                    disabled={option.disabled || locked}
+                    key={opt.value}
+                    label={opt.label}
+                    selected={opt.value === interactionValue}
+                    disabled={opt.disabled}
                     onSelect={() =>
                       onConfigOptionChange?.(
-                        selector.configId,
-                        option.value as AcpConfigOptionValue
+                        interactionSelector.configId,
+                        opt.value as AcpConfigOptionValue
                       )
                     }
                   />
                 ))}
-              </DropdownMenuSubContent>
-            </DropdownMenuSub>
-          );
-        })}
+              </Menu.Content>
+            </Menu.Submenu>
+          ) : null}
 
-        {modelPickerOptions.length > 0 ? (
-          <DropdownMenuSub>
-            <ValueSubTrigger label={modelRowLabel} value={modelLabel} />
-            <DropdownMenuSubContent
-              // `p-0` + column layout so the search row stays put while only the
-              // options scroll; the padding it drops moves onto the list itself.
-              className="flex max-w-80 flex-col overflow-y-hidden p-0"
-              // Cap the list so a long model list scrolls inside a compact menu
-              // instead of running the full viewport height. Inline (not a max-h-*
-              // class) so it reliably wins over the base content's max-h, and clamps
-              // to the available height so it never overflows off-screen.
-              style={{
-                maxHeight: 'min(20rem, var(--radix-dropdown-menu-content-available-height, 20rem))',
-              }}
-            >
-              {/* A provider can publish dozens of models; past
-                  `OPTION_SEARCH_MIN_OPTIONS` this list gains a fuzzy search row. */}
-              <MenuOptionSearchList
-                options={modelPickerOptions}
-                onSelect={(opt) => handleModelSelect(opt.value)}
-                searchPlaceholder={modelSearchPlaceholder}
-                emptyText={modelSearchEmptyLabel}
-                renderOption={(opt, select) => (
+          {thinkingSelector ? (
+            <Menu.Submenu>
+              <ValueSubTrigger label={reasoningLabel} value={thinkingLabel} />
+              <Menu.Content className={COMPACT_OPTION_SUBMENU_CLASS}>
+                {thinkingSelector.options.map((opt) => (
                   <OptionItem
                     key={opt.value}
                     label={opt.label}
-                    description={opt.description}
-                    selected={opt.value === modelValue}
+                    selected={opt.value === thinkingValue}
                     disabled={opt.disabled}
-                    onSelect={select}
+                    onSelect={() =>
+                      onConfigOptionChange?.(
+                        thinkingSelector.configId,
+                        opt.value as AcpConfigOptionValue
+                      )
+                    }
                   />
-                )}
-              />
-            </DropdownMenuSubContent>
-          </DropdownMenuSub>
-        ) : null}
+                ))}
+              </Menu.Content>
+            </Menu.Submenu>
+          ) : null}
 
-        {showDeepSeekDelegationWarning ? (
-          <DropdownMenuItem
-            asChild
-            className="mx-1 my-1 max-w-72 items-start gap-2 whitespace-normal border border-status-warning/30 bg-status-warning/[0.08] px-2.5 py-2 focus:bg-status-warning/[0.14]"
-          >
-            <a
-              href={DEEPSEEK_DELEGATION_DISCUSSION_URL}
-              target="_blank"
-              rel="noreferrer"
-              onClick={(event) => {
-                event.preventDefault();
-                void openExternalUrl(DEEPSEEK_DELEGATION_DISCUSSION_URL);
-              }}
-            >
-              <DeepSeekDelegationWarningContent />
-            </a>
-          </DropdownMenuItem>
-        ) : null}
-
-        {interactionSelector ? (
-          <DropdownMenuSub>
-            <ValueSubTrigger label={interactionSelector.label} value={interactionLabel} />
-            <DropdownMenuSubContent>
-              {interactionSelector.options.map((opt) => (
-                <OptionItem
-                  key={opt.value}
-                  label={opt.label}
-                  description={opt.description}
-                  selected={opt.value === interactionValue}
-                  disabled={opt.disabled}
-                  onSelect={() =>
-                    onConfigOptionChange?.(
-                      interactionSelector.configId,
-                      opt.value as AcpConfigOptionValue
-                    )
-                  }
+          {planSelector || fastSelector ? <Menu.Separator /> : null}
+          {planSelector ? (
+            <ToggleItem
+              icon={
+                <ListChecks
+                  {...stylex.props(surface.glyph16)}
+                  strokeWidth={1.8}
+                  aria-hidden="true"
                 />
-              ))}
-            </DropdownMenuSubContent>
-          </DropdownMenuSub>
-        ) : null}
-
-        {thinkingSelector ? (
-          <DropdownMenuSub>
-            <ValueSubTrigger label={reasoningLabel} value={thinkingLabel} />
-            <DropdownMenuSubContent>
-              {thinkingSelector.options.map((opt) => (
-                <OptionItem
-                  key={opt.value}
-                  label={opt.label}
-                  description={opt.description}
-                  selected={opt.value === thinkingValue}
-                  disabled={opt.disabled}
-                  onSelect={() =>
-                    onConfigOptionChange?.(
-                      thinkingSelector.configId,
-                      opt.value as AcpConfigOptionValue
-                    )
-                  }
-                />
-              ))}
-            </DropdownMenuSubContent>
-          </DropdownMenuSub>
-        ) : null}
-
-        {planSelector || fastSelector ? <DropdownMenuSeparator /> : null}
-        {planSelector ? (
-          <ToggleItem
-            icon={<ListChecks className="h-3.5 w-3.5" strokeWidth={1.8} aria-hidden="true" />}
-            label={planRowLabel}
-            checked={planOn}
-            onToggle={() =>
-              onConfigOptionChange?.(
-                planSelector.configId,
-                togglePlanModeSelectorValue(
-                  planSelector,
-                  configOptionValues?.[planSelector.configId]
+              }
+              label={planRowLabel}
+              checked={planOn}
+              onToggle={() =>
+                onConfigOptionChange?.(
+                  planSelector.configId,
+                  togglePlanModeSelectorValue(
+                    planSelector,
+                    configOptionValues?.[planSelector.configId]
+                  )
                 )
-              )
-            }
-          />
-        ) : null}
-        {fastSelector ? (
-          <ToggleItem
-            icon={<Zap className="h-3.5 w-3.5" strokeWidth={1.8} aria-hidden="true" />}
-            label={fastRowLabel}
-            checked={fastOn}
-            onToggle={() =>
-              onConfigOptionChange?.(
-                fastSelector.configId,
-                toggleOnOffConfigOptionValue(
-                  fastSelector,
-                  configOptionValues?.[fastSelector.configId]
+              }
+            />
+          ) : null}
+          {fastSelector ? (
+            <ToggleItem
+              icon={<Zap {...stylex.props(surface.glyph16)} strokeWidth={1.8} aria-hidden="true" />}
+              label={fastRowLabel}
+              checked={fastOn}
+              onToggle={() =>
+                onConfigOptionChange?.(
+                  fastSelector.configId,
+                  toggleOnOffConfigOptionValue(
+                    fastSelector,
+                    configOptionValues?.[fastSelector.configId]
+                  )
                 )
-              )
-            }
-          />
-        ) : null}
-      </DropdownMenuContent>
-    </DropdownMenu>
+              }
+            />
+          ) : null}
+        </div>
+      </Menu.Content>
+    </Menu.Root>
   );
 
   /* The values a Role pins, stated but INERT: only the Role itself is a control,
@@ -967,9 +1018,7 @@ export function DesktopRunConfigMenu({
      The Detailed tab is where they are changed. */
   const roleConfigFace =
     selectedRole && configFaceParts.length > 0 ? (
-      <span className="pointer-events-none flex min-w-0 select-none items-center gap-1 text-[11px] leading-tight text-muted-foreground/60">
-        {withFaceDots(configFaceParts, false)}
-      </span>
+      <span {...stylex.props(surface.faceInert)}>{withFaceDots(configFaceParts, false)}</span>
     ) : null;
 
   return roleConfigFace ? (
@@ -984,7 +1033,7 @@ export function DesktopRunConfigMenu({
 
 function FaceDot() {
   return (
-    <span aria-hidden="true" className="shrink-0 select-none text-muted-foreground/60">
+    <span aria-hidden="true" {...stylex.props(surface.faceDot)}>
       ·
     </span>
   );
@@ -992,12 +1041,48 @@ function FaceDot() {
 
 /* ── Permission mode (standalone button) ─────────────────────────────── */
 
+function PermissionModeItem({
+  option,
+  selected,
+  onSelect,
+}: {
+  option: AcpSessionSelectOption;
+  selected: boolean;
+  onSelect: () => void;
+}) {
+  const item = (
+    <Menu.Item
+      disabled={option.disabled}
+      onClick={onSelect}
+      icon={permissionModeIcon(option.value)}
+      endContent={selected ? <Check {...stylex.props(surface.glyph14)} aria-hidden="true" /> : null}
+    >
+      {option.label}
+    </Menu.Item>
+  );
+  if (!option.description) return item;
+  return (
+    <Tooltip.Root>
+      <Tooltip.Trigger delay={300} render={item} />
+      <Tooltip.Content side="right" align="start" className="max-w-72 whitespace-pre-wrap">
+        {option.description}
+      </Tooltip.Content>
+    </Tooltip.Root>
+  );
+}
+
 /* Warning-tone modes (full access / skip permissions) share the amber shield
    with the mobile face; everything else keeps its neutral per-mode icon. */
 function permissionModeIcon(modeId: string | null): ReactNode {
   const face = classifyPermissionModeFace(modeId);
   if (face.kind !== 'hidden' && face.tone === 'warning') {
-    return <ShieldAlert className="h-4 w-4 shrink-0 text-status-warning" />;
+    return (
+      <ShieldAlert
+        {...stylex.props(surface.glyph14, surface.faceWarning)}
+        strokeWidth={1.5}
+        aria-hidden="true"
+      />
+    );
   }
   return getPermissionModeIcon(modeId);
 }
@@ -1043,48 +1128,35 @@ export function DesktopPermissionModeButton({
   };
 
   return (
-    <DropdownMenu>
-      <DropdownMenuTrigger asChild>
-        <button type="button" className={TRIGGER_CLASS} aria-label={permissionLabel}>
-          <span className="flex h-4 w-4 shrink-0 items-center justify-center">
-            {permissionModeIcon(value ?? null)}
-          </span>
-          {/* Full mode name on desktop; truncates when the row runs tight. */}
-          <span className="min-w-0 max-w-36 truncate">{label ?? permissionLabel}</span>
-        </button>
-      </DropdownMenuTrigger>
-      <DropdownMenuContent align="start" className="min-w-52 max-w-80">
-        <DropdownMenuLabel className="px-2.5 pb-1 pt-1.5 text-[0.68rem] font-medium tracking-wide text-muted-foreground/70">
-          {permissionLabel}
-        </DropdownMenuLabel>
-        {options.map((opt) => (
-          <DropdownMenuItem
-            key={opt.value}
-            disabled={opt.disabled}
-            onSelect={() => handleSelect(opt.value)}
-            className="items-start"
-          >
-            <span className="mt-0.5 flex h-3.5 w-3.5 shrink-0 items-center justify-center">
-              {permissionModeIcon(opt.value)}
-            </span>
-            <span className="flex min-w-0 flex-1 flex-col">
-              <span className={cn('truncate', opt.value === value && 'font-medium')}>
-                {opt.label}
-              </span>
-              {opt.description ? (
-                // Safety copy (e.g. the Full-access warning) must stay readable
-                // — wrap instead of truncating.
-                <span className="text-xs leading-snug text-muted-foreground">
-                  {opt.description}
-                </span>
-              ) : null}
-            </span>
-            {opt.value === value ? (
-              <Check className="mt-0.5 h-3.5 w-3.5 shrink-0" aria-hidden="true" />
-            ) : null}
-          </DropdownMenuItem>
-        ))}
-      </DropdownMenuContent>
-    </DropdownMenu>
+    <Menu.Root>
+      {/* Icon only: every mode has an icon (warning modes the amber shield),
+          and a label such as "Bypass permissions" took most of the control
+          row. The mode's name is the tooltip and the accessible name. */}
+      <Menu.Trigger
+        aria-label={label ? `${permissionLabel}: ${label}` : permissionLabel}
+        title={label ? `${permissionLabel}: ${label}` : permissionLabel}
+        className={iconOnlyTriggerClassName}
+        render={<button type="button" />}
+      >
+        {/* The icon-only square still leads the shared column: the start
+            margin puts its 16px glyph box where a labeled trigger's leading
+            glyph sits — the same box the rows' icons land on below. */}
+        <span {...stylex.props(surface.glyph, styles.iconOnlyGlyphLead)}>
+          {permissionModeIcon(value ?? null)}
+        </span>
+      </Menu.Trigger>
+      <Menu.Content align="start" className="w-max min-w-44 max-w-64">
+        <div {...stylex.props(surface.menuList)}>
+          {options.map((opt) => (
+            <PermissionModeItem
+              key={opt.value}
+              option={opt}
+              selected={opt.value === value}
+              onSelect={() => handleSelect(opt.value)}
+            />
+          ))}
+        </div>
+      </Menu.Content>
+    </Menu.Root>
   );
 }

@@ -1,7 +1,13 @@
+export * from './preview-control';
 import { CliType } from './ai';
+export * from './history-writer';
+export * from './history-write-schema';
+export * from './session-mirror';
+export * from './session-control-plane';
 import type { AgentConfigId, MachineId, SessionId, TaskId, WorkspaceId } from './ids';
 import { PREVIEW_COMMENT_DOC_PREFIX, getLoroPreviewCommentStreamId } from './preview-comment-types';
 import { TASK_DOC_PREFIX, getLoroTaskStreamId } from './task-types';
+import { SCHEDULE_DOC_PREFIX, getLoroScheduleStreamId } from './schedule-registry';
 import type { StreamsCrdtShardUrlsOptions } from '@loro-dev/streams-crdt';
 
 export type {
@@ -20,13 +26,14 @@ export type {
 } from './ids';
 export * from './message';
 export * from './ai';
+export * from './pi-provider-migration';
 export * from './message-text-spans';
 export * from './deepseek-harness';
 export * from './acp-run-config';
+export * from './acp-startup-budget';
 export * from './image-file-types';
 export * from './custom-acp-command';
 export * from './session-image';
-export * from './task-image';
 export * from './avatar';
 export * from './community';
 export * from './session-file';
@@ -38,11 +45,19 @@ export * from './agent-brand';
 export * from './agent-authentication';
 export * from './acp-authentication-limits';
 export * from './schema';
+export * from './schedule-types';
+export * from './schedule-time';
+export * from './schedule-recurrence';
+export * from './schedule-registry';
+export * from './schedule-schema';
+export * from './schedule-repository';
 export * from './cron-next-fire';
 export * from './scheduled-tasks-from-history';
 export * from './project';
 export * from './time-sync';
 export * from './session-status-machine';
+export * from './session-archive-targets';
+export * from './session-operation-targets';
 export * from './session-orchestration';
 export * from './electron-ipc';
 export * from './loro-server-auth';
@@ -53,6 +68,7 @@ export * from './acp/codex-raw';
 export * from './acp/claude-code-raw';
 export * from './acp/claude-subagent-task';
 export * from './acp/codex-collab-agent-task';
+export * from './acp/devin-subagent-task';
 export * from './acp/schema';
 export * from './acp/tool-call-history';
 export * from './acp/history-apply';
@@ -70,20 +86,18 @@ export * from './streams-snapshot-codec';
 export * from './presence';
 export * from './machine-monitor';
 export * from './machine-protocol-capabilities';
+export * from './pi-extensions';
 export * from './repo-doc-meta';
 export * from './session-input';
 export * from './session-preparation';
 export * from './session-bootstrap';
-export * from './session-delete-queue';
 export * from './goal';
 export * from './comment-reference-format';
 export * from './session-comment-types';
 export * from './preview-comment-types';
 export * from './preview-comment-schema';
 export * from './task-types';
-export * from './task-schema';
 export * from './task-index';
-export * from './task-order';
 export * from './review';
 export * from './review-prompts';
 export * from './preview-comment-mutation';
@@ -399,6 +413,9 @@ export const isCodeCollabFileIndexSignalFlockDocId = (value: string): boolean =>
   return parts.length === 3 && parts[1] === LORO_CODE_COLLAB_FILE_INDEX_SIGNAL_STREAM_SEGMENT;
 };
 export const getLoroStreamIdForDocId = (workspaceId: WorkspaceId, docId: string): string => {
+  if (docId.startsWith(SCHEDULE_DOC_PREFIX)) {
+    return getLoroScheduleStreamId(workspaceId, docId.slice(SCHEDULE_DOC_PREFIX.length));
+  }
   if (docId.startsWith(PREVIEW_COMMENT_DOC_PREFIX)) {
     return getLoroPreviewCommentStreamId(
       workspaceId,
@@ -469,3 +486,8 @@ export interface Attachment {
   uploadedAt: Date;
   uploadedBy: User;
 }
+
+export * from './schedule-control';
+export * from './codex-auth-profile';
+
+export * from './session-acp-identity';

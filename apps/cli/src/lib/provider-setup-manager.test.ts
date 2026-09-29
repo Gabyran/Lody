@@ -21,6 +21,11 @@ import type { LoroRepo } from 'loro-repo';
 
 import type { Logger } from '@/utils/logger';
 import { ProviderSetupManager, type ProviderSetupManagerOptions } from './provider-setup-manager';
+import { mkdtemp, writeFile, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+import * as codexProfiles from '../agent/codex-profile-store';
+import { registerCodexProfileProcess } from '../agent/codex-profile-process-usage';
 
 class FakeMachineFlock implements MachineFlockWritableFlock {
   readonly rows = new Map<string, { key: MachineFlockKey; value: unknown }>();
@@ -51,6 +56,7 @@ const createSilentLogger = (): Logger => ({
   error: () => {},
   success: () => {},
   debug: () => {},
+  trace: () => {},
   setLevel: () => {},
   child: () => createSilentLogger(),
   close: async () => {},
@@ -60,7 +66,10 @@ const setupId = 'setup-1' as AgentConfigId;
 const machineId = 'machine-1' as MachineId;
 const workspaceId = 'workspace-1' as WorkspaceId;
 
-function createSetup(status: ProviderSetupStatus = 'queued'): ProviderSetupTask {
+function createSetup(
+  status: ProviderSetupStatus = 'queued',
+  configOverrides: Partial<ProviderSetupTask['config']> = {}
+): ProviderSetupTask {
   return {
     v: 1,
     id: setupId,
@@ -74,6 +83,7 @@ function createSetup(status: ProviderSetupStatus = 'queued'): ProviderSetupTask 
       agentType: 'codex',
       env: {},
       prompt: '',
+      ...configOverrides,
     },
     status,
     attempt: 1,
@@ -133,6 +143,64 @@ function createHarness(overrides: Partial<ProviderSetupManagerOptions['execution
   return createHarnessForFlock(new FakeMachineFlock(), overrides);
 }
 
+it.each([false, true])(
+  'retries deferred credential cleanup with a bounded timer, stop=%s',
+  async (stopBeforeRetry) => {
+    vi.useFakeTimers();
+    const root = await mkdtemp(path.join(tmpdir(), 'lody-profile-cleanup-test-'));
+    const cleaned = Promise.withResolvers<void>();
+    let credentialPresent = true;
+    const store = new codexProfiles.CodexProfileStore(
+      root,
+      {
+        get: async () => undefined,
+        set: async () => {},
+        delete: async () => {},
+      },
+      async () => {
+        credentialPresent = false;
+        cleaned.resolve();
+      }
+    );
+    const getter = vi.spyOn(codexProfiles, 'getCodexProfileStore').mockReturnValue(store);
+    const { manager } = createHarness();
+    try {
+      const profile = await store.resolve(
+        workspaceId,
+        {
+          ...createSetup().config,
+          codexAuth: {
+            mode: 'chatgpt',
+            profileId: '60a84cb4-50fd-4590-9f69-6055ffef0c57',
+          },
+        },
+        true
+      );
+      if (!profile) throw new Error('Missing synthetic profile');
+      const lease = await registerCodexProfileProcess(profile, { directNative: true });
+      lease.recordNativePid(process.pid);
+      await manager.kick();
+      expect(credentialPresent).toBe(true);
+      expect(vi.getTimerCount()).toBe(1);
+      const proof = path.join(profile.home, '..', 'processes', `${lease.token}.native.json`);
+      await writeFile(proof, JSON.stringify({ nativeExited: true }));
+      if (stopBeforeRetry) manager.stop();
+      await vi.advanceTimersByTimeAsync(30_000);
+      if (!stopBeforeRetry) {
+        await cleaned.promise;
+        await manager.kick();
+      }
+      expect(credentialPresent).toBe(stopBeforeRetry);
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      manager.stop();
+      getter.mockRestore();
+      vi.useRealTimers();
+      await rm(root, { recursive: true, force: true });
+    }
+  }
+);
+
 function seedSetup(flock: MachineFlockWritableFlock, setup = createSetup()): void {
   writeMachineFlockRowToFlock(flock, {
     key: machineFlockKeys.providerSetup(setup.id),
@@ -170,6 +238,72 @@ describe('ProviderSetupManager', () => {
     expect(finalSnapshot).toContain(JSON.stringify(machineFlockKeys.agentConfig(setupId)));
     expect(finalSnapshot).not.toContain(JSON.stringify(machineFlockKeys.providerSetup(setupId)));
     expect(harness.execution.refreshMachineAcpCapabilities).toHaveBeenCalledTimes(1);
+    harness.manager.stop();
+  });
+
+  it.each(['bub', 'dimcode'])('verifies %s without managed downloads', async (agentType) => {
+    const harness = createHarness({
+      getMachineAcpBinaryStatus: async () => {
+        throw new Error('Non-managed builtin must not enter managed runtime preparation');
+      },
+      installMachineAcpBinary: async () => {
+        throw new Error('Non-managed builtin must not enter managed runtime installation');
+      },
+      refreshMachineAcpCapabilities: vi.fn(async () => ({
+        type: 'machine/acp-capabilities-refresh_response' as const,
+        machineId,
+        configId: setupId,
+        cliType: 'builtin' as const,
+        agentType,
+        success: true,
+        modes: [],
+        models: [],
+      })),
+    });
+    seedSetup(harness.flock, createSetup('queued', { name: 'Bub', agentType }));
+
+    await harness.manager.kick();
+
+    expect(readState(harness.flock).config?.agentType).toBe(agentType);
+    expect(readState(harness.flock).setup).toBeUndefined();
+    harness.manager.stop();
+  });
+
+  it.each([
+    ['bub', 'spawn bub ENOENT', 'runtime-unavailable'],
+    [
+      'bub',
+      "Failed to load plugin 'acp-server': No module named 'bub_acp_server'; No such command 'acp'",
+      'runtime-unavailable',
+    ],
+    ['bub', 'ACP handshake timed out', 'verification-failed'],
+    ['dimcode', 'npm package could not be installed', 'verification-failed'],
+    [
+      'dimcode',
+      'Authentication required: Provider credentials are required',
+      'verification-failed',
+    ],
+  ] as const)('keeps failed %s probes unpublished: %s', async (agentType, error, failureCode) => {
+    const harness = createHarness({
+      refreshMachineAcpCapabilities: vi.fn(async () => ({
+        type: 'machine/acp-capabilities-refresh_response' as const,
+        machineId,
+        configId: setupId,
+        cliType: 'builtin' as const,
+        agentType,
+        success: false,
+        error,
+      })),
+    });
+    seedSetup(harness.flock, createSetup('queued', { name: agentType, agentType }));
+
+    await harness.manager.kick();
+
+    expect(readState(harness.flock).config).toBeUndefined();
+    expect(readState(harness.flock).setup).toMatchObject({
+      status: 'failed',
+      failureCode,
+    });
     harness.manager.stop();
   });
 

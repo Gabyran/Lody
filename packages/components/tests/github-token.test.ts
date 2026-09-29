@@ -42,8 +42,49 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  vi.unstubAllGlobals();
   uninstallGitHubTokenPort?.();
   uninstallGitHubTokenPort = undefined;
+});
+
+describe('stable repository identity before operations', () => {
+  it('rejects a renamed/reused name before executing a write, including cached tokens', async () => {
+    invalidateGitHubTokensForWorkspace('identity-test');
+    mockAction.mockResolvedValue({ success: true, token: 'token', tokenSource: 'personal' });
+    const fetch = vi.fn(async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({ id: 101, full_name: 'org/new-name' }),
+    }));
+    vi.stubGlobal('fetch', fetch);
+    const write = vi.fn(async () => 'written');
+    await getGitHubOperationToken('identity-test', 'org/old-name', 'write');
+    await expect(
+      withGitHubOperationTokenRetry('identity-test', 'org/old-name', 'write', write, 101)
+    ).rejects.toMatchObject({ code: 'repository_identity_changed' });
+    expect(fetch).toHaveBeenCalledWith(
+      'https://api.github.com/repos/org/old-name',
+      expect.anything()
+    );
+    expect(write).not.toHaveBeenCalled();
+  });
+  it('runs the operation only after canonical name and numeric ID agree', async () => {
+    invalidateGitHubTokensForWorkspace('identity-test');
+    mockAction.mockResolvedValue({ success: true, token: 'token', tokenSource: 'app' });
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => ({
+        ok: true,
+        status: 200,
+        json: async () => ({ id: 101, full_name: 'Org/New' }),
+      }))
+    );
+    const write = vi.fn(async () => 'written');
+    await expect(
+      withGitHubOperationTokenRetry('identity-test', 'org/new', 'write', write, 101)
+    ).resolves.toBe('written');
+    expect(write).toHaveBeenCalledOnce();
+  });
 });
 
 function deferred<T>() {
@@ -233,6 +274,30 @@ describe('withGitHubOperationTokenRetry', () => {
     expect(first.token).toBe('ghu_cached_personal');
     expect(second.token).toBe('ghu_cached_personal');
     expect(mockAction).toHaveBeenCalledTimes(1);
+  });
+
+  it('retries token minting once when Convex reconnects before returning the action result', async () => {
+    mockAction
+      .mockRejectedValueOnce(new Error('Connection lost while action was in flight'))
+      .mockResolvedValueOnce({
+        success: true,
+        token: 'ghu_reconnected',
+        tokenSource: 'personal',
+        expiresAt: new Date(Date.now() + 3600_000).toISOString(),
+      });
+
+    await expect(getGitHubOperationToken('ws-1', 'owner/repo', 'write')).resolves.toMatchObject({
+      token: 'ghu_reconnected',
+    });
+    expect(mockAction).toHaveBeenCalledTimes(2);
+  });
+
+  it('stops after one reconnect retry when the token action keeps disconnecting', async () => {
+    const error = new Error('Connection lost while action was in flight');
+    mockAction.mockRejectedValue(error);
+
+    await expect(getGitHubOperationToken('ws-1', 'owner/repo', 'write')).rejects.toBe(error);
+    expect(mockAction).toHaveBeenCalledTimes(2);
   });
 
   it('invalidates all cached tokens for a workspace after personal identity changes', async () => {

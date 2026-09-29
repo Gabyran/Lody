@@ -17,14 +17,17 @@ vi.mock('@/lib/auth-bootstrap', () => ({
 import {
   archivedSessionListAtom,
   docMetaCacheReadyAtom,
+  sessionMetaCacheSettledAtomFamily,
   docMetaCacheScopeAtom,
   docMetaSubscriptionAtom,
+  readReadyDocMetaCache,
   agentConfigMetaCacheAtom,
   machineMetaCacheAtom,
   sessionListAtom,
   sessionMetaCacheAtom,
 } from '../src/atoms/doc-meta';
 import { runtimeAtom, type WorkspaceRuntime } from '../src/atoms/runtime';
+import { createDirectWorkspaceWriter } from '../src/providers/workspace-writer-impl';
 
 type RepoWithSyncRunner = LoroRepo & {
   syncRunner: {
@@ -150,6 +153,287 @@ const createRuntime = (repo: LoroRepo): WorkspaceRuntime =>
   }) as WorkspaceRuntime;
 
 describe('docMetaSubscriptionAtom', () => {
+  it('confirms target deletion despite an obsolete read and unrelated missing metadata', async () => {
+    vi.useFakeTimers();
+    const sessionId = 'deleted-while-reading' as SessionId;
+    const docId = getSessionRoomId(sessionId);
+    let finishRead!: (value: { meta: Record<string, unknown> }) => void;
+    class PendingRepo extends CompatRepoDouble {
+      override getDocMeta(id: string) {
+        if (id !== docId) return Promise.resolve(undefined);
+        return new Promise<{ meta: Record<string, unknown> }>((resolve) => {
+          finishRead = resolve;
+        });
+      }
+    }
+    const repo = new PendingRepo([]);
+    const store = createStore();
+    const unmount = store.sub(docMetaSubscriptionAtom, () => {});
+    try {
+      store.set(runtimeAtom, createRuntime(repo as unknown as LoroRepo));
+      await vi.runAllTimersAsync();
+      repo.emit({
+        kind: 'doc-metadata',
+        docId: getMachineRoomId('unrelated' as MachineId),
+        patch: { name: 'Pending' },
+        by: 'live',
+      });
+      repo.emit({ kind: 'doc-metadata', docId, patch: { title: 'Pending' }, by: 'live' });
+      await vi.runAllTimersAsync();
+      expect(store.get(sessionMetaCacheSettledAtomFamily(sessionId))).toBe(false);
+      repo.emit({
+        kind: 'doc-existence-changed',
+        docId,
+        from: 'active',
+        to: 'deleted',
+        by: 'live',
+      });
+      await vi.runAllTimersAsync();
+      expect(store.get(sessionMetaCacheSettledAtomFamily(sessionId))).toBe(true);
+      expect(store.get(sessionMetaCacheAtom)[docId]).toBeUndefined();
+      finishRead({ meta: { id: sessionId, title: 'Obsolete' } });
+      await vi.runAllTimersAsync();
+      expect(store.get(sessionMetaCacheSettledAtomFamily(sessionId))).toBe(true);
+      expect(store.get(sessionMetaCacheAtom)[docId]).toBeUndefined();
+    } finally {
+      unmount();
+      vi.useRealTimers();
+    }
+  });
+
+  it('keeps missing-session decisions pending after a failed read until a later event recovers', async () => {
+    vi.useFakeTimers();
+    const sessionId = 'retry-session' as SessionId;
+    const docId = getSessionRoomId(sessionId);
+    let fail = true;
+    class RetryRepo extends CompatRepoDouble {
+      override async getDocMeta() {
+        if (fail) throw new Error('Synthetic metadata read failure');
+        return { meta: { id: sessionId, title: 'Recovered' } };
+      }
+    }
+    const repo = new RetryRepo([]);
+    const store = createStore();
+    const unmount = store.sub(docMetaSubscriptionAtom, () => {});
+    try {
+      store.set(runtimeAtom, createRuntime(repo as unknown as LoroRepo));
+      await vi.runAllTimersAsync();
+      repo.emit({ kind: 'doc-metadata', docId, patch: { title: 'Recovered' }, by: 'live' });
+      await vi.runAllTimersAsync();
+      expect(store.get(sessionMetaCacheSettledAtomFamily(sessionId))).toBe(false);
+      expect(store.get(sessionMetaCacheAtom)[docId]).toBeUndefined();
+      expect(store.get(sessionMetaCacheSettledAtomFamily('unrelated-missing' as SessionId))).toBe(
+        true
+      );
+      fail = false;
+      repo.emit({ kind: 'doc-metadata', docId, patch: { title: 'Recovered' }, by: 'live' });
+      await vi.runAllTimersAsync();
+      expect(store.get(sessionMetaCacheSettledAtomFamily(sessionId))).toBe(true);
+      expect(store.get(sessionMetaCacheAtom)[docId]?.title).toBe('Recovered');
+    } finally {
+      unmount();
+      vi.useRealTimers();
+    }
+  });
+
+  it('does not conclude absence while a live session is queued or its full metadata is pending', async () => {
+    vi.useFakeTimers();
+    const sessionId = 'arriving-session' as SessionId;
+    const docId = getSessionRoomId(sessionId);
+    let finishRead!: (value: { meta: Record<string, unknown> }) => void;
+    class DelayedRepo extends CompatRepoDouble {
+      override getDocMeta() {
+        return new Promise<{ meta: Record<string, unknown> }>((resolve) => {
+          finishRead = resolve;
+        });
+      }
+    }
+    const repo = new DelayedRepo([]);
+    const store = createStore();
+    const unmount = store.sub(docMetaSubscriptionAtom, () => {});
+    try {
+      store.set(runtimeAtom, createRuntime(repo as unknown as LoroRepo));
+      await vi.runAllTimersAsync();
+      expect(store.get(sessionMetaCacheSettledAtomFamily(sessionId))).toBe(true);
+      repo.emit({ kind: 'doc-metadata', docId, patch: { title: 'Incoming' }, by: 'live' });
+      expect(store.get(docMetaCacheReadyAtom)).toBe(true);
+      expect(store.get(sessionMetaCacheSettledAtomFamily(sessionId))).toBe(false);
+      expect(store.get(sessionMetaCacheSettledAtomFamily('unrelated-missing' as SessionId))).toBe(
+        true
+      );
+      await vi.runAllTimersAsync();
+      expect(store.get(sessionMetaCacheAtom)[docId]).toBeUndefined();
+      expect(store.get(sessionMetaCacheSettledAtomFamily(sessionId))).toBe(false);
+      finishRead({ meta: { id: sessionId, title: 'Incoming' } });
+      await vi.runAllTimersAsync();
+      expect(store.get(sessionMetaCacheSettledAtomFamily(sessionId))).toBe(true);
+      expect(store.get(sessionMetaCacheAtom)[docId]?.title).toBe('Incoming');
+      repo.emit({
+        kind: 'doc-existence-changed',
+        docId,
+        from: 'active',
+        to: 'deleted',
+        by: 'live',
+      });
+      expect(store.get(sessionMetaCacheSettledAtomFamily(sessionId))).toBe(true);
+      await vi.runAllTimersAsync();
+      expect(store.get(sessionMetaCacheSettledAtomFamily(sessionId))).toBe(true);
+      expect(store.get(sessionMetaCacheAtom)[docId]).toBeUndefined();
+      repo.emit({
+        kind: 'doc-existence-changed',
+        docId,
+        from: 'deleted',
+        to: 'active',
+        by: 'live',
+      });
+      await vi.runAllTimersAsync();
+      expect(store.get(sessionMetaCacheSettledAtomFamily(sessionId))).toBe(false);
+      store.set(runtimeAtom, createRuntime(new CompatRepoDouble([]) as unknown as LoroRepo));
+      await vi.runAllTimersAsync();
+      expect(store.get(sessionMetaCacheSettledAtomFamily(sessionId))).toBe(true);
+      finishRead({ meta: { id: sessionId, title: 'Stale completion' } });
+      await vi.runAllTimersAsync();
+      expect(store.get(sessionMetaCacheSettledAtomFamily(sessionId))).toBe(true);
+      expect(store.get(sessionMetaCacheAtom)[docId]).toBeUndefined();
+    } finally {
+      unmount();
+      vi.useRealTimers();
+    }
+  });
+
+  it('writes metadata reads that resolve together once, and keeps unchanged list entries', async () => {
+    const ids = ['batch-a', 'batch-b', 'batch-c'] as SessionId[];
+    const snapshots = new Map(
+      ids.map((id, index) => [
+        getSessionRoomId(id),
+        {
+          meta: {
+            id,
+            title: `Session ${index}`,
+            createdAt: `2026-08-1${index}T00:00:00.000Z`,
+            isArchived: false,
+          },
+        } as Record<string, unknown> | undefined,
+      ])
+    );
+    const repo = new CompatRepoDouble([], snapshots);
+    const store = createStore();
+    const unmount = store.sub(docMetaSubscriptionAtom, () => {});
+    try {
+      store.set(runtimeAtom, createRuntime(repo as unknown as LoroRepo));
+      await flush();
+
+      let cacheWrites = 0;
+      const unsubscribeCache = store.sub(sessionMetaCacheAtom, () => {
+        cacheWrites += 1;
+      });
+      for (const id of ids) {
+        repo.emit({
+          kind: 'doc-existence-changed',
+          docId: getSessionRoomId(id),
+          from: 'missing',
+          to: 'active',
+          by: 'live',
+        });
+      }
+      await flush();
+      await flush();
+      unsubscribeCache();
+
+      expect(cacheWrites).toBe(1);
+      const before = store.get(sessionListAtom);
+      expect(before.map((session) => session.id).sort()).toEqual([...ids].sort());
+
+      repo.emit({
+        kind: 'doc-metadata',
+        docId: getSessionRoomId(ids[0]!),
+        patch: { title: 'Renamed' },
+        by: 'live',
+      });
+      await flush();
+      const after = store.get(sessionListAtom);
+      expect(after).not.toBe(before);
+      for (const id of ids.slice(1)) {
+        expect(after.find((session) => session.id === id)).toBe(
+          before.find((session) => session.id === id)
+        );
+      }
+      expect(after.find((session) => session.id === ids[0])?.title).toBe('Renamed');
+    } finally {
+      unmount();
+    }
+  });
+
+  it('lends the ready projection only to its own runtime repo', async () => {
+    const sessionId = 'lent-session' as SessionId;
+    const docId = getSessionRoomId(sessionId);
+    let finishScan!: () => void;
+    const scanGate = new Promise<void>((resolve) => {
+      finishScan = resolve;
+    });
+    class GatedRepoDouble extends CompatRepoDouble {
+      override async listDoc(): Promise<CompatRepoEntry[]> {
+        await scanGate;
+        return super.listDoc();
+      }
+    }
+    const repo = new GatedRepoDouble([
+      { docId, exists: true, meta: { id: sessionId, title: 'Before', createdAt: '2026-09-23' } },
+    ]);
+    const otherRepo = new CompatRepoDouble([]);
+    const store = createStore();
+    const unmount = store.sub(docMetaSubscriptionAtom, () => {});
+
+    try {
+      store.set(runtimeAtom, createRuntime(repo as unknown as LoroRepo));
+      await flush();
+      // Still bootstrapping: a reader must scan for itself.
+      expect(readReadyDocMetaCache(store, repo as unknown as LoroRepo)).toBeNull();
+
+      finishScan();
+      await flush();
+      repo.emit({ kind: 'doc-metadata', docId, patch: { title: 'Live' }, by: 'live' });
+      await flush();
+
+      expect(readReadyDocMetaCache(store, repo as unknown as LoroRepo)?.sessions[docId]).toEqual(
+        expect.objectContaining({ title: 'Live' })
+      );
+      expect(readReadyDocMetaCache(store, otherRepo as unknown as LoroRepo)).toBeNull();
+    } finally {
+      unmount();
+    }
+  });
+
+  it('records a rejected bootstrap scan on the scope instead of leaving it silently pending', async () => {
+    class FailingScanRepoDouble extends CompatRepoDouble {
+      override async listDoc(): Promise<CompatRepoEntry[]> {
+        throw new TypeError('scan exploded');
+      }
+    }
+    const repo = new FailingScanRepoDouble([]);
+    const store = createStore();
+    const unmount = store.sub(docMetaSubscriptionAtom, () => {});
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    try {
+      const runtime = createRuntime(repo as unknown as LoroRepo);
+      store.set(runtimeAtom, runtime);
+      await flush();
+
+      expect(store.get(docMetaCacheScopeAtom)).toEqual(
+        expect.objectContaining({
+          runtime,
+          ready: false,
+          scanFailure: { errorType: 'TypeError' },
+        })
+      );
+      expect(store.get(docMetaCacheReadyAtom)).toBe(false);
+    } finally {
+      warn.mockRestore();
+      unmount();
+    }
+  });
+
   it('observes archive updates that land while the bootstrap snapshot is being read', async () => {
     const sessionId = 'archived-during-bootstrap' as SessionId;
     const docId = getSessionRoomId(sessionId);
@@ -191,6 +475,54 @@ describe('docMetaSubscriptionAtom', () => {
       expect(store.get(archivedSessionListAtom).map((session) => session.id)).toContain(sessionId);
     } finally {
       unmount();
+    }
+  });
+
+  it('converges shared tab closure across offline replicas without losing lifecycle or concurrent title updates', async () => {
+    const left = (await LoroRepo.create({})) as RepoWithSyncRunner;
+    const right = (await LoroRepo.create({})) as RepoWithSyncRunner;
+    const room = getSessionRoomId('shared-tab' as SessionId);
+    const sync = async (from: LoroRepo, to: RepoWithSyncRunner) => {
+      to.getMeta().importJson(from.getMeta().exportJson());
+      await to.syncRunner.metaHydrationQueue;
+    };
+    try {
+      const writer = createDirectWorkspaceWriter({ repo: left } as never);
+      await left.upsertDocMeta(room, {
+        id: 'shared-tab',
+        title: 'Original',
+        isArchived: false,
+        latestUserMsgId: 'pending',
+      });
+      await sync(left, right);
+      await writer.upsertDocMeta(room, { isTabClosed: true });
+      await right.upsertDocMeta(room, { title: 'Renamed offline' });
+      await sync(left, right);
+      await sync(right, left);
+      expect((await left.getDocMeta(room))?.meta).toMatchObject({
+        isTabClosed: true,
+        title: 'Renamed offline',
+        isArchived: false,
+        latestUserMsgId: 'pending',
+      });
+      expect((await right.getDocMeta(room))?.meta).toEqual((await left.getDocMeta(room))?.meta);
+      // Concurrent explicit close/open writes settle through the existing CRDT,
+      // without choosing a wall-clock winner in the UI.
+      await left.upsertDocMeta(room, { isTabClosed: false });
+      await right.upsertDocMeta(room, { isTabClosed: true });
+      await sync(left, right);
+      await sync(right, left);
+      expect((await right.getDocMeta(room))?.meta).toEqual((await left.getDocMeta(room))?.meta);
+      await writer.upsertDocMeta(room, { isTabClosed: false });
+      await sync(left, right);
+      expect((await right.getDocMeta(room))?.meta).toMatchObject({
+        isTabClosed: false,
+        isArchived: false,
+        latestUserMsgId: 'pending',
+      });
+    } finally {
+      await left.destroy();
+      await right.destroy();
     }
   });
 

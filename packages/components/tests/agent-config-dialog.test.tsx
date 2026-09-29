@@ -3,15 +3,30 @@
 import { act, type ComponentProps } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createRoot, type Root } from 'react-dom/client';
+import { createStore, Provider } from 'jotai';
 import {
   ACP_CAPABILITY_CACHE_VERSION,
   PROVIDER_SETUP_PROTOCOL_VERSION,
   getAcpCapabilityCacheKey,
+  machineFlockKeys,
+  serializeMachineFlockKey,
+  serializeCustomAcpLaunchSpec,
   type AgentConfigId,
   type AgentConfigMeta,
   type MachineId,
   type MachineViewMeta,
+  type MachineFlockScanRow,
+  type WorkspaceId,
 } from '@lody/shared';
+import {
+  cmdCreateProviderSetupAtom,
+  cmdCreateAgentConfigAtom,
+  getAllProviderSetupsAtom,
+  getAllAgentConfigAtom,
+} from '../src/atoms/agents';
+import { setMachineFlockRowsForMachineAtom } from '../src/atoms/machine-flock';
+import { runtimeAtom, type WorkspaceRuntime } from '../src/atoms/runtime';
+import { currentWorkspaceIdAtom, currentWorkspaceSlugAtom } from '../src/atoms/workspace-context';
 import {
   AgentConfigDialog,
   type AgentConfigDialogMode,
@@ -19,11 +34,11 @@ import {
 } from '../src/components/settings/agent-config-dialog';
 import * as machineAuthenticationHook from '../src/hooks/use-machine-acp-authentication';
 import { initI18n } from '../src/i18n';
-import { TooltipProvider } from '../src/ui/tooltip';
+import { Tooltip } from '@lody/ui/tooltip';
 
 const machineId = 'machine-test' as MachineId;
 const claudeConfigId = 'claude-config' as AgentConfigId;
-const codexConfigId = 'codex-config' as AgentConfigId;
+const kimiConfigId = 'kimi-config' as AgentConfigId;
 type RefreshCapabilities = ComponentProps<typeof AgentConfigDialog>['onRefreshCapabilities'];
 
 /** Omits `protocolCapabilities` by default, so the machine reads as legacy. */
@@ -53,14 +68,18 @@ const createMachine = (
   },
 });
 
-const createCodexMachine = (): MachineViewMeta => ({
-  ...createMachine('Codex workstation'),
+/** A machine whose cached capabilities expose title-eligible config options. */
+const createTitleConfigMachine = (): MachineViewMeta => ({
+  ...createMachine('Kimi workstation'),
   acpCapabilities: {
-    [getAcpCapabilityCacheKey(codexConfigId)]: {
+    [getAcpCapabilityCacheKey(kimiConfigId)]: {
       cliType: 'builtin',
-      agentType: 'codex',
+      agentType: 'kimi',
       cacheVersion: ACP_CAPABILITY_CACHE_VERSION,
-      sourceVersion: 'codex@1.0.0',
+      sourceVersion: 'kimi-code@1.0.0',
+      // Builtin Kimi is the one agent the dialog holds to an authoritative
+      // (real runtime probe) cache entry before it renders config selectors.
+      provenance: 'runtime',
       modes: [],
       models: [],
       configOptions: [
@@ -69,10 +88,10 @@ const createCodexMachine = (): MachineViewMeta => ({
           name: 'Model',
           category: 'model',
           type: 'select',
-          currentValue: 'gpt-5.6-sol',
+          currentValue: 'kimi-k2',
           options: [
-            { value: 'gpt-5.6-sol', name: 'GPT-5.6 Sol' },
-            { value: 'gpt-5.6-other', name: 'GPT-5.6 Other' },
+            { value: 'kimi-k2', name: 'Kimi K2' },
+            { value: 'kimi-k2-turbo', name: 'Kimi K2 Turbo' },
           ],
         },
         {
@@ -89,11 +108,28 @@ const createCodexMachine = (): MachineViewMeta => ({
           ],
         },
       ],
+      // The title model's ladder omits `ultra`, so a stored `ultra` effort is
+      // invalid for it and must normalize to the selector's current value.
+      // Codex resolves its ladder through a dedicated branch; every other agent
+      // goes through this map.
+      modelReasoningEfforts: { 'kimi-k2-turbo': ['low', 'medium'] },
       availableCommands: [],
       fetchedAt: Date.now(),
     },
   },
 });
+
+const createBuiltinConfig = (overrides: Partial<AgentConfigMeta> = {}): AgentConfigMeta =>
+  ({
+    id: kimiConfigId,
+    machineId,
+    name: 'Kimi',
+    description: undefined,
+    cliType: 'builtin',
+    agentType: 'kimi',
+    env: {},
+    ...overrides,
+  }) as AgentConfigMeta;
 
 const getOptionButtons = (): HTMLButtonElement[] =>
   Array.from(document.body.querySelectorAll<HTMLButtonElement>('button[role="option"]'));
@@ -130,8 +166,10 @@ const setNativeInputValue = (element: HTMLInputElement, value: string): void => 
 describe('AgentConfigDialog', () => {
   let root: Root | undefined;
   let container: HTMLDivElement | undefined;
+  let store: ReturnType<typeof createStore>;
 
   beforeEach(async () => {
+    store = createStore();
     (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
     await initI18n('en');
     Object.defineProperty(window, 'matchMedia', {
@@ -178,25 +216,331 @@ describe('AgentConfigDialog', () => {
       agentType: 'codex',
       success: true,
     }),
-    onManagedRuntimeSelected?: ComponentProps<typeof AgentConfigDialog>['onManagedRuntimeSelected']
+    onManagedRuntimeSelected?: ComponentProps<typeof AgentConfigDialog>['onManagedRuntimeSelected'],
+    onScanPiExtensions?: ComponentProps<typeof AgentConfigDialog>['onScanPiExtensions']
   ) => {
     await act(async () => {
       root?.render(
-        <TooltipProvider>
-          <AgentConfigDialog
-            open
-            onOpenChange={vi.fn()}
-            mode={mode}
-            machine={machine}
-            onSubmit={onSubmit}
-            onRefreshCapabilities={onRefreshCapabilities}
-            onCheckBinaryStatus={onCheckBinaryStatus}
-            onManagedRuntimeSelected={onManagedRuntimeSelected}
-          />
-        </TooltipProvider>
+        <Provider store={store}>
+          <Tooltip.Provider>
+            <AgentConfigDialog
+              open
+              onOpenChange={vi.fn()}
+              mode={mode}
+              machine={machine}
+              onSubmit={onSubmit}
+              onRefreshCapabilities={onRefreshCapabilities}
+              onCheckBinaryStatus={onCheckBinaryStatus}
+              onManagedRuntimeSelected={onManagedRuntimeSelected}
+              onScanPiExtensions={onScanPiExtensions}
+            />
+          </Tooltip.Provider>
+        </Provider>
       );
     });
   };
+
+  it('preserves managed Codex identity and disables editing on a downgraded machine', async () => {
+    const saved: AgentConfigSubmitPayload[] = [];
+    await renderDialog(
+      {
+        kind: 'edit',
+        config: {
+          id: 'managed-codex' as AgentConfigId,
+          machineId,
+          name: 'Work Codex',
+          cliType: 'builtin',
+          agentType: 'codex',
+          env: {},
+          codexAuth: { mode: 'chatgpt', profileId: '937c8a40-0e27-4d44-9716-0eb60b26a195' },
+        },
+      },
+      createMachine('Old machine'),
+      async (payload) => {
+        saved.push(payload);
+      }
+    );
+    const save = Array.from(document.querySelectorAll('button')).find(
+      (button) => button.textContent === 'Save'
+    );
+    expect(save?.disabled).toBe(true);
+    await act(async () => {
+      save?.click();
+    });
+    expect(saved).toEqual([]);
+  });
+
+  it('shows the immutable account binding without a sign-in action for managed ChatGPT', async () => {
+    await renderDialog(
+      {
+        kind: 'edit',
+        config: {
+          id: 'managed-chatgpt' as AgentConfigId,
+          machineId,
+          name: 'Work Codex',
+          cliType: 'builtin',
+          agentType: 'codex',
+          env: {},
+          codexAuth: { mode: 'chatgpt', profileId: '937c8a40-0e27-4d44-9716-0eb60b26a195' },
+        },
+      },
+      createMachine('Workstation', { codexAuthProfiles: 1 })
+    );
+
+    expect(document.body.textContent).toContain(
+      'This provider is bound to its ChatGPT account. Add a new provider to use another account.'
+    );
+    expect(document.body.textContent).not.toContain('Sign in again');
+  });
+
+  it('keeps API key replacement available when editing a managed Codex endpoint', async () => {
+    await renderDialog(
+      {
+        kind: 'edit',
+        config: {
+          id: 'managed-api-key' as AgentConfigId,
+          machineId,
+          name: 'Relay Codex',
+          cliType: 'builtin',
+          agentType: 'codex',
+          env: {},
+          codexAuth: {
+            mode: 'api-key',
+            profileId: '3e332bd5-96ab-4d35-b9fc-9a965a1be42c',
+            baseUrl: 'https://relay.example.invalid/v1',
+          },
+        },
+      },
+      createMachine('Workstation', { codexAuthProfiles: 1 })
+    );
+
+    expect(
+      Array.from(document.body.querySelectorAll('button')).some(
+        (button) => button.textContent?.trim() === 'Update API Key'
+      )
+    ).toBe(true);
+  });
+
+  it('shows managed Codex endpoint choices only for capable machines and never saves a key in the form', async () => {
+    const saved: AgentConfigSubmitPayload[] = [];
+    await renderDialog(
+      { kind: 'create', initialForm: { name: 'Relay', cliType: 'builtin', agentType: 'codex' } },
+      createMachine('New machine', { codexAuthProfiles: 1, providerSetup: 1 }),
+      async (payload) => {
+        saved.push(payload);
+      }
+    );
+    const custom = Array.from(document.querySelectorAll('[role=tab]')).find(
+      (tab) => tab.textContent === 'Custom API'
+    ) as HTMLElement | undefined;
+    expect(custom).toBeDefined();
+    await act(async () => {
+      custom?.click();
+    });
+    const endpoint = document.querySelector<HTMLInputElement>('#codex-base-url');
+    expect(endpoint?.value).toBe('https://api.openai.com/v1');
+    expect(document.querySelector('input[type=password]')).toBeNull();
+    const create = Array.from(document.querySelectorAll('button')).find(
+      (button) => button.textContent === 'Create'
+    );
+    await act(async () => {
+      create?.click();
+    });
+    expect(saved[0]?.codexAuth).toMatchObject({
+      mode: 'api-key',
+      baseUrl: 'https://api.openai.com/v1',
+    });
+    expect(saved[0]?.env).toEqual({});
+  });
+
+  it('scans Pi without publishing or enabling candidates, then saves only selected paths', async () => {
+    const saved: AgentConfigSubmitPayload[] = [];
+    const mode: AgentConfigDialogMode = {
+      kind: 'edit',
+      config: {
+        id: 'pi-config' as AgentConfigId,
+        machineId,
+        name: 'Pi',
+        cliType: 'builtin',
+        agentType: 'pi',
+        env: {},
+      },
+    };
+    const scan = async () => ({
+      success: true as const,
+      discovery: {
+        version: 1 as const,
+        agentDir: '/fixture/pi',
+        warnings: [],
+        extensions: [{ path: '/fixture/plugin.ts', name: 'Plugin', source: 'directory' as const }],
+      },
+    });
+    await renderDialog(
+      mode,
+      createMachine('Pi machine', { piExtensions: 1 }),
+      vi.fn(async (payload: AgentConfigSubmitPayload) => {
+        saved.push(payload);
+      }),
+      undefined,
+      undefined,
+      undefined,
+      scan
+    );
+    const button = (text: string) =>
+      Array.from(document.querySelectorAll('button')).find((node) => node.textContent === text)!;
+    await act(async () => {
+      button('Scan extensions').click();
+    });
+    const field = document.querySelector('[aria-label="Pi extensions"]')!;
+    expect(field.textContent).toContain('/fixture/pi');
+    expect(field.querySelector('[role="checkbox"]')?.getAttribute('aria-checked')).toBe('false');
+    expect(saved).toEqual([]);
+    await act(async () => {
+      (field.querySelector('[role="checkbox"]') as HTMLButtonElement).click();
+    });
+    await act(async () => {
+      button('Rescan').click();
+    });
+    expect(field.querySelector('[role="checkbox"]')?.getAttribute('aria-checked')).toBe('true');
+    await act(async () => {
+      getPrimaryAction('Save').click();
+    });
+    expect(saved.at(-1)?.runtimeOverrides).toEqual({ piExtensions: ['/fixture/plugin.ts'] });
+    await act(async () => {
+      (field.querySelector('[role="checkbox"]') as HTMLButtonElement).click();
+    });
+    await act(async () => {
+      getPrimaryAction('Save').click();
+    });
+    expect(saved.at(-1)?.runtimeOverrides).toBeUndefined();
+  });
+
+  it('creates a Pi provider with selected extensions through the live-probe path', async () => {
+    const saved: AgentConfigSubmitPayload[] = [];
+    const scan = async () => ({
+      success: true as const,
+      discovery: {
+        version: 1 as const,
+        agentDir: '/fixture/pi',
+        warnings: [],
+        extensions: [{ path: '/fixture/plugin.ts', name: 'Plugin', source: 'directory' as const }],
+      },
+    });
+    await renderDialog(
+      { kind: 'create' },
+      createMachine('Pi machine', {
+        piExtensions: 1,
+        providerSetup: PROVIDER_SETUP_PROTOCOL_VERSION,
+      }),
+      vi.fn(async (payload: AgentConfigSubmitPayload) => {
+        saved.push(payload);
+      }),
+      undefined,
+      async (args) => ({
+        type: 'machine/acp-capabilities-refresh_response' as const,
+        machineId: args.machineId,
+        configId: args.configId,
+        cliType: 'builtin',
+        agentType: 'pi',
+        success: true,
+      }),
+      undefined,
+      scan
+    );
+    const button = (text: string) =>
+      Array.from(document.querySelectorAll('button')).find((node) => node.textContent === text)!;
+    await act(async () => {
+      getOptionByText('Pi').dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    await act(async () => {
+      button('Scan extensions').click();
+    });
+    const field = document.querySelector('[aria-label="Pi extensions"]')!;
+    await act(async () => {
+      (field.querySelector('[role="checkbox"]') as HTMLButtonElement).click();
+    });
+    await act(async () => {
+      getPrimaryAction('Create').click();
+    });
+    await vi.waitFor(() => {
+      expect(saved.at(-1)).toMatchObject({
+        agentType: 'pi',
+        runtimeOverrides: { piExtensions: ['/fixture/plugin.ts'] },
+      });
+    });
+    expect(saved.at(-1)?.backgroundSetup).toBeUndefined();
+  });
+
+  it('ignores an old Pi scan after changing providers and saves a manual path on the new provider', async () => {
+    const machine = createMachine('Pi machine', { piExtensions: 1 });
+    const config: AgentConfigMeta = {
+      id: 'old-pi' as AgentConfigId,
+      machineId,
+      name: 'Pi',
+      cliType: 'builtin',
+      agentType: 'pi',
+      env: {},
+    };
+    let finish!: (
+      result: Awaited<
+        ReturnType<NonNullable<ComponentProps<typeof AgentConfigDialog>['onScanPiExtensions']>>
+      >
+    ) => void;
+    const pending = new Promise<Parameters<typeof finish>[0]>((resolve) => {
+      finish = resolve;
+    });
+    const saved: AgentConfigSubmitPayload[] = [];
+    const submit = vi.fn(async (payload: AgentConfigSubmitPayload) => {
+      saved.push(payload);
+    });
+    await renderDialog(
+      { kind: 'edit', config },
+      machine,
+      submit,
+      undefined,
+      undefined,
+      undefined,
+      () => pending
+    );
+    const button = (text: string) =>
+      Array.from(document.querySelectorAll('button')).find((node) => node.textContent === text)!;
+    await act(async () => {
+      button('Scan extensions').click();
+    });
+    await renderDialog(
+      { kind: 'edit', config: { ...config, id: 'new-pi' as AgentConfigId } },
+      machine,
+      submit
+    );
+    await act(async () => {
+      finish({
+        success: true,
+        discovery: {
+          version: 1,
+          agentDir: '/old/profile',
+          warnings: [],
+          extensions: [{ path: '/old/plugin.ts', name: 'Old plugin', source: 'directory' }],
+        },
+      });
+    });
+    expect(document.body.textContent).not.toContain('Old plugin');
+    await act(async () => {
+      setNativeInputValue(
+        document.querySelector('input[aria-label="Extension path"]')!,
+        ' /fixture/manual.ts '
+      );
+    });
+    await act(async () => {
+      button('Add path').click();
+    });
+    await act(async () => {
+      getPrimaryAction('Save').click();
+    });
+    expect(saved.at(-1)).toMatchObject({
+      id: 'new-pi',
+      runtimeOverrides: { piExtensions: ['/fixture/manual.ts'] },
+    });
+  });
 
   it('does not reset the selected agent type when machine metadata refreshes while creating', async () => {
     const mode: AgentConfigDialogMode = { kind: 'create' };
@@ -225,6 +569,231 @@ describe('AgentConfigDialog', () => {
 
     expect(getSelectedOption()?.textContent).toContain('Custom command');
     expect(document.body.querySelector('#custom-acp-command')).not.toBeNull();
+  });
+
+  it('queues Bub for verification without publishing or probing it from the dialog', async () => {
+    const mode: AgentConfigDialogMode = { kind: 'create' };
+    const onSubmit = vi.fn(async () => {});
+    const onRefreshCapabilities = vi.fn<RefreshCapabilities>(async (args) => ({
+      type: 'machine/acp-capabilities-refresh_response' as const,
+      machineId: args.machineId,
+      configId: args.configId,
+      cliType: 'builtin',
+      agentType: 'bub',
+      success: true,
+    }));
+
+    await renderDialog(
+      mode,
+      createMachine('Workstation', { providerSetup: PROVIDER_SETUP_PROTOCOL_VERSION }),
+      onSubmit,
+      vi.fn(async () => ({ status: 'installed' as const })),
+      onRefreshCapabilities
+    );
+
+    await act(async () => {
+      getOptionByText('Bub').dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    expect(getSelectedOption()?.textContent).toContain('Bub');
+    expect(onSubmit).not.toHaveBeenCalled();
+
+    await act(async () => {
+      getPrimaryAction('Create').dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    await vi.waitFor(() => {
+      expect(onSubmit).toHaveBeenCalledWith(
+        expect.objectContaining({
+          cliType: 'builtin',
+          agentType: 'bub',
+          backgroundSetup: true,
+        })
+      );
+    });
+    expect(onRefreshCapabilities).not.toHaveBeenCalled();
+  });
+
+  it('does not create Bub against a daemon without deferred provider setup', async () => {
+    const onSubmit = vi.fn(async () => {});
+    await renderDialog({ kind: 'create' }, createMachine('Legacy workstation'), onSubmit);
+
+    await act(async () => {
+      getOptionByText('Bub').dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+
+    expect(getPrimaryAction('Create').disabled).toBe(true);
+    expect(
+      document.body.querySelector<HTMLButtonElement>('button[aria-label="Test agent capabilities"]')
+        ?.disabled
+    ).toBe(true);
+    expect(onSubmit).not.toHaveBeenCalled();
+  });
+
+  it.each(['bub', 'dimcode'])('%s setup supports retry and refresh', async (agentType) => {
+    const workspaceId = 'workspace-bub-test' as WorkspaceId;
+    const workspaceSlug = 'workspace-bub-test';
+    const mirrorRows = new Map<string, MachineFlockScanRow>();
+    store.set(runtimeAtom, {
+      workspaceId,
+      workspaceSlug,
+      repo: { openFlockDoc: async () => ({ flock: { scan: () => mirrorRows.values() } }) },
+      writer: {
+        flockRowPut: async (_docId: string, key: MachineFlockScanRow['key'], value: unknown) => {
+          mirrorRows.set(serializeMachineFlockKey(key), { key, value } as MachineFlockScanRow);
+        },
+        flockRowDelete: async (_docId: string, key: MachineFlockScanRow['key']) => {
+          mirrorRows.delete(serializeMachineFlockKey(key));
+        },
+      },
+      getMachineAcpBinaryProgress: () => null,
+      subscribeMachineAcpBinaryProgress: () => () => {},
+    } as unknown as WorkspaceRuntime);
+    store.set(currentWorkspaceIdAtom, workspaceId);
+    store.set(currentWorkspaceSlugAtom, workspaceSlug);
+    const publishRows = () =>
+      store.set(setMachineFlockRowsForMachineAtom, {
+        workspaceId,
+        machineId,
+        rows: Object.fromEntries(mirrorRows),
+      });
+    const onSubmit = async (payload: AgentConfigSubmitPayload) => {
+      const { backgroundSetup, ...fields } = payload;
+      const config = { ...fields, machineId };
+      await store.set(
+        backgroundSetup ? cmdCreateProviderSetupAtom : cmdCreateAgentConfigAtom,
+        config
+      );
+    };
+    const refresh: RefreshCapabilities = vi.fn(async (args) => ({
+      type: 'machine/acp-capabilities-refresh_response',
+      ...args,
+      cliType: 'builtin',
+      agentType,
+      success: true,
+    }));
+    await renderDialog(
+      { kind: 'create', initialForm: { agentType, cliType: 'builtin', name: agentType } },
+      createMachine('Workstation', { providerSetup: PROVIDER_SETUP_PROTOCOL_VERSION }),
+      onSubmit,
+      vi.fn(async () => ({ status: 'installed' as const })),
+      refresh
+    );
+    await act(async () => {
+      document.body
+        .querySelector<HTMLButtonElement>('button[aria-label="Test agent capabilities"]')!
+        .click();
+    });
+    let setup = store.get(getAllProviderSetupsAtom)[0]!;
+    expect(setup.config.agentType).toBe(agentType);
+    expect(store.get(getAllAgentConfigAtom)).toEqual([]);
+    expect(getPrimaryAction('Create').disabled).toBe(true);
+    expect(getOptionByText('Claude').disabled).toBe(true);
+    expect(refresh).not.toHaveBeenCalled();
+
+    const cancelledId = setup.id;
+    await act(async () => {
+      document.body.querySelector<HTMLButtonElement>('button[aria-label="Delete"]')!.click();
+    });
+    expect(store.get(getAllProviderSetupsAtom)).toEqual([]);
+    expect(
+      mirrorRows.has(
+        serializeMachineFlockKey(machineFlockKeys.providerSetupCancellation(cancelledId))
+      )
+    ).toBe(true);
+    expect(getOptionByText('Claude').disabled).toBe(false);
+    await act(async () => {
+      document.body
+        .querySelector<HTMLButtonElement>('button[aria-label="Test agent capabilities"]')!
+        .click();
+    });
+    setup = store.get(getAllProviderSetupsAtom)[0]!;
+    expect(setup.id).not.toBe(cancelledId);
+
+    await act(async () => {
+      const key = machineFlockKeys.providerSetup(setup.id);
+      mirrorRows.set(serializeMachineFlockKey(key), {
+        key,
+        value: {
+          ...setup,
+          status: 'failed',
+          failureCode: 'runtime-unavailable',
+        },
+      });
+      publishRows();
+    });
+    if (agentType === 'bub') {
+      expect(document.body.textContent).toContain('Bub or its ACP server is not installed');
+      expect(document.body.textContent).toContain(
+        'curl -fsSL https://bub.build/install.sh | bash -- --preset acp'
+      );
+      expect(document.body.textContent).toContain('Open install guide');
+    } else {
+      expect(document.body.textContent).toContain(
+        'This runtime is not available on the target machine.'
+      );
+      expect(document.body.textContent).not.toContain('Open install guide');
+    }
+    await act(async () => {
+      getPrimaryAction('Retry').click();
+    });
+    expect(store.get(getAllProviderSetupsAtom)[0]).toMatchObject({
+      status: 'queued',
+      attempt: 2,
+    });
+    expect(document.body.textContent).not.toContain('Install it in one step:');
+
+    await act(async () => {
+      mirrorRows.delete(serializeMachineFlockKey(machineFlockKeys.providerSetup(setup.id)));
+      const key = machineFlockKeys.agentConfig(setup.id);
+      mirrorRows.set(serializeMachineFlockKey(key), { key, value: setup.config });
+      publishRows();
+    });
+    expect(getPrimaryAction('Save').disabled).toBe(false);
+    expect(document.body.querySelector('#agent-config-name')?.closest('[hidden]')).toBeNull();
+    await act(async () => {
+      document.body
+        .querySelector<HTMLButtonElement>('button[aria-label="Refresh agent capabilities"]')!
+        .click();
+    });
+    expect(document.body.textContent).toContain('Ready');
+    expect(store.get(getAllProviderSetupsAtom)).toEqual([]);
+    expect(store.get(getAllAgentConfigAtom).map((config) => config.id)).toEqual([setup.id]);
+    expect(refresh).toHaveBeenCalledWith({ machineId, configId: setup.id });
+  });
+
+  it('offers installation guidance after an existing Bub refresh fails and allows retry', async () => {
+    let installed = false;
+    const refresh: RefreshCapabilities = async (args) => ({
+      type: 'machine/acp-capabilities-refresh_response',
+      ...args,
+      cliType: 'builtin',
+      agentType: 'bub',
+      success: installed,
+      ...(installed ? {} : { error: 'spawn bub ENOENT' }),
+    });
+    await renderDialog(
+      { kind: 'edit', config: createBuiltinConfig({ agentType: 'bub', name: 'Bub' }) },
+      createMachine('Workstation'),
+      vi.fn(async () => {}),
+      vi.fn(async () => ({ status: 'installed' as const })),
+      refresh
+    );
+    await act(async () => {
+      document.body
+        .querySelector<HTMLButtonElement>('button[aria-label="Test agent capabilities"]')!
+        .click();
+    });
+    expect(document.body.textContent).toContain('spawn bub ENOENT');
+    expect(document.body.textContent).toContain('Install it in one step:');
+    installed = true;
+    await act(async () => {
+      document.body
+        .querySelector<HTMLButtonElement>('button[aria-label="Retry capability probe"]')!
+        .click();
+    });
+    expect(document.body.textContent).not.toContain('Install it in one step:');
+    expect(
+      document.body.querySelector('button[aria-label="Refresh agent capabilities"]')
+    ).not.toBeNull();
   });
 
   it('reports the selected managed runtime so onboarding can prioritize it', async () => {
@@ -264,10 +833,15 @@ describe('AgentConfigDialog', () => {
   };
 
   const selectTab = async (name: string): Promise<void> => {
+    // A whole press, not just its first half: the strip is Base UI's now and a
+    // tab is taken on the click, while Radix took it on the mousedown.
     await act(async () => {
-      getTabByName(name).dispatchEvent(
-        new MouseEvent('mousedown', { bubbles: true, cancelable: true, button: 0 })
-      );
+      const tab = getTabByName(name);
+      const press = { bubbles: true, cancelable: true, button: 0 };
+      tab.dispatchEvent(new MouseEvent('mousedown', press));
+      tab.focus();
+      tab.dispatchEvent(new MouseEvent('mouseup', press));
+      tab.click();
     });
   };
 
@@ -279,7 +853,7 @@ describe('AgentConfigDialog', () => {
     return input;
   };
 
-  const getPrimaryAction = (label: 'Create' | 'Save'): HTMLButtonElement => {
+  function getPrimaryAction(label: 'Create' | 'Save' | 'Retry'): HTMLButtonElement {
     const button = Array.from(document.body.querySelectorAll('button')).find(
       (candidate) => candidate.textContent?.trim() === label
     );
@@ -287,7 +861,7 @@ describe('AgentConfigDialog', () => {
       throw new Error(`Expected ${label} button`);
     }
     return button;
-  };
+  }
 
   const openAdditionalEnvSection = async (): Promise<HTMLTextAreaElement> => {
     const environmentSection = Array.from(document.body.querySelectorAll('button')).find((button) =>
@@ -382,16 +956,18 @@ describe('AgentConfigDialog', () => {
       createButton.dispatchEvent(new MouseEvent('click', { bubbles: true }));
     });
 
-    expect(onSubmit).toHaveBeenCalledWith(
-      expect.objectContaining({
-        cliType: 'builtin',
-        agentType: 'deepseek',
-        env: {
-          DEEPSEEK_API_KEY: 'sk-deepseek-test',
-          DEEPSEEK_BASE_URL: 'https://api.deepseek.com',
-        },
-      })
-    );
+    await vi.waitFor(() => {
+      expect(onSubmit).toHaveBeenCalledWith(
+        expect.objectContaining({
+          cliType: 'builtin',
+          agentType: 'deepseek',
+          env: {
+            DEEPSEEK_API_KEY: 'sk-deepseek-test',
+            DEEPSEEK_BASE_URL: 'https://api.deepseek.com',
+          },
+        })
+      );
+    });
   });
 
   it('requires a valid custom DeepSeek endpoint and saves the trimmed URL as-is', async () => {
@@ -413,6 +989,10 @@ describe('AgentConfigDialog', () => {
 
     const endpointInput = getVisibleDeepSeekEndpointInput();
     expect(endpointInput).not.toBeNull();
+    expect(document.body.querySelector('#deepseek-models')).toBeNull();
+    expect(document.body.textContent).toContain(
+      'Available models are discovered automatically from the endpoint when this provider is verified.'
+    );
     await act(async () => {
       setNativeInputValue(endpointInput!, 'not-a-url');
     });
@@ -432,16 +1012,18 @@ describe('AgentConfigDialog', () => {
       createButton.dispatchEvent(new MouseEvent('click', { bubbles: true }));
     });
 
-    expect(onSubmit).toHaveBeenCalledWith(
-      expect.objectContaining({
-        cliType: 'builtin',
-        agentType: 'deepseek',
-        env: {
-          DEEPSEEK_API_KEY: 'sk-deepseek-test',
-          DEEPSEEK_BASE_URL: 'https://llm.example.com/open/v1',
-        },
-      })
-    );
+    await vi.waitFor(() => {
+      expect(onSubmit).toHaveBeenCalledWith(
+        expect.objectContaining({
+          cliType: 'builtin',
+          agentType: 'deepseek',
+          env: {
+            DEEPSEEK_API_KEY: 'sk-deepseek-test',
+            DEEPSEEK_BASE_URL: 'https://llm.example.com/open/v1',
+          },
+        })
+      );
+    });
   });
 
   it.each([
@@ -472,10 +1054,11 @@ describe('AgentConfigDialog', () => {
     );
   });
 
-  it('opens the custom DeepSeek tab and fills a stored non-official endpoint', async () => {
+  it('opens the custom DeepSeek tab, fills its endpoint, and drops the legacy model override', async () => {
     await renderDeepSeekEdit({
       DEEPSEEK_API_KEY: 'sk-old',
       DEEPSEEK_BASE_URL: 'https://llm.example.com/open',
+      ACP_EXTENSION_DSH_MODELS: '["gateway-model","reasoning-model"]',
     });
 
     expect(getTabByName('Custom Endpoint').getAttribute('aria-selected')).toBe('true');
@@ -483,6 +1066,7 @@ describe('AgentConfigDialog', () => {
     expect(document.body.querySelector<HTMLInputElement>('#deepseek-api-key')?.value).toBe(
       'sk-old'
     );
+    expect(document.body.querySelector('#deepseek-models')).toBeNull();
   });
 
   it('keeps DeepSeek key and custom endpoint drafts when switching tabs, and official save drops the custom URL', async () => {
@@ -547,6 +1131,7 @@ describe('AgentConfigDialog', () => {
         [
           'DEEPSEEK_API_KEY=sk-from-textarea',
           'DEEPSEEK_BASE_URL=https://evil.example.com',
+          'ACP_EXTENSION_DSH_MODELS=["evil-model"]',
           'EXTRA_FLAG=1',
         ].join('\n')
       );
@@ -554,6 +1139,7 @@ describe('AgentConfigDialog', () => {
     expect(envTextArea.value).toContain('EXTRA_FLAG=1');
     expect(envTextArea.value).not.toContain('DEEPSEEK_API_KEY');
     expect(envTextArea.value).not.toContain('DEEPSEEK_BASE_URL');
+    expect(envTextArea.value).not.toContain('ACP_EXTENSION_DSH_MODELS');
 
     await act(async () => {
       getPrimaryAction('Create').dispatchEvent(new MouseEvent('click', { bubbles: true }));
@@ -568,37 +1154,6 @@ describe('AgentConfigDialog', () => {
         },
       })
     );
-  });
-
-  it('keeps the draft config id stable when create mode props are recreated', async () => {
-    const onSubmit = vi.fn(async (_payload: AgentConfigSubmitPayload) => {});
-    const clickSave = async () => {
-      const createButton = Array.from(document.body.querySelectorAll('button')).find(
-        (button) => button.textContent?.trim() === 'Create'
-      );
-      await act(async () => {
-        createButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
-      });
-    };
-
-    await renderDialog(
-      { kind: 'create', initialForm: { name: 'Claude' } },
-      createMachine('Workstation'),
-      onSubmit
-    );
-    await clickSave();
-    await vi.waitFor(() => expect(onSubmit).toHaveBeenCalled());
-    const firstId = onSubmit.mock.calls[0]?.[0].id;
-
-    await renderDialog(
-      { kind: 'create', initialForm: { name: 'Claude' } },
-      createMachine('Workstation refreshed'),
-      onSubmit
-    );
-    await clickSave();
-    await vi.waitFor(() => expect(onSubmit).toHaveBeenCalled());
-
-    expect(onSubmit.mock.calls.every(([payload]) => payload.id === firstId)).toBe(true);
   });
 
   it('shows the managed Kimi Node requirement before create', async () => {
@@ -1000,25 +1555,144 @@ describe('AgentConfigDialog', () => {
     expect(findSignInAgainButton()).toBeUndefined();
   });
 
+  // Claude, Codex and Grok generate their own title over ACP, so the setting is
+  // obsolete for them. Kimi keeps it (covered by the normalization test below).
+  it.each(['claude', 'codex', 'grok'])(
+    'hides the title generation section for builtin %s',
+    async (agentType) => {
+      await renderDialog(
+        { kind: 'edit', config: createBuiltinConfig({ name: 'ACP-owned', agentType }) },
+        createTitleConfigMachine()
+      );
+
+      expect(document.body.textContent).not.toContain('Title generation');
+    }
+  );
+
+  it.each([true, false])(
+    'uses advertised title ownership in settings: %s',
+    async (sessionTitle) => {
+      const machine = createTitleConfigMachine();
+      const entry = machine.acpCapabilities?.[getAcpCapabilityCacheKey(kimiConfigId)];
+      if (!entry) throw new Error('Missing capability fixture');
+      entry.sessionTitle = sessionTitle;
+      await renderDialog({ kind: 'edit', config: createBuiltinConfig() }, machine);
+      expect(document.body.textContent?.includes('Title generation')).toBe(!sessionTitle);
+    }
+  );
+
+  it.each([true, false])(
+    'only hides custom title settings for the matching command: %s',
+    async (matches) => {
+      const customAcp = { command: 'title-agent', args: ['--acp'] };
+      const machine = createTitleConfigMachine();
+      const entry = machine.acpCapabilities?.[getAcpCapabilityCacheKey(kimiConfigId)];
+      if (!entry) throw new Error('Missing capability fixture');
+      Object.assign(entry, {
+        cliType: 'custom',
+        agentType: 'custom-title',
+        sessionTitle: true,
+        sourceVersion: `custom:${serializeCustomAcpLaunchSpec(matches ? customAcp : { command: 'other-agent' })}`,
+      });
+      await renderDialog(
+        {
+          kind: 'edit',
+          config: createBuiltinConfig({
+            cliType: 'custom',
+            agentType: 'custom-title',
+            customAcp,
+          }),
+        },
+        machine
+      );
+      expect(document.body.textContent?.includes('Title generation')).toBe(!matches);
+    }
+  );
+
+  it('shows a test hint while idle and updates title options in the open dialog after testing', async () => {
+    const mode: AgentConfigDialogMode = { kind: 'edit', config: createBuiltinConfig() };
+    const onSubmit = vi.fn(async () => {});
+    let finishProbe!: (response: Awaited<ReturnType<RefreshCapabilities>>) => void;
+    const onRefreshCapabilities: RefreshCapabilities = () =>
+      new Promise((resolve) => {
+        finishProbe = resolve;
+      });
+    const onCheckBinaryStatus = vi.fn(async () => ({ status: 'installed' as const }));
+    const renderMachine = (machine: MachineViewMeta) =>
+      renderDialog(mode, machine, onSubmit, onCheckBinaryStatus, onRefreshCapabilities);
+
+    await renderMachine(createMachine('Workstation'));
+    expect(document.body.textContent).toContain('Click Test to refresh available options.');
+    expect(document.body.textContent).not.toContain('Probing capabilities…');
+
+    await act(async () => {
+      document.body
+        .querySelector<HTMLButtonElement>('button[aria-label="Test agent capabilities"]')!
+        .click();
+    });
+    expect(document.body.textContent).toContain('Probing capabilities…');
+    expect(document.body.textContent).not.toContain('Click Test to refresh available options.');
+
+    // The settings owner supplies a fresh Machine row without replacing dialog mode.
+    await renderMachine(createTitleConfigMachine());
+    await act(async () => {
+      finishProbe({
+        type: 'machine/acp-capabilities-refresh_response',
+        machineId,
+        configId: kimiConfigId,
+        cliType: 'builtin',
+        agentType: 'kimi',
+        success: true,
+      });
+    });
+    expect(document.body.textContent).toContain('Kimi K2');
+    expect(document.body.textContent).not.toContain('Probing capabilities…');
+    await act(async () => {
+      Array.from(document.body.querySelectorAll('button'))
+        .find((button) => button.textContent?.trim() === 'Save')!
+        .click();
+    });
+    expect(onSubmit).toHaveBeenCalledWith(
+      expect.objectContaining({
+        titleGeneration: expect.objectContaining({
+          configOptionValues: expect.objectContaining({ model: expect.any(String) }),
+        }),
+      })
+    );
+  });
+
+  it('returns to the test hint after a failed capability probe', async () => {
+    await renderDialog(
+      { kind: 'edit', config: createBuiltinConfig() },
+      createMachine('Workstation'),
+      undefined,
+      undefined,
+      async () => {
+        throw new Error('Agent unavailable');
+      }
+    );
+    await act(async () => {
+      document.body
+        .querySelector<HTMLButtonElement>('button[aria-label="Test agent capabilities"]')!
+        .click();
+    });
+    expect(document.body.textContent).toContain('Agent unavailable');
+    expect(document.body.textContent).toContain('Click Test to refresh available options.');
+    expect(document.body.textContent).not.toContain('Probing capabilities…');
+  });
+
   it('saves a normalized title reasoning effort after the title model changes', async () => {
     const onSubmit = vi.fn(async () => {});
-    const config = {
-      id: codexConfigId,
-      machineId,
-      name: 'Codex',
-      description: undefined,
-      cliType: 'builtin',
-      agentType: 'codex',
-      env: {},
+    const config = createBuiltinConfig({
       titleGeneration: {
         configOptionValues: {
-          model: 'gpt-5.6-other',
+          model: 'kimi-k2-turbo',
           reasoning_effort: 'ultra',
         },
       },
-    } as AgentConfigMeta;
+    });
 
-    await renderDialog({ kind: 'edit', config }, createCodexMachine(), onSubmit);
+    await renderDialog({ kind: 'edit', config }, createTitleConfigMachine(), onSubmit);
 
     expect(document.body.textContent).toContain('Title generation');
 
@@ -1034,7 +1708,7 @@ describe('AgentConfigDialog', () => {
       expect.objectContaining({
         titleGeneration: {
           configOptionValues: {
-            model: 'gpt-5.6-other',
+            model: 'kimi-k2-turbo',
             reasoning_effort: 'medium',
           },
         },

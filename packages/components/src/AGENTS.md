@@ -2,13 +2,61 @@
 
 Parent `AGENTS.md` files also apply.
 
+## Session turns have one read path and one write path
+
+A session document's `history` is the one piece of state that grows without
+bound, so the windowed path avoids mirroring it into memory as an array. Everything goes through
+`SessionDocStore`:
+
+- **Read** `store.history` — a `ConversationView`: `index(i)` for the always-present
+  per-turn row, `turn(i)` for a hydrated turn, `acquireRange` and its release handle to hold a
+  window. In React use `useSessionDoc().history`, `useConversationTail`,
+  `useTurnRange`, or `useSessionTurnFacts` for a whole-history fact.
+- **Write** domain commands through `store.sessionData` (`@lody/shared/session-data`):
+  `applyHistoryAction`, `appendTurn`, `replaceTurn` and
+  `respondPermission`. It is composed over the same doc and the
+  one shared writer; a rejected command surfaces as a failure, never a silent drop.
+- The composition owns one HistoryWriter; the UI store does not expose it.
+  Do not add a second writer or bypass `sessionData` for ordinary turn writes.
+
+`getState()` has no `history` key and `setState` receives a draft without one,
+so the ordinary spellings of a second path do not compile. What types cannot
+close is a deliberate escape — a cast that puts the key back, or reaching past
+the store into the raw `LoroDoc` — and
+`tests/no-materialized-history-in-components.test.ts` fails on those. No component reads the raw history list; composition injects the shared reader.
+
+Full-history actions use the authoritative consistent full-read operation.
+Performance comparisons must use the current full-Mirror baseline.
+
 ## Lightweight hosted entries
+
+- `lib/client-build-info.ts` owns build provenance for About and reports. Bug report
+  metadata contains only build constants, distinct from remote machine logs.
 
 - Public/auth entry points that bypass the full product router import route-agnostic
   surfaces. Keep host navigation behind callback props so those surfaces do not import
   the route tree, `RuntimeProvider`, or workspace Flock document implementation. When
   an auth transition selects the destination, the host owns both the non-redirecting
   auth action and navigation so an auth helper cannot discard route-specific state.
+
+## Soft-keyboard viewport handling
+
+- Native non-iOS side drawers without snap points use `ui/drawer.tsx`'s live
+  viewport bottom inset when input repositioning is enabled. Never cache a
+  keyboard-shrunken drawer height or infer keyboard visibility from focus:
+  Android-compatible shells can resize the WebView and retain input focus on hide.
+  Preserve the separate iOS native keyboard offset and bottom-sheet handling.
+  `repositionInputs={false}` explicitly opts out of both Vaul repositioning and
+  this inset; callers using it own their keyboard layout.
+
+## Working session status
+
+- Session marks use `ui/working-status-mark.tsx`, mounted across the status change
+  and fed via `useWorkingHandOver` because unread arrives after presence.
+  `WorkingGrid` shares one viewport observer: only visible marks animate; returning
+  marks sample the shared clock. Animate only `transform`/`opacity` from
+  `startTime = 0`, never per-frame script or React state.
+  [Decision](../../../.agents/notes/implemented/feature/2026-09-24-sidebar-working-grid.md).
 
 ## Keyboard navigation
 
@@ -20,7 +68,25 @@ Parent `AGENTS.md` files also apply.
   intercepted. Nested parent scopes yield to their visible child scopes, and an
   open dialog's scopes never switch focus into the background workspace.
 
+## Zen layout
+
+- Zen preserves sidebar preferences when hiding/restoring a visible layout.
+  If all available sidebars are already closed, its toggle reveals them instead.
+  The mounted desktop Session owns `zenRightPanelAtom` and clears it on unmount.
+  Behavior: [Zen layout](../../../specs/zen-layout.md).
+- An explicit request to show either sidebar exits Zen and reveals that sidebar. Use
+  the shared layout-state actions for the navigation sidebar; every Session action
+  that opens a viewer, Files, Changes, PR, Browser, or Side Chat must clear Zen.
+- Drive hidden-panel work from effective visibility (`open && !zen`), not the stored
+  open bit. A Zen-hidden PR, Browser, viewer, or Side Chat must pause exactly like an
+  ordinarily collapsed right panel.
+
 ## Workspace transitions
+
+- Dock counts derive from complete active metadata and the sidebar's child activity
+  summary. Publish absolute snapshots, including zero, on change and every 30 seconds;
+  focus/visibility restoration reconciles too. Keep the timer independent of count
+  changes and mount it only in the ready workspace's elected window.
 
 - Authenticated workspace switches keep `MainLayout` mounted: the sidebar and
   workspace identity are stable chrome, while the content pane shows a scoped
@@ -30,6 +96,21 @@ Parent `AGENTS.md` files also apply.
   and the mobile workspace stack do not start early. The workspace identity's
   syncing state follows that same scoped readiness, not the coarser connection
   state; an online transport does not imply that workspace data is ready.
+
+## Billing data
+
+- When authenticated user and workspace resolution completes, preload the billing
+  overview into the existing session-scoped billing-page cache. The preload is only
+  a latency optimization: billing permissions, quota checks, destructive-operation
+  guards, and Stripe invoice history keep their existing live/on-demand data paths.
+
+## ACP selectors
+
+- Built-in Codex reasoning selectors normalize cached options against exact model support
+  in `components/shared/acp-selector-options.ts`: GPT-6 Astra/Sol and GPT-5.6 Sol/Terra
+  expose Max/Ultra; GPT-6 Luna and GPT-5.6 Luna expose Max only. Keep this aligned with
+  the ACP model catalog; a model version threshold cannot represent per-model differences,
+  and cached efforts may belong to a different selected model.
 
 ## ACP authentication
 

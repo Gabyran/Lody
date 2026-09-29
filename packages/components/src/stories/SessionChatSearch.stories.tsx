@@ -29,7 +29,7 @@ type Story = StoryObj<typeof meta>;
 const sessionId = 'session-search-storybook' as SessionId;
 
 const buildItems = (messages: SessionHistoryParsed[]): ChatStreamItem[] =>
-  messages.map((message) => ({ type: 'message', sessionId, message }) as const);
+  messages.map((message, turnIndex) => ({ type: 'message', sessionId, message, turnIndex }) as const);
 
 const renderMessageRow: SessionChatStreamViewProps['renderMessageRow'] = ({
   message,
@@ -79,7 +79,6 @@ const searchMessages: SessionHistoryParsed[] = [
         type: 'text',
         text: [
           'I indexed the session history and highlighted every visible `rg` match.',
-          '',
           '- Search results are occurrence-based.',
           '- Only conversation text is indexed; the tool call below is not searchable.',
         ].join('\n'),

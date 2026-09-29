@@ -9,6 +9,7 @@
  */
 import type { Meta, StoryObj } from '@storybook/react';
 import { Provider, createStore } from 'jotai';
+import { expect, waitFor } from 'storybook/test';
 import type { ReactNode } from 'react';
 import type { MessageContent, SessionHistoryParsed, SessionId } from '@lody/shared';
 import type { ChatStreamItem, SessionChatStreamViewProps } from '@/components/ai-gui/view';
@@ -109,7 +110,9 @@ const streamingTurn: SessionHistoryParsed = {
   ],
 };
 
-const items: ChatStreamItem[] = [{ type: 'message', sessionId, message: streamingTurn } as const];
+const items: ChatStreamItem[] = [
+  { type: 'message', sessionId, message: streamingTurn, turnIndex: 0 } as const,
+];
 
 /**
  * Finished turn: the "Worked for …" chevron, the edited-files card, and the
@@ -142,7 +145,7 @@ const finishedTurn: SessionHistoryParsed = {
 };
 
 const finishedItems: ChatStreamItem[] = [
-  { type: 'message', sessionId, message: finishedTurn } as const,
+  { type: 'message', sessionId, message: finishedTurn, turnIndex: 0 } as const,
 ];
 
 export const DesktopStreamingTurn: Story = {
@@ -154,11 +157,142 @@ export const DesktopStreamingTurn: Story = {
         items={items}
         sessionId={sessionId}
         renderMessageRow={renderMessageRow}
+        lastAssistantMessageId={streamingTurn.id}
+        onCopyContext={() => undefined}
         agentActivityLabel="Exploring"
         agentActivityTone="warning"
       />
     </div>
   ),
+};
+
+const scrollToLatestTurn: SessionHistoryParsed = {
+  id: 'alignment-scroll-to-latest',
+  role: 'assistant',
+  // Keep the live-duration label representative when the story is opened later.
+  timestamp: new Date(Date.now() - 30_000).toISOString(),
+  read: true,
+  finished: false,
+  items: [
+    {
+      type: 'text',
+      text: Array.from(
+        { length: 36 },
+        (_, index) =>
+          `Streaming output line ${index + 1}: the reader is away from the latest response, so new content keeps arriving below the viewport.`
+      ).join('\n\n'),
+    },
+  ],
+};
+
+const scrollToLatestItems: ChatStreamItem[] = [
+  { type: 'message', sessionId, message: scrollToLatestTurn, turnIndex: 0 } as const,
+];
+
+function moveAwayFromLatest(viewport: HTMLElement): void {
+  // Move away from the real bottom before releasing follow. A wheel event alone
+  // changes the mode but leaves the viewport at the end, which makes the story
+  // show a return control in a state that is already at the latest row.
+  const maxScrollTop = viewport.scrollHeight - viewport.clientHeight;
+  if (maxScrollTop <= 0) throw new Error('Conversation viewport does not overflow');
+  viewport.scrollTop = Math.max(0, maxScrollTop - 200);
+  viewport.dispatchEvent(new Event('scroll', { bubbles: true }));
+  viewport.dispatchEvent(new WheelEvent('wheel', { bubbles: true, deltaY: -20 }));
+}
+
+async function releaseScrollToLatest(canvasElement: HTMLElement): Promise<{
+  button: HTMLButtonElement;
+  viewport: HTMLElement;
+}> {
+  const viewport = await waitFor(() => {
+    const node = canvasElement.querySelector<HTMLElement>('[data-message-selection-scroll]');
+    if (!node) throw new Error('Conversation viewport is not mounted');
+    return node;
+  });
+  await waitFor(() => {
+    moveAwayFromLatest(viewport);
+    return viewport;
+  });
+  const button = await waitFor(() => {
+    const control = canvasElement.querySelector<HTMLButtonElement>('[data-scroll-to-latest]');
+    if (!control) throw new Error('Scroll-to-latest control is not visible');
+    return control;
+  });
+  return { button, viewport };
+}
+
+async function expectAtRealBottom(viewport: HTMLElement): Promise<void> {
+  await waitFor(() => {
+    const distance = viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight;
+    if (distance > 1) throw new Error(`Still ${Math.ceil(distance)}px from the real bottom`);
+    return true;
+  });
+}
+
+async function leaveScrollToLatestVisible(
+  canvasElement: HTMLElement,
+  viewport: HTMLElement
+): Promise<HTMLButtonElement> {
+  await moveAwayFromLatest(viewport);
+  return await waitFor(() => {
+    const button = canvasElement.querySelector<HTMLButtonElement>('[data-scroll-to-latest]');
+    if (!button) throw new Error('Scroll-to-latest control did not return');
+    return button;
+  });
+}
+
+export const DesktopScrollToLatestWorking: Story = {
+  args: { sessionId, items: scrollToLatestItems, renderMessageRow },
+  globals: { theme: 'dark' },
+  render: () => (
+    <div className="relative h-[520px] w-full bg-background">
+      <SessionChatStreamView
+        items={scrollToLatestItems}
+        sessionId={sessionId}
+        className="h-full"
+        renderMessageRow={renderMessageRow}
+        lastAssistantMessageId={scrollToLatestTurn.id}
+        agentActivityLabel="Working"
+        agentActivityTone="primary"
+        agentActivityShimmer
+      />
+    </div>
+  ),
+  play: async ({ canvasElement }) => {
+    const { button, viewport } = await releaseScrollToLatest(canvasElement);
+    await expect(button.querySelector('.animate-spin')).not.toBeNull();
+    await button.click();
+    await expectAtRealBottom(viewport);
+    const visibleButton = await leaveScrollToLatestVisible(canvasElement, viewport);
+    await expect(visibleButton.querySelector('.animate-spin')).not.toBeNull();
+  },
+};
+
+export const DesktopScrollToLatestWaiting: Story = {
+  args: { sessionId, items: scrollToLatestItems, renderMessageRow },
+  globals: { theme: 'dark' },
+  render: () => (
+    <div className="relative h-[520px] w-full bg-background">
+      <SessionChatStreamView
+        items={scrollToLatestItems}
+        sessionId={sessionId}
+        className="h-full"
+        renderMessageRow={renderMessageRow}
+        lastAssistantMessageId={scrollToLatestTurn.id}
+        agentActivityLabel="Waiting for permission"
+        agentActivityTone="warning"
+        agentActivityShimmer={false}
+      />
+    </div>
+  ),
+  play: async ({ canvasElement }) => {
+    const { button, viewport } = await releaseScrollToLatest(canvasElement);
+    await expect(button.querySelector('.lucide-arrow-down')).not.toBeNull();
+    await button.click();
+    await expectAtRealBottom(viewport);
+    const visibleButton = await leaveScrollToLatestVisible(canvasElement, viewport);
+    await expect(visibleButton.querySelector('.lucide-arrow-down')).not.toBeNull();
+  },
 };
 
 export const DesktopFinishedTurn: Story = {
@@ -172,6 +306,24 @@ export const DesktopFinishedTurn: Story = {
         renderMessageRow={renderMessageRow}
         lastAssistantMessageId={finishedTurn.id}
         lastCompletedAssistantMessageId={finishedTurn.id}
+      />
+    </div>
+  ),
+};
+
+export const DesktopForkingTurn: Story = {
+  args: { sessionId, items: finishedItems, renderMessageRow },
+  globals: { theme: 'dark' },
+  render: () => (
+    <div className="h-[520px] w-full bg-background">
+      <SessionChatStreamView
+        items={finishedItems}
+        sessionId={sessionId}
+        renderMessageRow={renderMessageRow}
+        lastAssistantMessageId={finishedTurn.id}
+        lastCompletedAssistantMessageId={finishedTurn.id}
+        onForkLastAssistant={() => undefined}
+        forkingAssistantMessageId={finishedTurn.id}
       />
     </div>
   ),
@@ -358,11 +510,8 @@ const planModeTurn: SessionHistoryParsed = {
       isLatest: true,
       markdown: [
         '## Goal',
-        '',
         'Keep every top-level row of a plan-mode turn on one left rail.',
-        '',
         '## Steps',
-        '',
         '1. No per-shell horizontal pad on the `switch_mode` card.',
         '2. The resolved permission card sits on the rail, not on its own `ml-4`.',
       ].join('\n'),
@@ -371,7 +520,7 @@ const planModeTurn: SessionHistoryParsed = {
 };
 
 const planModeItems: ChatStreamItem[] = [
-  { type: 'message', sessionId, message: planModeTurn } as const,
+  { type: 'message', sessionId, message: planModeTurn, turnIndex: 0 } as const,
 ];
 
 /** Story-only guide at the column's content edge. */
@@ -441,7 +590,7 @@ const planExitOutcomeTurn = (
 const outcomeStory = (message: SessionHistoryParsed, height = 'h-[320px]'): Story => ({
   args: {
     sessionId,
-    items: [{ type: 'message', sessionId, message } as const],
+    items: [{ type: 'message', sessionId, message, turnIndex: 0 } as const],
     renderMessageRow,
   },
   globals: { theme: 'dark' },
@@ -449,7 +598,7 @@ const outcomeStory = (message: SessionHistoryParsed, height = 'h-[320px]'): Stor
     <WithRuntime>
       <div className={cn('relative w-full bg-background', height)}>
         <SessionChatStreamView
-          items={[{ type: 'message', sessionId, message } as const]}
+          items={[{ type: 'message', sessionId, message, turnIndex: 0 } as const]}
           sessionId={sessionId}
           renderMessageRow={renderMessageRow}
           lastAssistantMessageId={message.id}
@@ -488,11 +637,8 @@ const planAwaitingDecisionTurn: SessionHistoryParsed = {
       isLatest: true,
       markdown: [
         '## Goal',
-        '',
         'Keep every top-level row of a plan-mode turn on one left rail.',
-        '',
         '## Steps',
-        '',
         '1. No per-shell horizontal pad on the `switch_mode` card.',
         '2. The resolved permission card sits on the rail.',
         '3. Attachments sort below the plan.',
@@ -530,11 +676,8 @@ const planAwaitingDecisionTurn: SessionHistoryParsed = {
  */
 const PARITY_PLAN = [
   '## Goal',
-  '',
   'Render the same plan panel whichever adapter produced it.',
-  '',
   '## Steps',
-  '',
   '1. Resolve the carrier in `plan-surface.ts`.',
   '2. Feed every carrier into one `PlanPanel`.',
 ].join('\n');
@@ -612,7 +755,9 @@ const parityTurns: SessionHistoryParsed[] = [
 export const DesktopPlanAdapterParity: Story = {
   args: {
     sessionId,
-    items: parityTurns.map((message) => ({ type: 'message', sessionId, message }) as const),
+    items: parityTurns.map(
+      (message, turnIndex) => ({ type: 'message', sessionId, message, turnIndex }) as const
+    ),
     renderMessageRow,
   },
   globals: { theme: 'dark' },
@@ -620,7 +765,9 @@ export const DesktopPlanAdapterParity: Story = {
     <WithRuntime>
       <div className="relative h-[1100px] w-full bg-background">
         <SessionChatStreamView
-          items={parityTurns.map((message) => ({ type: 'message', sessionId, message }) as const)}
+          items={parityTurns.map(
+            (message, turnIndex) => ({ type: 'message', sessionId, message, turnIndex }) as const
+          )}
           sessionId={sessionId}
           renderMessageRow={renderMessageRow}
         />
@@ -642,6 +789,95 @@ export const DesktopPlanDenied: Story = outcomeStory(
 export const DesktopPlanWithdrawn: Story = outcomeStory(
   planExitOutcomeTurn('alignment-plan-cancelled', { outcome: 'cancelled' })
 );
+
+/**
+ * COMMAND STEPS — the expanded activity group's verb contract.
+ *
+ * Command tool calls title themselves with the raw command, so the step gets
+ * its verb from the renderer: "Running" while the call is in flight (the verb
+ * shimmers, like every other step's), "Ran" once it lands. Searches and reads
+ * keep the verbs their own titles already carry. Click the group header to
+ * expand the list the screenshot below describes.
+ */
+const commandStepsTurn: SessionHistoryParsed = {
+  id: 'alignment-command-steps',
+  role: 'assistant',
+  timestamp: new Date(Date.now() - 47_000).toISOString(),
+  read: true,
+  finished: false,
+  items: [
+    {
+      type: 'text',
+      text: 'dev 服务器起不来,先看启动脚本,再确认依赖解析和 vite 配置。',
+    },
+    {
+      type: 'tool_call',
+      toolCallId: 'command-steps-sed',
+      title: "sed -n '1,240p' apps/electron/scripts/dev-local.mjs",
+      kind: 'execute',
+      status: 'completed',
+      content: [
+        {
+          type: 'terminal_command',
+          command: '/bin/bash',
+          args: ['-lc', "sed -n '1,240p' apps/electron/scripts/dev-local.mjs"],
+          cwd: '/repo',
+        },
+      ],
+    },
+    {
+      type: 'tool_call',
+      toolCallId: 'command-steps-git',
+      title: 'git status --short',
+      kind: 'execute',
+      status: 'completed',
+    },
+    {
+      type: 'tool_call',
+      toolCallId: 'command-steps-search',
+      title: "Search for 'buildWith|transformAsync|unplugin'",
+      kind: 'search',
+      status: 'completed',
+    },
+    {
+      type: 'tool_call',
+      toolCallId: 'command-steps-read',
+      title: 'Read packages/components/src/components/ai-gui/view.tsx',
+      kind: 'read',
+      status: 'completed',
+      locations: [{ path: 'packages/components/src/components/ai-gui/view.tsx' }],
+    },
+    {
+      type: 'tool_call',
+      toolCallId: 'command-steps-pnpm',
+      title: 'pnpm --dir apps/electron exec electron-vite dev --mode oss',
+      kind: 'execute',
+      status: 'in_progress',
+    },
+  ],
+};
+
+export const DesktopCommandSteps: Story = {
+  args: {
+    sessionId,
+    items: [{ type: 'message', sessionId, message: commandStepsTurn, turnIndex: 0 } as const],
+    renderMessageRow,
+  },
+  globals: { theme: 'dark' },
+  render: () => (
+    <WithRuntime>
+      <div className="relative h-[380px] w-full bg-background">
+        <SessionChatStreamView
+          items={[{ type: 'message', sessionId, message: commandStepsTurn, turnIndex: 0 } as const]}
+          sessionId={sessionId}
+          renderMessageRow={renderMessageRow}
+          lastAssistantMessageId={commandStepsTurn.id}
+          agentActivityLabel="Working"
+        />
+      </div>
+    </WithRuntime>
+  ),
+};
 
 export const DesktopPlanModeTurn: Story = {
   args: { sessionId, items: planModeItems, renderMessageRow },

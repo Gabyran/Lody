@@ -22,7 +22,33 @@ import {
   type LodyResolvedVSCodeTheme,
 } from '@/lib/vscode-theme';
 
+import * as stylex from '@stylexjs/stylex';
+import {
+  darkShadowTheme,
+  darkSheenTheme,
+  lightShadowTheme,
+  lightSheenTheme,
+} from '@lody/ui/tokens/colors.stylex';
+import { productDarkPalette, productLightPalette } from '@/lib/vscode-theme/lody-ui-palette.stylex';
+
 export type Theme = 'dark' | 'light' | 'system';
+
+/**
+ * `@lody/ui`'s palette on the root, in the app's resolved mode: its colours
+ * read the VS Code theme's variables (`lody-ui-palette.stylex.ts`), and its
+ * shadows and sheens follow the app's light/dark rather than the OS's.
+ */
+const uiPaletteClassNames = (mode: 'light' | 'dark'): string[] =>
+  (
+    (mode === 'dark'
+      ? stylex.props(productDarkPalette, darkShadowTheme, darkSheenTheme)
+      : stylex.props(productLightPalette, lightShadowTheme, lightSheenTheme)
+    ).className ?? ''
+  )
+    .split(' ')
+    .filter(Boolean);
+
+const UI_PALETTE_CLASSES = [...uiPaletteClassNames('light'), ...uiPaletteClassNames('dark')];
 export type ResolvedTheme = 'light' | 'dark';
 
 /**
@@ -109,11 +135,10 @@ export function ThemeProvider({
       forcedTheme={previewedTheme}
       storageKey={storageKey}
       themes={['light', 'dark']}
-      // Electron's CSP intentionally rejects inline scripts, so next-themes'
-      // blocking pre-paint script is neutered here. Its job is done earlier
-      // instead: preload puts the resolved class on `<html>` from the theme
-      // main persisted (`initial-window-theme-argument.ts`), and the
-      // native-theme bridge supplies OS appearance changes after mount.
+      // Electron's CSP rejects inline scripts, so next-themes' blocking
+      // pre-paint script is neutered here. Its job is done by the CSP-hashed
+      // boot script in `index.html` (`lib/boot-shell-script.ts`) instead, and
+      // the native-theme bridge supplies OS appearance changes after mount.
       scriptProps={isElectron ? { type: 'application/json' } : undefined}
     >
       <LodyThemeProvider
@@ -161,8 +186,8 @@ function LodyThemeProvider({
   useIsomorphicLayoutEffect(() => {
     const root = window.document.documentElement;
 
-    root.classList.remove('light', 'dark');
-    root.classList.add(resolvedTheme);
+    root.classList.remove('light', 'dark', ...UI_PALETTE_CLASSES);
+    root.classList.add(resolvedTheme, ...uiPaletteClassNames(resolvedTheme));
     root.style.colorScheme = theme === 'system' ? 'light dark' : resolvedTheme;
   }, [resolvedTheme, theme]);
 
@@ -174,8 +199,8 @@ function LodyThemeProvider({
   }, [theme]);
 
   // Mirror the COMMITTED choice into whichever host paints before this code
-  // runs: Electron main (window background, the preload `.dark` class) over
-  // IPC, and a native mobile shell (splash, WebView background) through its
+  // runs: Electron main (window background, win32 caption overlay) over IPC,
+  // and a native mobile shell (splash, WebView background) through its
   // bridge. Both keep it in their own storage because the renderer's
   // `localStorage` is not readable from there. A preview is excluded on
   // purpose: it says nothing about how the app should open.

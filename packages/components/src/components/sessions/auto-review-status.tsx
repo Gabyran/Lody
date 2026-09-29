@@ -1,4 +1,5 @@
-import { AlertTriangle, Check, Loader2, X } from 'lucide-react';
+import { AlertTriangle, Check, X } from 'lucide-react';
+import { Spinner } from '@lody/ui/spinner';
 import { useTranslation } from 'react-i18next';
 import {
   isBlockingFinding,
@@ -6,7 +7,7 @@ import {
   type ReviewRun,
   type ReviewRunState,
 } from '@lody/shared';
-import { Button } from '@/ui/button';
+import { Button } from '@lody/ui/button';
 import { cn } from '@/lib/utils';
 
 /**
@@ -84,9 +85,8 @@ export function AutoReviewStatus({
     >
       <div className="flex items-center gap-2">
         {busy ? (
-          <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin text-muted-foreground" />
-        ) : run.state === 'merged' ||
-          (run.state === 'reviewed' && blocking.length === 0) ? (
+          <Spinner className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+        ) : run.state === 'merged' || (run.state === 'reviewed' && blocking.length === 0) ? (
           <Check className="h-3.5 w-3.5 shrink-0 text-emerald-500" />
         ) : (
           <AlertTriangle className="h-3.5 w-3.5 shrink-0 text-amber-500" />
@@ -108,7 +108,7 @@ export function AutoReviewStatus({
 
         <Button
           variant="ghost"
-          size="icon"
+          icon
           className="h-6 w-6 shrink-0 text-muted-foreground"
           onClick={onDisable}
           aria-label={t('sessions.autoReview.turnOff', 'Turn off auto review')}
@@ -118,16 +118,14 @@ export function AutoReviewStatus({
         </Button>
       </div>
 
-      {run.blocked ? (
-        <p className="mt-1.5 text-muted-foreground">{run.blocked.summary}</p>
-      ) : null}
+      {run.blocked ? <p className="mt-1.5 text-muted-foreground">{run.blocked.summary}</p> : null}
 
       {/* The confirmation prompt has exactly one exit, and this is it. Without
           the button the run waits forever: the workspace-level flag that would
           satisfy the gate is only ever written by the merge it gates. */}
       {run.state === 'awaiting_merge_confirmation' && onConfirmMerge ? (
         <div className="mt-2 flex items-center gap-2">
-          <Button size="sm" className="h-7 px-2.5 text-[0.7rem]" onClick={onConfirmMerge}>
+          <Button size="small" className="h-7 px-2.5 text-[0.7rem]" onClick={onConfirmMerge}>
             {t('sessions.autoReview.confirmMerge', 'Merge now')}
           </Button>
           <span className="text-muted-foreground">
@@ -142,8 +140,8 @@ export function AutoReviewStatus({
       {run.state === 'paused' && onResume ? (
         <div className="mt-2 flex items-center gap-2">
           <Button
-            size="sm"
-            variant="outline"
+            size="small"
+            variant="secondary"
             className="h-7 px-2.5 text-[0.7rem]"
             onClick={onResume}
           >
@@ -170,7 +168,7 @@ export function AutoReviewStatus({
               {onFixFinding && canFixManually ? (
                 <Button
                   variant="ghost"
-                  size="sm"
+                  size="small"
                   className="h-6 shrink-0 px-2 text-[0.7rem]"
                   onClick={() => onFixFinding(finding)}
                 >

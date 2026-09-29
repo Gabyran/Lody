@@ -59,12 +59,29 @@ describe('SessionInfoBar syncing indicator', () => {
     expect(wrapper?.textContent).toContain('Syncing');
   });
 
+  it('says Updating while a cached conversation catches up, and hides for a null status', () => {
+    act(() => {
+      root.render(<SessionInfoBar {...CONTEXT_LESS_PROPS} syncStatus="updating" />);
+    });
+    expect(container.querySelector('.ml-auto')?.textContent).toContain('Updating');
+
+    // An explicit null status wins over the legacy flag: nothing to announce.
+    act(() => {
+      root.render(<SessionInfoBar {...CONTEXT_LESS_PROPS} syncing syncStatus={null} />);
+    });
+    expect(container.textContent).toBe('');
+  });
+
   it('still hides the bar entirely with no items and no syncing', () => {
     act(() => {
       root.render(<SessionInfoBar {...CONTEXT_LESS_PROPS} />);
     });
 
-    expect(container.innerHTML).toBe('');
+    // No bar is shown: only the hidden spacer that keeps the composer's gap.
+    expect(container.textContent).toBe('');
+    expect(container.querySelector('button, [role]')).toBeNull();
+    expect(container.children).toHaveLength(1);
+    expect(container.firstElementChild?.getAttribute('aria-hidden')).toBe('true');
   });
 
   it('renders and activates a reported preview action without staged context', () => {

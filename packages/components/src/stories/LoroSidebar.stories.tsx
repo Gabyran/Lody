@@ -1,5 +1,5 @@
 import type { Meta, StoryObj } from '@storybook/react';
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { type ReactNode, useEffect, useMemo, useRef, useState } from 'react';
 import { FolderPlus } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import type {
@@ -8,6 +8,7 @@ import type {
   LoroSidebarOrganizeMode,
 } from '@/components/loro-sidebar';
 import { LoroSidebar } from '@/components/loro-sidebar';
+import { SidebarFilterPopover } from '@/components/sidebar-filter-popover';
 import { LocalProjectItem } from '@/components/loro-app-sidebar';
 import { SidebarSectionHeader } from '@/components/sidebar-row-shared';
 import { buildSidebarOpenerRowResolver } from '@/components/sessions/session-list-rows';
@@ -23,6 +24,7 @@ import type {
   SidebarUpdatedItem,
 } from '@/components/sidebar-updated-session-list';
 import { useIsMobile } from '@/hooks/use-mobile';
+import { SessionConversationStoryHarness } from './SessionConversationPage.stories';
 import type {
   LocalProjectHistoryProvider,
   LocalProjectId,
@@ -276,7 +278,12 @@ const meta = {
 export default meta;
 type Story = StoryObj<typeof meta>;
 
-function StoryLayout(args: Parameters<typeof LoroSidebar>[0]) {
+type StoryLayoutProps = Parameters<typeof LoroSidebar>[0] & {
+  storyContent?: ReactNode;
+  fullApp?: boolean;
+};
+
+function StoryLayout({ storyContent, fullApp = false, ...args }: StoryLayoutProps) {
   const [activeNav, setActiveNav] = useState<LoroSidebarNavKey>(args.activeNav ?? 'home');
   const [workspaceId, setWorkspaceId] = useState(args.currentWorkspaceId);
   const baseSessionListProps = args.sessionListProps ?? demoTaskListProps;
@@ -291,6 +298,7 @@ function StoryLayout(args: Parameters<typeof LoroSidebar>[0]) {
     args.organizeMode ?? 'workspace'
   );
   const [chatScope, setChatScope] = useState<LoroSidebarChatScope>(args.chatScope ?? 'my');
+  const [showUpdatedProjectNames, setShowUpdatedProjectNames] = useState(true);
   const [updatedBucketsCollapsed, setUpdatedBucketsCollapsed] = useState<
     Partial<Record<SidebarUpdatedBucketKey, boolean>>
   >({});
@@ -390,6 +398,8 @@ function StoryLayout(args: Parameters<typeof LoroSidebar>[0]) {
       updatedSelectedItemId={selectedSessionId}
       updatedBucketsCollapsed={updatedBucketsCollapsed}
       onOrganizeModeChange={setOrganizeMode}
+      showUpdatedProjectNames={showUpdatedProjectNames}
+      onShowUpdatedProjectNamesChange={setShowUpdatedProjectNames}
       onChatScopeChange={setChatScope}
       onSelectUpdatedItem={setSelectedSessionId}
       onTogglePinnedSection={() => setPinnedSectionCollapsed((prev) => !prev)}
@@ -413,6 +423,8 @@ function StoryLayout(args: Parameters<typeof LoroSidebar>[0]) {
       onWorkspaceSelected={setWorkspaceId}
       onHomeClicked={() => setActiveNav('home')}
       onArchiveClicked={() => setActiveNav('archive')}
+      // Production always mounts the Schedules nav row (`loro-app-sidebar`).
+      onSchedulesClicked={() => setActiveNav('schedules')}
     />
   );
 
@@ -428,18 +440,29 @@ function StoryLayout(args: Parameters<typeof LoroSidebar>[0]) {
     );
   }
 
+  if (fullApp) {
+    return (
+      <div className="flex h-dvh w-full overflow-hidden bg-background text-foreground">
+        {sidebar}
+        <main className="min-w-0 flex-1 overflow-hidden">{storyContent}</main>
+      </div>
+    );
+  }
+
   return (
     <div className="min-h-screen w-full bg-background p-10 text-foreground">
       <div className="flex h-[calc(100vh-5rem)] items-start gap-8">
         {sidebar}
         <div className="flex-1">
-          <div className="rounded-2xl border border-border bg-card p-6 text-card-foreground shadow-xs">
-            <div className="text-lg font-semibold">Content</div>
-            <div className="mt-2 text-sm text-muted-foreground">
-              Use the filter button at the bottom-right of the sidebar to switch between Workspace
-              and Updated organize modes, and to toggle My Tasks vs All Tasks.
+          {storyContent ?? (
+            <div className="rounded-2xl border border-border bg-card p-6 text-card-foreground shadow-xs">
+              <div className="text-lg font-semibold">Content</div>
+              <div className="mt-2 text-sm text-muted-foreground">
+                Use the filter button at the bottom-right of the sidebar to switch between Workspace
+                and Updated organize modes, toggle My Tasks vs All Tasks, and control Show Project.
+              </div>
             </div>
-          </div>
+          )}
         </div>
       </div>
     </div>
@@ -470,6 +493,10 @@ function buildDemoUpdatedItems(
   });
 
   return filtered.map((task) => {
+    const owner =
+      scope === 'team'
+        ? (task.owner ?? { name: DEMO_OWNER_BY_TASK_ID[task.sessionId] ?? 'zxch3n' })
+        : null;
     if (DEMO_LOCAL_KIND_TASK_IDS.has(task.sessionId)) {
       return {
         id: task.sessionId,
@@ -484,6 +511,7 @@ function buildDemoUpdatedItems(
         hasUnreadMessages: task.hasUnreadMessages,
         isOffline: task.isOffline,
         isWaitingPermission: task.isWaitingPermission,
+        owner,
         openedBySessionId: task.openedBySessionId ?? null,
         openedByRowSessionId: task.openedByRowSessionId ?? null,
       };
@@ -508,7 +536,7 @@ function buildDemoUpdatedItems(
         prCiState: task.prCiState,
         prNumber: task.prNumber,
         prUrl: task.prUrl ?? null,
-        owner: task.owner ?? { name: DEMO_OWNER_BY_TASK_ID[task.sessionId] ?? 'zxch3n' },
+        owner,
         addedLines: task.addedLines,
         deletedLines: task.deletedLines,
       };
@@ -525,6 +553,7 @@ function buildDemoUpdatedItems(
       hasUnreadMessages: task.hasUnreadMessages,
       isOffline: task.isOffline,
       isWaitingPermission: task.isWaitingPermission,
+      owner,
       openedBySessionId: task.openedBySessionId ?? null,
       openedByRowSessionId: task.openedByRowSessionId ?? null,
     };
@@ -539,7 +568,7 @@ export const Default: Story = {
     repoSections: [],
     chats: [],
     workspaces: [
-      { id: 'ws-1', name: 'Loro', planTier: 'plus' },
+      { id: 'ws-1', name: 'Loro', planTier: 'plus', memberCount: 3 },
       { id: 'ws-2', name: 'Lody' },
       { id: 'ws-3', name: 'Demo', planTier: 'enterprise' },
     ],
@@ -564,6 +593,31 @@ export const WorkspaceSyncing: Story = {
       repos: [],
       isLoading: true,
     },
+  },
+};
+
+/** My Tasks removed every Workspace section; the recovery action switches to All Tasks. */
+export const FilteredWorkspaceEmpty: Story = {
+  name: 'Workspace · filtered empty',
+  render: (args) => <StoryLayout {...args} />,
+  args: {
+    ...Default.args!,
+    chatScope: 'my',
+    pinnedItems: [],
+    sessionListProps: {
+      sessions: [],
+      repos: [],
+    },
+  },
+};
+
+/** All Tasks is selected, but the workspace genuinely has no tasks yet. */
+export const WorkspaceEmpty: Story = {
+  name: 'Workspace · empty',
+  render: (args) => <StoryLayout {...args} />,
+  args: {
+    ...FilteredWorkspaceEmpty.args!,
+    chatScope: 'team',
   },
 };
 
@@ -663,15 +717,80 @@ const demoUpdatedTaskListProps: SessionListProps = {
     {
       sessionId: 'task-4',
       title: 'Fix Data Persistence Issue',
-      repoFullName: 'loro-dev/lody',
+      repoFullName: 'wibus-wee/lody',
       branchName: 'fix/data-persistence',
-      prUrl: 'https://github.com/loro-dev/lody/pull/78',
+      prUrl: 'https://github.com/wibus-wee/lody/pull/78',
       prStatus: 'open',
       latestMessageAt: NOW - 4 * 24 * 60 * 60 * 1000, // 4d -> this week
       addedLines: 456,
       deletedLines: 12,
       isWorking: false,
       hasUnreadMessages: true,
+      isOffline: false,
+      isWaitingPermission: false,
+    },
+    {
+      sessionId: 'task-8',
+      title: 'Polish repository identity',
+      repoFullName: 'wibus-wee/lody',
+      branchName: 'feat/repository-identity',
+      latestMessageAt: NOW - 45 * 60 * 1000,
+      addedLines: 84,
+      deletedLines: 21,
+      isWorking: false,
+      hasUnreadMessages: false,
+      isOffline: false,
+      isWaitingPermission: false,
+    },
+    {
+      sessionId: 'task-9',
+      title: 'Reduce sidebar visual weight',
+      repoFullName: 'LodyAI/Lody',
+      branchName: 'fix/sidebar-visual-weight',
+      latestMessageAt: NOW - 5 * 60 * 60 * 1000,
+      addedLines: 36,
+      deletedLines: 18,
+      isWorking: true,
+      hasUnreadMessages: false,
+      isOffline: false,
+      isWaitingPermission: false,
+    },
+    {
+      sessionId: 'task-10',
+      title: 'Tune virtualized list rendering',
+      repoFullName: 'facebook/react',
+      branchName: 'perf/virtualized-list',
+      latestMessageAt: NOW - 26 * 60 * 60 * 1000,
+      addedLines: 212,
+      deletedLines: 97,
+      isWorking: false,
+      hasUnreadMessages: true,
+      isOffline: false,
+      isWaitingPermission: false,
+    },
+    {
+      sessionId: 'task-11',
+      title: 'Review deployment preview',
+      repoFullName: 'vercel/next.js',
+      branchName: 'chore/preview-review',
+      latestMessageAt: NOW - 3 * 24 * 60 * 60 * 1000,
+      addedLines: 19,
+      deletedLines: 4,
+      isWorking: false,
+      hasUnreadMessages: false,
+      isOffline: false,
+      isWaitingPermission: true,
+    },
+    {
+      sessionId: 'task-12',
+      title: 'Improve formatter diagnostics',
+      repoFullName: 'biomejs/biome',
+      branchName: 'feat/formatter-diagnostics',
+      latestMessageAt: NOW - 8 * 24 * 60 * 60 * 1000,
+      addedLines: 148,
+      deletedLines: 63,
+      isWorking: false,
+      hasUnreadMessages: false,
       isOffline: false,
       isWaitingPermission: false,
     },
@@ -719,10 +838,10 @@ const demoUpdatedTaskListProps: SessionListProps = {
 };
 
 /**
- * Demonstrates the "Updated" organize mode: a flat recency-sorted list. Each row
- * is a single line — leading status slot (PR status at rest), title, a trailing
- * mode icon (FolderTree/Folder for github/local worktrees), and diff — with a
- * desktop hover info card carrying the time / repo / branch / PR / diff.
+ * Demonstrates the "Updated" organize mode: a flat recency-sorted list. Top-level
+ * rows are two lines — title, then folder / GitHub owner mark + project name —
+ * because the list mixes every project. Nested opened Sessions stay one line.
+ * Hover info card still carries time / repo / branch / PR / diff.
  */
 export const UpdatedMode: Story = {
   render: (args) => <StoryLayout {...args} />,
@@ -732,6 +851,43 @@ export const UpdatedMode: Story = {
     chatScope: 'my',
     sessionListProps: demoUpdatedTaskListProps,
   },
+};
+
+/**
+ * Full review surface for Updated mode. It keeps the mixed project list,
+ * Pinned section, Chats, local project, repository avatars, active row, and
+ * status variants beside the same production-mirroring session-page harness
+ * used by the conversation stories. Show Project remains interactive in the
+ * view menu.
+ */
+export const UpdatedModeShowProjectOverview: Story = {
+  name: 'Updated Mode · Show Project Overview',
+  render: (args) => (
+    <StoryLayout
+      {...args}
+      fullApp
+      storyContent={
+        <SessionConversationStoryHarness
+          state="idle"
+          frame="desktop"
+          embedded
+          sessionTitle="Polish repository identity"
+          repoFullName="wibus-wee/lody"
+          branchName="feat/repository-identity"
+          composerText="Review the project labels and visual hierarchy in the Updated sidebar."
+        />
+      }
+    />
+  ),
+  args: {
+    ...UpdatedMode.args!,
+    chatScope: 'team',
+    sessionListProps: {
+      ...demoUpdatedTaskListProps,
+      selectedSessionId: 'task-8',
+    },
+  },
+  globals: { theme: 'light' },
 };
 
 /**
@@ -931,6 +1087,7 @@ function ProductionLikeTopContent({
   onNew,
   chatsCollapsed,
   onToggleChatsCollapsed,
+  filterAction,
 }: {
   chatSessions: SessionListRow[];
   githubWorktreeCount: number;
@@ -940,6 +1097,7 @@ function ProductionLikeTopContent({
   onNew: (repoFullName?: string) => void;
   chatsCollapsed: boolean;
   onToggleChatsCollapsed: () => void;
+  filterAction?: ReactNode;
 }) {
   const isMobile = useIsMobile();
   const [localProjectsCollapsed, setLocalProjectsCollapsed] = useState(false);
@@ -986,14 +1144,19 @@ function ProductionLikeTopContent({
             isMobile={isMobile}
             toggleLabel="Toggle"
             onToggleCollapsed={() => setLocalProjectsCollapsed((v) => !v)}
+            // Mirrors LoroAppSidebar's headerAction: the import button plus
+            // the sidebar filter trigger on the first section.
             action={
-              <button
-                type="button"
-                className="inline-flex h-6 w-6 items-center justify-center rounded-sm text-muted-foreground/80 hover:bg-muted/30 hover:text-foreground"
-                aria-label="Import local project folder"
-              >
-                <FolderPlus className="h-4 w-4" />
-              </button>
+              <div className="flex items-center gap-1">
+                <button
+                  type="button"
+                  className="inline-flex h-6 w-6 items-center justify-center rounded-sm text-muted-foreground/80 hover:bg-muted/30 hover:text-foreground"
+                  aria-label="Import local project folder"
+                >
+                  <FolderPlus className="h-4 w-4" />
+                </button>
+                {filterAction}
+              </div>
             }
           />
           {localProjectsCollapsed ? null : (
@@ -1008,8 +1171,8 @@ function ProductionLikeTopContent({
                     machineName="Mac Studio"
                     project={project}
                     canRemoveProject
-                    canNavigateProject
                     collapsed={collapsed}
+                    whetherShowFullList={false}
                     isSelected={false}
                     sessionsForProject={
                       project.id === ('proj-lody' as LocalProjectId) ? demoLocalSessions : []
@@ -1034,6 +1197,7 @@ function ProductionLikeTopContent({
                     onToggleCollapsed={() =>
                       setCollapsedProjects((prev) => ({ ...prev, [key]: !(prev[key] ?? false) }))
                     }
+                    onToggleFullList={() => {}}
                     onRequestRemoval={() => {}}
                   />
                 );
@@ -1063,8 +1227,8 @@ function ProductionLikeTopContent({
                   machineName="MacBook Pro"
                   project={project}
                   canRemoveProject
-                  canNavigateProject
                   collapsed={collapsed}
+                  whetherShowFullList={false}
                   isSelected={false}
                   sessionsForProject={[] as SessionMeta[]}
                   childSessionsByParent={new Map()}
@@ -1087,6 +1251,7 @@ function ProductionLikeTopContent({
                   onToggleCollapsed={() =>
                     setCollapsedProjects((prev) => ({ ...prev, [key]: !(prev[key] ?? false) }))
                   }
+                  onToggleFullList={() => {}}
                   onRequestRemoval={() => {}}
                 />
               );
@@ -1116,6 +1281,13 @@ function WithProjectsLayout(args: Parameters<typeof LoroSidebar>[0]) {
   );
   const [chatsCollapsed, setChatsCollapsed] = useState(false);
   const [sessions, setTasks] = useState<SessionListRow[]>(baseSessionListProps.sessions);
+  // A story may drive the list over time (e.g. sessions finishing one by one);
+  // take a new list when the args hand one over.
+  const [argSessions, setArgSessions] = useState(baseSessionListProps.sessions);
+  if (argSessions !== baseSessionListProps.sessions) {
+    setArgSessions(baseSessionListProps.sessions);
+    setTasks(baseSessionListProps.sessions);
+  }
   const [repos, setRepos] = useState<SessionListRepoState[]>(baseSessionListProps.repos);
   const nextSessionIdRef = useRef(1);
 
@@ -1161,11 +1333,26 @@ function WithProjectsLayout(args: Parameters<typeof LoroSidebar>[0]) {
 
   const isMobile = useIsMobile();
 
+  // Mirrors LoroAppSidebar: one filter element shared between the first
+  // topContent header and LoroSidebar's own slots — gated on the same
+  // pinnedItems prop the sidebar sees, not the raw session flags.
+  const hasPinnedItems = Boolean(args.pinnedItems?.length);
+  const sidebarFilterAction = (
+    <SidebarFilterPopover
+      organize="workspace"
+      scope="my"
+      side="right"
+      align="start"
+      triggerClassName="h-5 w-5 [&_svg]:h-4 [&_svg]:w-4"
+    />
+  );
+
   const sidebar = (
     <LoroSidebar
       {...args}
       activeNav={activeNav}
       currentWorkspaceId={workspaceId}
+      desktopFilterAction={sidebarFilterAction}
       topContent={
         <ProductionLikeTopContent
           chatSessions={chatSessions}
@@ -1176,6 +1363,7 @@ function WithProjectsLayout(args: Parameters<typeof LoroSidebar>[0]) {
           onNew={createTask}
           chatsCollapsed={chatsCollapsed}
           onToggleChatsCollapsed={() => setChatsCollapsed((p) => !p)}
+          filterAction={hasPinnedItems ? null : sidebarFilterAction}
         />
       }
       sessionListProps={{
@@ -1191,6 +1379,8 @@ function WithProjectsLayout(args: Parameters<typeof LoroSidebar>[0]) {
       onWorkspaceSelected={setWorkspaceId}
       onHomeClicked={() => setActiveNav('home')}
       onArchiveClicked={() => setActiveNav('archive')}
+      // Production always mounts the Schedules nav row (`loro-app-sidebar`).
+      onSchedulesClicked={() => setActiveNav('schedules')}
     />
   );
 
@@ -1282,26 +1472,140 @@ export const StressTest: Story = {
   },
 };
 
-/**
- * The Tasks entry only exists while the Tasks beta is on (`showTasks`, driven by
- * `tasksFeatureEnabledAtom`). It sits with New Chat at the top of the sidebar,
- * not in the bottom utility rail, because it is a primary destination. Every
- * other story leaves it off, which is the default state for anyone who has not
- * enabled Developer mode plus the beta — so this is the one place the entry
- * stays reviewable. No open-task count on the row: the number was noise next
- * to New chat and is already available on the Tasks page itself.
- *
- * The trailing `+` is quick capture: it opens the global capture dialog without
- * navigating, so writing a task down stays cheaper than starting a chat. Its
- * tooltip carries the shortcut — in Storybook the command registry is empty, so
- * only the label shows.
- */
-export const TasksBetaEnabled: Story = {
-  name: 'Tasks beta enabled',
+/** Every session running at once: many working marks sharing one sea down the sidebar. */
+export const AllSessionsWorking: Story = {
+  name: 'All sessions working',
   render: (args) => <WithProjectsLayout {...args} />,
   args: {
     ...Default.args!,
-    showTasks: true,
-    onNewTaskClicked: () => {},
+    sessionListProps: {
+      ...demoTaskListProps,
+      sessions: demoTaskListProps.sessions.map((session) => ({
+        ...session,
+        isWorking: true,
+        isWaitingPermission: false,
+        hasUnreadMessages: false,
+      })),
+    },
   },
+};
+
+const FINISH_EVERY_MS = 1400;
+
+/** Starts every session working, then finishes one at a time, then starts over. */
+function SessionsFinishingLayout(args: Parameters<typeof LoroSidebar>[0]) {
+  const base = demoTaskListProps.sessions;
+  const [finished, setFinished] = useState(0);
+  useEffect(() => {
+    const id = setInterval(
+      () => setFinished((count) => (count > base.length + 1 ? 0 : count + 1)),
+      FINISH_EVERY_MS
+    );
+    return () => clearInterval(id);
+  }, [base.length]);
+  const sessions = useMemo(
+    () =>
+      base.map((session, index) => ({
+        ...session,
+        isWorking: index >= finished,
+        isWaitingPermission: false,
+        hasUnreadMessages: index < finished,
+      })),
+    [base, finished]
+  );
+  return <WithProjectsLayout {...args} sessionListProps={{ ...demoTaskListProps, sessions }} />;
+}
+
+/** Sessions finish one by one: each working grid spins and gathers into the unread dot. */
+export const SessionsFinishing: Story = {
+  name: 'Sessions finishing',
+  render: (args) => <SessionsFinishingLayout {...args} />,
+  args: { ...Default.args! },
+};
+
+/**
+ * Regression fixture for a machine group's scrolling header. Mirrors
+ * `LoroAppSidebar`'s local-project section DOM with many collapsed project
+ * rows. Scroll the box: the machine label must leave the viewport with its
+ * rows, without sticking over a project.
+ */
+function MachineGroupScrollFixture() {
+  const isMobile = useIsMobile();
+  const [collapsedProjects, setCollapsedProjects] = useState<Record<string, boolean>>({});
+  const projects = useMemo<LocalProjectMeta[]>(
+    () =>
+      Array.from({ length: 24 }, (_, index) => ({
+        id: `scroll-proj-${index + 1}` as LocalProjectId,
+        name: `project-${String(index + 1).padStart(2, '0')}`,
+        rootPath: `C:\\Users\\dev\\Code\\project-${String(index + 1).padStart(2, '0')}`,
+        createdAtMs: NOW - index * 24 * 60 * 60 * 1000,
+      })),
+    []
+  );
+  return (
+    <div className="flex min-h-screen w-full items-start justify-center bg-background p-10">
+      <div
+        data-testid="machine-group-scrollbox"
+        className="h-[360px] w-[280px] overflow-y-auto rounded-xl border border-sidebar-border/60 bg-sidebar p-2"
+      >
+        {/* Production section wrapper: loro-app-sidebar.tsx localProjectsTopContent. */}
+        <div className="space-y-0.5">
+          <div>
+            <SidebarSectionHeader
+              label="LAPTOP-PP66IJ89"
+              collapsed={false}
+              isMobile={isMobile}
+              toggleLabel="Toggle section"
+              onToggleCollapsed={() => {}}
+            />
+          </div>
+          <div className="space-y-0.5">
+            {projects.map((project, index) => {
+              const key = `${demoMachineId}:${project.id}`;
+              return (
+                <LocalProjectItem
+                  key={project.id}
+                  machineId={demoMachineId}
+                  machineName="LAPTOP-PP66IJ89"
+                  project={project}
+                  canRemoveProject
+                  collapsed={collapsedProjects[key] ?? true}
+                  whetherShowFullList={false}
+                  isSelected={index === 0}
+                  sessionsForProject={[]}
+                  childSessionsByParent={new Map()}
+                  liveSessionStatuses={EMPTY_LIVE_SESSION_STATUSES}
+                  formattedPath={project.rootPath}
+                  defaultSessionTitle="Untitled"
+                  selectedSessionId={null}
+                  removeProjectLabel="Remove folder"
+                  archiveTooltipLabel="Archive"
+                  archiveActionLabel="Archive"
+                  archiveConfirmLabel="Confirm"
+                  isMobile={isMobile}
+                  toggleLabel="Toggle"
+                  onNavigateProject={() => {}}
+                  onNavigateSession={() => {}}
+                  onArchive={() => {}}
+                  collapsedOpenedBySessionIds={{}}
+                  onToggleOpenedBySessions={() => {}}
+                  onToggleCollapsed={() =>
+                    setCollapsedProjects((prev) => ({ ...prev, [key]: !(prev[key] ?? true) }))
+                  }
+                  onToggleFullList={() => {}}
+                  onRequestRemoval={() => {}}
+                />
+              );
+            })}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+export const MachineGroupScrollingHeader: Story = {
+  name: 'Machine group scrolling header',
+  render: () => <MachineGroupScrollFixture />,
+  args: { ...Default.args! },
 };

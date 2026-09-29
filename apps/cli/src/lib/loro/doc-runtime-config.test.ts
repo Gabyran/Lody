@@ -1,10 +1,10 @@
+import { updateTestHistory } from '../../../tests/history-port-fixture';
 import { describe, expect, it, vi } from 'vitest';
-import { Loro } from 'loro-crdt';
-import { Mirror } from 'loro-mirror';
-import { sessionDocSchema, type SessionId } from '@lody/shared';
+import type { SessionId } from '@lody/shared';
 import type { LoroRepo } from 'loro-repo';
 import type { Logger } from '@/utils/logger';
 import { SessionDocument } from './doc';
+import { composeTestSessionDoc } from '../../../tests/session-doc-fixture';
 
 const historyEntry = (id: string, role: 'user' | 'assistant') => ({
   id,
@@ -20,23 +20,15 @@ const createDocument = () => {
     async () => {},
     {
       debug: vi.fn(),
+      trace: vi.fn(),
       info: vi.fn(),
       warn: vi.fn(),
       error: vi.fn(),
     } as unknown as Logger
   );
-  doc.mirror = new Mirror({
-    doc: new Loro(),
-    schema: sessionDocSchema,
-    initialState: {
-      session: { id: doc.sessionId },
-      history: [],
-    },
-  });
-  doc.mirror.setState((state) => {
-    state.history.push(historyEntry('turn-1', 'user'));
-    return state;
-  });
+  // Compose the production storage entry and seed the initial user turn
+  // through the shared writer, matching how `init()` sees a persisted doc.
+  composeTestSessionDoc(doc, { history: [historyEntry('turn-1', 'user')] });
   return doc;
 };
 
@@ -72,7 +64,7 @@ describe('SessionDocument ACP runtime config', () => {
     });
   });
 
-  it('rejects missing and stale turns, then starts a clean snapshot for the latest turn', () => {
+  it('rejects missing and stale turns, then starts a clean snapshot for the latest turn', async () => {
     const doc = createDocument();
     expect(
       doc.applyAcpRuntimeConfigPatch('missing', {
@@ -88,14 +80,11 @@ describe('SessionDocument ACP runtime config', () => {
       })
     ).toBe(true);
 
-    doc.mirror?.setState((state) => ({
-      ...state,
-      history: [
-        ...state.history,
-        historyEntry('assistant-1', 'assistant'),
-        historyEntry('turn-2', 'user'),
-      ],
-    }));
+    await updateTestHistory(doc, (history) => [
+      ...history,
+      historyEntry('assistant-1', 'assistant'),
+      historyEntry('turn-2', 'user'),
+    ]);
 
     expect(
       doc.applyAcpRuntimeConfigPatch('turn-1', {

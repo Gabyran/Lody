@@ -1,7 +1,8 @@
 import path from 'node:path';
 import { Command } from 'commander';
-import { getSessionRoomId, getTaskRoomId, type WorkspaceId } from '@lody/shared';
-import { listWorkspaceTaskIds } from '@/lib/task-doc';
+import { getSessionRoomId, type WorkspaceId } from '@lody/shared';
+import { getScheduleRegistryFlockDocId, getScheduleRoomId } from '@lody/shared';
+import { listWorkspaceScheduleIds } from '@/lib/schedules/schedule-documents';
 import {
   getAuthContextOrThrow,
   listAliveSessionMetas,
@@ -51,10 +52,16 @@ async function syncWorkspaceSessionsForExport(
   // This reconciles visible index rows with repo existence, repairing a missing
   // projection row without reviving an explicit index tombstone.
   const workspaceId = workspace.id as WorkspaceId;
-  const taskIds = await listWorkspaceTaskIds(manager, workspaceId).catch(() => []);
-  await mapWithConcurrency(taskIds, EXPORT_SYNC_CONCURRENCY, async (taskId) => {
-    await syncDocForRead(manager, getTaskRoomId(taskId), `export:${workspace.id}:${taskId}`);
+  await manager.syncFlockDocOrThrow(getScheduleRegistryFlockDocId(workspaceId), {
+    reason: 'export:schedules:registry',
   });
+  await mapWithConcurrency(
+    await listWorkspaceScheduleIds(manager, workspaceId),
+    EXPORT_SYNC_CONCURRENCY,
+    async (id) => {
+      await syncDocForRead(manager, getScheduleRoomId(id), `export:schedule:${id}`);
+    }
+  );
 }
 
 export const exportCommand = new Command('export')

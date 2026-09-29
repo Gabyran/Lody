@@ -90,9 +90,7 @@ describe('VSCode theme aliases', () => {
     });
 
     expect(variables['--muted']).toBe(hexColorToHslChannel('#FFFAF3'));
-    expect(variables['--hover']).toBe(
-      hexColorToHslChannel(compositeHexColors('#6E6A860D', '#FAF4ED'))
-    );
+    expect(variables['--hover']).toBe('30 28.6% 91.8%');
     expect(variables['--highlight']).toBe(hexColorToHslChannel('#FFC799'));
     expect(variables['--selection']).toBe(
       hexColorToHslChannel(compositeHexColors('#6E6A8614', '#FAF4ED'))
@@ -113,7 +111,7 @@ describe('VSCode theme aliases', () => {
         ...themeFixture.colors,
         'editor.background': '#101010',
         'input.background': '#1A1A1A',
-        'input.foreground': '#EEEEEE',
+        'input.foreground': '#C0C0C0',
         'input.placeholderForeground': '#777777',
         'input.border': '#3A3A3A',
         'editorWidget.border': '#444444',
@@ -121,7 +119,7 @@ describe('VSCode theme aliases', () => {
     });
 
     expect(variables['--input']).toBe(hexColorToHslChannel('#1A1A1A'));
-    expect(variables['--input-foreground']).toBe(hexColorToHslChannel('#EEEEEE'));
+    expect(variables['--input-foreground']).toBe(hexColorToHslChannel('#C0C0C0'));
     expect(variables['--input-placeholder']).toBe(hexColorToHslChannel('#777777'));
     expect(variables['--input-border']).toBe(hexColorToHslChannel('#3A3A3A'));
     expect(variables['--input-field']).toBe(hexColorToHslChannel('#1A1A1A'));
@@ -210,9 +208,7 @@ describe('VSCode theme aliases', () => {
       },
     });
 
-    expect(variables['--hover']).toBe(
-      hexColorToHslChannel(compositeHexColors('#6E6A860D', '#FAF4ED'))
-    );
+    expect(variables['--hover']).toBe('30 54.5% 95.7%');
     expect(variables['--hover-foreground']).toBe(hexColorToHslChannel('#6E6A86'));
     expect(variables['--highlight']).toBe(hexColorToHslChannel('#FFC799'));
     expect(variables['--highlight-foreground']).toBe(hexColorToHslChannel('#000000'));

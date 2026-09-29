@@ -8,6 +8,7 @@ import {
   sessionMetaCacheAtom,
   sideSessionsAtomFamily,
 } from '../src/atoms/doc-meta';
+import { sessionHasUnreadMessages } from '../src/lib/session-read-receipt';
 
 const sessionId = 'session-with-ci' as SessionId;
 const roomId = getSessionRoomId(sessionId);
@@ -24,6 +25,17 @@ const session: SessionMeta = {
 };
 
 describe('sessionListAtom', () => {
+  it('updates unread presentation when only the tab closure changes', () => {
+    const store = createStore();
+    const unread = { ...session, lastMessageAt: 200, lastReadAt: 100 };
+    store.set(sessionMetaCacheAtom, { [roomId]: unread });
+    expect(sessionHasUnreadMessages(store.get(sessionListAtom)[0]!)).toBe(true);
+    store.set(sessionMetaCacheAtom, { [roomId]: { ...unread, isTabClosed: true } });
+    expect(sessionHasUnreadMessages(store.get(sessionListAtom)[0]!)).toBe(false);
+    store.set(sessionMetaCacheAtom, { [roomId]: { ...unread, isTabClosed: false } });
+    expect(sessionHasUnreadMessages(store.get(sessionListAtom)[0]!)).toBe(true);
+  });
+
   it('publishes a new list when only pullRequestState changes', () => {
     const store = createStore();
     store.set(sessionMetaCacheAtom, { [roomId]: session });
@@ -64,5 +76,33 @@ describe('sessionListAtom', () => {
     expect(store.get(childSessionsAtomFamily(parentId)).map((item) => item.id)).toEqual([childId]);
     expect(store.get(sideSessionsAtomFamily(parentId)).map((item) => item.id)).toEqual([sideId]);
     expect(store.get(sessionListAtom).map((item) => item.id)).toEqual([parentId]);
+  });
+
+  it('orders child tabs by creation time when no local tab order exists', () => {
+    const store = createStore();
+    const parentId = 'parent-session' as SessionId;
+    const olderChildId = 'older-child' as SessionId;
+    const newerChildId = 'newer-child' as SessionId;
+
+    store.set(sessionMetaCacheAtom, {
+      [getSessionRoomId(parentId)]: { ...session, id: parentId },
+      [getSessionRoomId(newerChildId)]: {
+        ...session,
+        id: newerChildId,
+        parentSessionId: parentId,
+        createdAt: '2026-07-19T00:02:00.000Z',
+      },
+      [getSessionRoomId(olderChildId)]: {
+        ...session,
+        id: olderChildId,
+        parentSessionId: parentId,
+        createdAt: '2026-07-19T00:01:00.000Z',
+      },
+    });
+
+    expect(store.get(childSessionsAtomFamily(parentId)).map((item) => item.id)).toEqual([
+      olderChildId,
+      newerChildId,
+    ]);
   });
 });

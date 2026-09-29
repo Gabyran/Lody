@@ -2,10 +2,33 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { useRouter } from '@tanstack/react-router';
 import { useTranslation } from 'react-i18next';
 import { usePlatformSession } from '@lody/platform/react';
-import { ExternalLink, Loader2, LogIn } from 'lucide-react';
-import { Button } from '@/ui/button';
+import { ExternalLink, LogIn } from 'lucide-react';
+import * as stylex from '@stylexjs/stylex';
+import { Spinner } from '@lody/ui/spinner';
+import { Button } from '@lody/ui/button';
+import { colors } from '@lody/ui/tokens/colors.stylex';
+import { space, text } from '@lody/ui/tokens/scales.stylex';
 import { OnboardingBackButton, OnboardingShell } from '../onboarding-shell';
 import { useOnboardingAnalytics } from '../onboarding-analytics';
+import { onboardingSurface as surface } from './surface';
+
+const styles = stylex.create({
+  panel: {
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    minHeight: '192px',
+    paddingInline: space[6],
+    textAlign: 'center',
+  },
+  note: {
+    margin: 0,
+    maxWidth: '384px',
+    fontSize: text.bodySize,
+    lineHeight: text.bodyLeading,
+    color: colors.secondaryLabel,
+  },
+});
 
 type ElectronBrowserSignInClient = {
   signIn: {
@@ -96,17 +119,17 @@ export function LoginScreen({ onBack, onNext }: { onBack: () => void; onNext: ()
       )}
       secondaryAction={<OnboardingBackButton onClick={onBack} disabled={locked} />}
       primaryAction={
-        <Button size="lg" onClick={handleSignIn} disabled={locked}>
-          {locked ? <Loader2 className="size-4 animate-spin" /> : <LogIn className="size-4" />}
+        <Button size="large" onClick={handleSignIn} disabled={locked}>
+          {locked ? <Spinner size="small" /> : <LogIn {...stylex.props(surface.icon16)} />}
           {openingBrowser
             ? t('onboarding.login.openBrowserAgain', 'Open browser again')
             : t('onboarding.login.openBrowser', 'Continue in browser')}
-          {!locked ? <ExternalLink className="size-4" /> : null}
+          {!locked ? <ExternalLink {...stylex.props(surface.icon16)} /> : null}
         </Button>
       }
     >
-      <div className="flex min-h-48 items-center justify-center rounded-lg border border-border bg-muted/30 px-6 text-center">
-        <p className="max-w-sm text-sm text-muted-foreground">
+      <div {...stylex.props(surface.card, styles.panel)}>
+        <p {...stylex.props(styles.note)}>
           {error ??
             (checkStale
               ? t(

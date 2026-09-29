@@ -1,7 +1,7 @@
 import { useCallback, useMemo } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useAtomValue } from 'jotai';
-import { toast } from 'sonner';
+import { toast } from '@/lib/toast';
 import {
   type LocalProjectControlResponse,
   type LocalProjectId,

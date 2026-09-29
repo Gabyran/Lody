@@ -3,12 +3,14 @@ import i18next from 'i18next';
 import { syncTime, createServerTimeFetcher } from '@lody/shared';
 import { usePlatformCapability } from '@lody/platform/react';
 import { API_BASE_URL } from '../lib';
-import { commands, registerBuiltInCommands } from '../lib/commands';
+import { registerBuiltInCommands } from '../lib/commands';
+import { CommandShortcutHost } from '../lib/commands/shortcut-host';
 import { rehydrateAvatarMemoryCacheFromPersistent } from '../lib/avatar-cache';
 import { languageAtom } from '../atoms/settings';
 import { maybeClearLodyCacheOnBoot } from '../lib/clear-local-cache';
 import { getIpcServices } from '../lib/electron-ipc-client';
 import { useSetAtom } from 'jotai';
+import { installFocusModality } from '@lody/ui/focus-modality';
 import {
   detectBrowserLanguage,
   fallbackLanguage,
@@ -50,6 +52,9 @@ const AppInitializer = ({ children }: { children: React.ReactNode }) => {
     });
   }, [setLanguage]);
 
+  // Focus rings follow keyboard navigation, not whatever key was pressed last.
+  useEffect(() => installFocusModality(), []);
+
   /* Run a pending "clear cache" / "clear all local data" request as early as
      possible. `RuntimeProvider` also awaits it (and shares the same one-shot
      promise, so the repo IndexedDB is never reopened mid-delete), but it only
@@ -89,17 +94,6 @@ const AppInitializer = ({ children }: { children: React.ReactNode }) => {
     });
   }, [hasCloudSync]);
 
-  // Attach the global command registry's capture-phase keydown listener once at app boot.
-  // (Built-in commands are registered during render above — before any descendant effect —
-  // not here.) Attaching after registration is fine: the listener reads bindings live.
-  useEffect(() => {
-    if (typeof window === 'undefined') return undefined;
-    commands.attach(window);
-    // No detach on unmount — AppInitializer is the app root and we want the listener
-    // to live as long as the renderer process.
-    return undefined;
-  }, []);
-
   /* Pre-warm the in-memory avatar blob-URL map from the persistent
      CacheStorage so the first `<UserAvatar>` mount after a refresh
      can hit the cache synchronously. Without this, every fresh app
@@ -111,7 +105,12 @@ const AppInitializer = ({ children }: { children: React.ReactNode }) => {
     void rehydrateAvatarMemoryCacheFromPersistent();
   }, []);
 
-  return <>{children}</>;
+  return (
+    <>
+      <CommandShortcutHost />
+      {children}
+    </>
+  );
 };
 
 export default AppInitializer;

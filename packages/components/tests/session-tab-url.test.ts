@@ -4,11 +4,51 @@ import {
   formatSessionTabSearch,
   parseSessionTabSearch,
   resolveActiveSessionTab,
+  getSessionTabFallback,
+  isSessionTabClosed,
 } from '../src/lib/session-tab-url';
 
 const parentSessionId = 'parent-session-id';
 
+describe('shared tab closure', () => {
+  it('retains the requested tab until the replica can establish its open neighbour', () => {
+    expect(getSessionTabFallback('parent', ['parent'], [], false)).toBe('parent');
+    expect(getSessionTabFallback('parent', ['parent', 'child'], ['child'], false)).toBe('parent');
+    expect(getSessionTabFallback('parent', ['parent', 'child'], ['child'], true)).toBe('child');
+    expect(getSessionTabFallback('parent', ['parent'], [], true)).toBe('empty');
+  });
+  it('keeps tab closure independent of archive', () => {
+    const liveWorkspace = false;
+    const archivedWorkspace = true;
+    expect(isSessionTabClosed({}, liveWorkspace)).toBe(false);
+    expect(isSessionTabClosed({ isTabClosed: true }, liveWorkspace)).toBe(true);
+    // Reviewing an archived workspace shows every tab it had open.
+    expect(isSessionTabClosed({ isArchived: true }, archivedWorkspace)).toBe(false);
+    expect(isSessionTabClosed({ isArchived: true, isTabClosed: true }, archivedWorkspace)).toBe(
+      true
+    );
+    // A live workspace keeps archived children out of its strip.
+    expect(isSessionTabClosed({ isArchived: true, isTabClosed: false }, liveWorkspace)).toBe(true);
+    expect(isSessionTabClosed({ isArchived: false, isTabClosed: false }, liveWorkspace)).toBe(
+      false
+    );
+  });
+  it('chooses the right open neighbour, then the left, then empty', () => {
+    const order = ['parent', 'a', 'b', 'c'];
+    expect(getSessionTabFallback('a', order, ['parent', 'c'])).toBe('c');
+    expect(getSessionTabFallback('c', order, ['parent', 'a'])).toBe('a');
+    expect(getSessionTabFallback('parent', order, [])).toBe('empty');
+    expect(getSessionTabFallback('absent', order, ['a'])).toBe('a');
+  });
+});
+
 describe('parseSessionTabSearch', () => {
+  it('round trips the empty surface without restoring the parent', () => {
+    expect(parseSessionTabSearch(formatExplicitSessionTabSearch('empty'))).toEqual({
+      kind: 'empty',
+    });
+    expect(formatSessionTabSearch('empty', parentSessionId)).toBe('empty');
+  });
   it('returns missing when tab is absent', () => {
     expect(parseSessionTabSearch(undefined)).toEqual({ kind: 'missing' });
   });
@@ -90,6 +130,9 @@ describe('resolveActiveSessionTab', () => {
     draftTabIds: ['draft:d1'],
     promotedChildSessionIdsByDraftId: {},
   };
+  it('keeps an explicitly empty surface empty when new tabs arrive', () => {
+    expect(resolveActiveSessionTab({ kind: 'empty' }, context)).toBe('empty');
+  });
 
   it('resolves a missing tab to the parent (external navigation stripping ?tab converges)', () => {
     // #193: navigation that removes `?tab` while a child was active must
