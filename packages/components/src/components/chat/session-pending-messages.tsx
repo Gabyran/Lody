@@ -15,23 +15,19 @@ import type { ConversationView } from '@/lib/conversation-view/types';
 import { formatConversationTimestamp } from '@/lib/format-conversation-timestamp';
 import { toIntlLocale } from '@/lib/intl-locale';
 import type { SessionAttachmentDraft } from '@/lib/session-attachment-draft';
-import type { SessionSendRecord, SessionSendViewRecord } from '@/lib/session-send-journal';
-import {
-  isQueueBoundSendRecord,
-  isUnsent,
-  selectInstantHistoryRecords,
-} from '@/lib/session-send-status';
+import type { PendingSessionSend } from '@/lib/session-pending-sends';
+import { isQueueBoundSend } from '@/lib/session-send-status';
 import { cn } from '@/lib/utils';
 import { Button } from '@lody/ui/button';
 import { Progress } from '@lody/ui/progress';
 import { Spinner } from '@/ui/spinner';
 
-const empty: readonly SessionSendRecord[] = [];
+const empty: readonly PendingSessionSend[] = [];
 const emptySnapshot = () => empty;
 const emptySubscribe = () => () => {};
 
 /**
- * Attachments share a card across uploading, interrupted, ready and failed states. The
+ * Attachments share a card across uploading, stopped, ready and failed states. The
  * skeleton (icon slot / name + one status line / trailing status slot) so the
  * row does not resize as attachments move between them. `ready` wins over
  * `error`: preparation clears the error when it later succeeds, and a retry
@@ -311,13 +307,11 @@ export function PendingMessageRow({
   conversationFontSize = DEFAULT_CONVERSATION_FONT_SIZE,
   onRetry,
   onCancel,
-  onDiscard,
   busy = false,
 }: {
-  record: SessionSendViewRecord;
+  record: PendingSessionSend;
   user?: SessionChatUser;
   conversationFontSize?: ConversationFontSize;
-  onDiscard?: () => void;
   busy?: boolean;
   onRetry: () => void;
   onCancel: () => void;
@@ -331,24 +325,17 @@ export function PendingMessageRow({
     locale: toIntlLocale(i18n?.resolvedLanguage ?? i18n?.language),
   });
   const failed = Boolean(record.error);
-  const interrupted = record.activity === 'interrupted';
-  const images = record.attachments?.filter((attachment) => attachment.kind === 'image') ?? [];
-  const files = record.attachments?.filter((attachment) => attachment.kind === 'file') ?? [];
+  const images = record.attachments.filter((attachment) => attachment.kind === 'image');
+  const files = record.attachments.filter((attachment) => attachment.kind === 'file');
+  const uploading = record.attachments.some((attachment) => !attachment.ready);
   // Only fall back to the record-level reason when no card shows one, so the
   // same failure is never spelled out twice. Image frames carry no caption.
   const reasonOnACard = files.some((attachment) => attachmentState(attachment) === 'failed');
   const messageStatus = failed
     ? t('sessions.pendingMessageUploadFailed')
-    : interrupted
-      ? t('sessions.pendingMessageInterrupted')
-      : record.stage === 'prepared'
-        ? t('sessions.pendingMessageWaiting')
-        : t('sessions.pendingMessageUploading');
-  const showRetry = failed || interrupted;
-  const showDiscard =
-    (record.stage === 'prepared' || (record.stage === 'committed' && record.version === 4)) &&
-    Boolean(onDiscard);
-  const showCancel = record.stage === 'saved';
+    : uploading
+      ? t('sessions.pendingMessageUploading')
+      : t('sessions.pendingMessageWaiting');
 
   return (
     <ConversationColumn className="py-2 sm:py-3">
@@ -389,7 +376,7 @@ export function PendingMessageRow({
                   <PendingImageAttachment
                     key={attachment.id}
                     attachment={attachment}
-                    active={!interrupted}
+                    active={!failed}
                     single={images.length === 1}
                   />
                 ))}
@@ -401,7 +388,7 @@ export function PendingMessageRow({
                   <PendingFileAttachment
                     key={attachment.id}
                     attachment={attachment}
-                    active={!interrupted}
+                    active={!failed}
                   />
                 ))}
               </div>
@@ -424,27 +411,15 @@ export function PendingMessageRow({
               committing (which swaps these for hover-revealed copy/fork) does
               not move anything below. */}
           <div className="flex min-h-7 flex-wrap items-center justify-end gap-2">
-            {showCancel ? (
-              <Button size="small" variant="ghost" onClick={onCancel}>
-                {t('sessions.cancelPendingSend')}
-              </Button>
-            ) : null}
-            {showDiscard ? (
-              <Button size="small" variant="ghost" disabled={busy} onClick={onDiscard}>
-                {t('sessions.discardPendingSend')}
-              </Button>
-            ) : null}
-            {showRetry ? (
+            <Button size="small" variant="ghost" disabled={busy} onClick={onCancel}>
+              {t('sessions.cancelPendingSend')}
+            </Button>
+            {failed ? (
               <Button size="small" disabled={busy} onClick={onRetry}>
                 {t('sessions.retryPendingSend')}
               </Button>
             ) : null}
           </div>
-          {showDiscard ? (
-            <p className="max-w-sm text-xs text-muted-foreground">
-              {t('sessions.discardPreparedSendDescription')}
-            </p>
-          ) : null}
         </div>
       </article>
     </ConversationColumn>
@@ -452,10 +427,10 @@ export function PendingMessageRow({
 }
 
 /**
- * Local pending rows render beside ordinary conversation messages, never in the
- * composer. `history` hides a record whose turn already landed: commit writes
- * history before the journal records it, and both must not show at once.
- * `user` is the local sender as the delivered row resolves it.
+ * Held sends render beside ordinary conversation messages, never in the
+ * composer. `history` hides a send whose turn already landed: the write reaches
+ * the conversation view before the held send is removed, and both must not show
+ * at once. `user` is the local sender as the delivered row resolves it.
  */
 export function SessionPendingMessages({
   sessionId,
@@ -469,18 +444,18 @@ export function SessionPendingMessages({
   conversationFontSize?: ConversationFontSize;
 }) {
   const runtime = useAtomValue(activeWorkspaceRuntimeAtom);
-  const journal = runtime?.sendJournal;
-  const records = useSyncExternalStore(
-    journal?.subscribe ?? emptySubscribe,
-    journal?.getSnapshot ?? emptySnapshot,
+  const pendingSends = runtime?.pendingSends;
+  const sends = useSyncExternalStore(
+    pendingSends?.subscribe ?? emptySubscribe,
+    pendingSends?.getSnapshot ?? emptySnapshot,
     emptySnapshot
   );
   // A string snapshot: the view changes at token rate, the landed set rarely.
   const readLanded = () =>
     history
-      ? records
-          .filter((record) => history.indexOf(record.id) >= 0)
-          .map((record) => record.id)
+      ? sends
+          .filter((send) => history.indexOf(send.id) >= 0)
+          .map((send) => send.id)
           .join('\n')
       : '';
   const subscribeHistory = useCallback(
@@ -492,50 +467,34 @@ export function SessionPendingMessages({
   const { t } = useTranslation();
   const [busy, setBusy] = useState<string | null>(null);
   const [failure, setFailure] = useState<string | null>(null);
-  useEffect(() => {
-    void journal
-      ?.refresh()
-      .catch((error: unknown) =>
-        setFailure(error instanceof Error ? error.message : t('sessions.sendRecoveryUnavailable'))
-      );
-  }, [journal, sessionId, t]);
-  // Queue-bound messages render in the queue sheet, and instant ones as ordinary
-  // turns projected into the conversation; neither renders here.
-  const instant = new Set(selectInstantHistoryRecords(records).map((record) => record.id));
-  const pending = records.filter(
-    (record) =>
-      record.sessionId === sessionId &&
-      !isQueueBoundSendRecord(record) &&
-      !instant.has(record.id) &&
-      isUnsent(record) &&
-      !landed.has(record.id)
+  // Queue-bound messages render in the queue sheet instead.
+  const pending = sends.filter(
+    (send) => send.sessionId === sessionId && !isQueueBoundSend(send) && !landed.has(send.id)
   );
   if (!pending.length) return null;
-  const action = async (record: SessionSendRecord, kind: 'retry' | 'cancel' | 'discard') => {
-    setBusy(record.id);
+  const action = async (send: PendingSessionSend, kind: 'retry' | 'cancel') => {
+    setBusy(send.id);
     try {
-      if (kind === 'cancel') await journal?.cancel(record.id);
-      if (kind === 'discard') await journal?.discard(record.id);
-      await journal?.retry(sessionId);
+      if (kind === 'cancel') await pendingSends?.cancel(send.id);
+      else pendingSends?.retry(send.id);
       setFailure(null);
     } catch (error) {
-      setFailure(error instanceof Error ? error.message : t('sessions.sendRecoveryUnavailable'));
+      setFailure(error instanceof Error ? error.message : t('sessions.sendError'));
     } finally {
       setBusy(null);
     }
   };
   return (
     <section aria-label={t('sessions.pendingSends', { count: pending.length })}>
-      {pending.map((record) => (
+      {pending.map((send) => (
         <PendingMessageRow
-          key={record.id}
-          record={record}
+          key={send.id}
+          record={send}
           user={user}
           conversationFontSize={conversationFontSize}
-          busy={busy === record.id}
-          onRetry={() => void action(record, 'retry')}
-          onCancel={() => void action(record, 'cancel')}
-          onDiscard={() => void action(record, 'discard')}
+          busy={busy === send.id}
+          onRetry={() => void action(send, 'retry')}
+          onCancel={() => void action(send, 'cancel')}
         />
       ))}
       {failure ? (

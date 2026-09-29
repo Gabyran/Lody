@@ -1,9 +1,11 @@
 # Attachment draft lifetimes and PR boundaries
 
-Status: proposed
+Status: implemented
 Translation: current
 
 [中文](2026-09-14-deferred-attachment-send.zh.md)
+
+Verdict (2026-09-29): implemented. The four-layer stack shipped through #705, #707, #709 and #719, so this note moved from `proposed/`. Partially superseded by [removing the session send journal](../simplification/2026-09-29-remove-session-send-journal.md): the durable journal, cross-window recovery, recovery-record compatibility and exit/logout/cache-clear gating were removed, and sends waiting for attachments are now held in memory only. Send-time attachment preparation, the workspace Effect resource owner and the submission boundary remain. The body below is the historical record.
 
 ## Abstract
 
@@ -50,7 +52,7 @@ Use one ManagedRuntime with storage, transport, and submission dependency bounda
 
 ## Staged adoption and rollback
 
-[Spec section 11.6](../../../../specs/session-files.md#116-staged-adoption-and-acceptance) proposes three prerequisite PRs followed by one complete draft feature PR, each merged after its responsibility is complete:
+[Spec section 11.6](../../../../specs/session-files.md#114-staged-adoption) proposes three prerequisite PRs followed by one complete draft feature PR, each merged after its responsibility is complete:
 
 1. Extract ordinary submission interfaces while preserving behavior. Baseline cases exercise actual input/configuration/routing; retain existing defects as counterexamples with an owning later fix.
 2. Use Effect inside the service to fully own migrated uploads, cancellation, retries, borrows, and release. Components keep ordinary interfaces and transfer still starts on addition; exit cleanup ships with its resources.
@@ -221,14 +223,17 @@ lays its empty state out as `flex-1`, which pushes trailing content to the botto
   their caption and remain the reason owners.
 - The action row is always in the flow at 28px, the delivered row's
   hover-revealed action height, so nothing below moves at commit.
-- Commit writes history before the journal records it. `SessionPendingMessages`
-  now hides any record whose id is already in the conversation view, through a
-  string snapshot so token-rate view changes do not re-render it. Before this,
-  a continuation could show the same turn twice for that interval.
+- The write reaches the conversation view before the held send is removed
+  (originally: before the journal recorded the commit; after #1118, before the
+  in-memory list drops it). `SessionPendingMessages` hides any send whose id is
+  already in the conversation view, through a string snapshot so token-rate
+  view changes do not re-render it. Otherwise a continuation could show the
+  same turn twice for that interval.
 
-Verified by component typecheck, the two pending-send suites (a journal-driven
-test stalls commit after the history write and fails when the filter is
-removed), and Storybook screenshots at 720px and 380px in light and dark.
+Verified by component typecheck, the pending-row suite (a test stalls the write
+after the history update and fails when the filter is removed), and Storybook
+screenshots at 720px and 380px in light and dark. Re-verified after merging
+main's local-first sends (#1118).
 Remaining limit: the delivered image still fetches its thumbnail from the
 server after commit and shows its own loading block meanwhile; seeding that
 cache from the uploaded blob is a separate change. Not verified in the packaged
