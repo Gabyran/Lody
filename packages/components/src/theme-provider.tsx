@@ -181,7 +181,11 @@ function LodyThemeProvider({
   // purpose: it says nothing about how the app should open.
   useEffect(() => {
     void getIpcServices()?.app.setStartupThemeSource(storedTheme);
-    window.__LODY_STARTUP_THEME__?.persist(storedTheme).catch((error: unknown) => {
+    // Local cast, like `native-platform.ts`: host typecheck programs that pull
+    // this file in by path do not include `window-globals.d.ts`.
+    const shell = (window as Window & { __LODY_STARTUP_THEME__?: LodyStartupThemeBridge })
+      .__LODY_STARTUP_THEME__;
+    shell?.persist(storedTheme).catch((error: unknown) => {
       console.warn('[theme] Failed to persist the startup theme to the native shell', error);
     });
   }, [storedTheme]);
