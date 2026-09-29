@@ -1065,7 +1065,7 @@ export function MentionTwoLevelMenu({
 }: {
   categories: MentionCategory[];
   surface?: MentionSurface;
-  /** The preferred side of the caret; the positioner flips when it cannot fit. */
+  /** An explicit `top` caret menu stays above while one row fits there. */
   menuSide?: 'top' | 'bottom';
   /** `caret` follows the insertion point; `composer` anchors to the nearest
    *  `[data-mention-frame]` for surfaces that explicitly want a fixed menu. */
@@ -1189,7 +1189,7 @@ export function MentionTwoLevelMenu({
 
   return (
     // The docked mobile panel places itself; this width is the desktop popup's.
-    // Caret menus follow typing and may flip to fit.
+    // Caret menus follow typing; an explicit top menu scrolls above the caret.
     <MentionContent
       positionAnchor={anchor}
       side={menuSide}

@@ -82,6 +82,69 @@ test('a wide desktop composer keeps a long menu inside its own width', async ({ 
   await expect(menu).toBeHidden();
 });
 
+test('a tall command list stays above the caret while filtering at desktop height', async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 800, height: 600 });
+  await page.goto('/iframe.html?id=chat-chatcomposer--session-mention-stress&viewMode=story');
+  await page.locator('#storybook-root > div > div').evaluate((layout: HTMLElement) => {
+    layout.style.justifyContent = 'flex-start';
+    layout.style.paddingTop = '220px';
+  });
+
+  const input = page.getByRole('combobox', { name: 'Message' });
+  await input.click();
+  await page.keyboard.type('/');
+  const menu = page.getByRole('listbox');
+  await expect(page.getByRole('option')).toHaveCount(24);
+  const caretBox = await input.boundingBox();
+  const initialMenu = await menu.boundingBox();
+  const firstOption = await page.getByRole('option').first().boundingBox();
+  expect(caretBox).not.toBeNull();
+  expect(initialMenu).not.toBeNull();
+  expect(firstOption).not.toBeNull();
+  expect(initialMenu!.y + initialMenu!.height).toBeLessThan(caretBox!.y + 40);
+  expect(initialMenu!.y).toBeGreaterThanOrEqual(8);
+  expect(firstOption!.y).toBeGreaterThanOrEqual(initialMenu!.y);
+
+  if (process.env.MENTION_SCREENSHOT_PHASE) {
+    await page.screenshot({
+      path: `${process.env.MENTION_SCREENSHOT_PHASE}-top-cap.png`,
+      animations: 'disabled',
+    });
+  }
+
+  for (let index = 0; index < 18; index += 1) await page.keyboard.press('ArrowDown');
+  await expect
+    .poll(() =>
+      menu.evaluate((node) =>
+        [node, ...Array.from(node.querySelectorAll('div'))].some(
+          (element) => element.scrollHeight > element.clientHeight + 10 && element.scrollTop > 0
+        )
+      )
+    )
+    .toBe(true);
+  await expect(input).toBeFocused();
+
+  await page.keyboard.type('command-2');
+  await expect(page.getByRole('option')).toHaveCount(7);
+  const filteredMenu = await menu.boundingBox();
+  expect(filteredMenu).not.toBeNull();
+  expect(filteredMenu!.y + filteredMenu!.height).toBeLessThan(caretBox!.y + 40);
+  await expect(input).toBeFocused();
+
+  for (let index = 0; index < 'command-2'.length; index += 1) {
+    await page.keyboard.press('Backspace');
+  }
+  await expect(page.getByRole('option')).toHaveCount(24);
+  await expect
+    .poll(async () => {
+      const currentMenu = await menu.boundingBox();
+      return currentMenu ? currentMenu.y + currentMenu.height < caretBox!.y + 40 : false;
+    })
+    .toBe(true);
+});
+
 test('the open session menu tracks editor scale and window resize', async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
   await page.goto('/iframe.html?id=chat-chatcomposer--session-mention-stress&viewMode=story');
