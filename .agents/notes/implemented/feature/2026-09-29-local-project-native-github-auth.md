@@ -32,3 +32,5 @@ managed session exists. Its managed-context test verifies token rotation using a
 real broker. Test execution is currently blocked by missing checkout dependencies
 (`vitest` is unavailable); no live GitHub/keychain validation is claimed.
 See the [updated draft Spec](../../../../specs/github-command-credentials.md).
+
+PR: [#1117](https://github.com/LodyAI/Lody/pull/1117).

@@ -25,3 +25,5 @@ Translation: current
 以及已有另一托管会话时的请求者切换。托管上下文测试使用真实 broker 验证 token 轮换。
 当前 checkout 缺少依赖，`vitest` 不可用，因此测试尚未执行；未声称完成真实 GitHub 或钥匙串验证。
 参见[更新后的规格草案](../../../../specs/github-command-credentials.zh.md)。
+
+PR：[#1117](https://github.com/LodyAI/Lody/pull/1117)。
