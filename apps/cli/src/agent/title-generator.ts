@@ -288,6 +288,7 @@ export type GenerateTitleOptions = {
   taskPrompt: string;
   logger: Logger;
   env?: Record<string, string>;
+  codexProfile?: import('./codex-profile-runtime').CodexProfileExecution;
   titleConfig?: TitleGenerationConfig;
 };
 
@@ -306,6 +307,7 @@ export const generateTitleIsolated = async (
       `[title-generator] Starting isolated title ACP agent (cliType=${options.cliType} agentType=${options.agentType})`
     );
     const { agentProcess, client, acpSessionId, sessionResponse } = await startLocalAcpAgent({
+      codexProfile: options.codexProfile,
       cliType: options.cliType,
       agentType: options.agentType,
       customAcp: options.customAcp,

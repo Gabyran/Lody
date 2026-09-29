@@ -1,8 +1,15 @@
+import { EventEmitter } from 'node:events';
 import winston from 'winston';
 import DailyRotateFile from 'winston-daily-rotate-file';
 import { formatLogArgs } from './log-format';
 import { getDesktopBuildDescription } from './desktop-build';
 import { cleanupExpiredLogs, LODY_LOG_DIR, LODY_LOG_RETENTION_MAX_FILES } from './log-retention';
+import {
+  type FileLogSink,
+  probeDirectoryWritable,
+  ResilientFileTransport,
+  type ResilientFileTransportOptions,
+} from './resilient-file-transport';
 
 const cleanedLogDirs = new Set<string>();
 
@@ -91,10 +98,24 @@ const createConsoleTransport = (config: LoggerConfig) => {
   });
 };
 
+// winston-daily-rotate-file does not type `logStream`, the emitter its file
+// stream errors reach. Without it a write failure could not be caught.
+const asFileLogSink = (transport: DailyRotateFile): FileLogSink => {
+  const logStream: unknown = Reflect.get(transport, 'logStream');
+  if (!(logStream instanceof EventEmitter)) {
+    throw new Error('winston-daily-rotate-file no longer exposes logStream');
+  }
+  return Object.assign(transport, { logStream });
+};
+
 // 文件传输配置
 // File transport captures debug regardless of the console level, and trace only
-// when LODY_LOG_TRACE is set; see resolveFileLogLevel.
-export const createFileTransport = (config: LoggerConfig) => {
+// when LODY_LOG_TRACE is set; see resolveFileLogLevel. A failing disk degrades it
+// to dropping lines instead of crashing the process; see ResilientFileTransport.
+export const createFileTransport = (
+  config: LoggerConfig,
+  seams: Partial<Pick<ResilientFileTransportOptions, 'now' | 'probeWritable' | 'writeStderr'>> = {}
+): ResilientFileTransport => {
   const fileConfig = config.file || {};
   const dirname = fileConfig.dirname || LODY_LOG_DIR;
 
@@ -107,15 +128,23 @@ export const createFileTransport = (config: LoggerConfig) => {
     cleanedLogDirs.add(dirname);
   }
 
-  return new DailyRotateFile({
+  return new ResilientFileTransport({
     level: resolveFileLogLevel(),
-    filename: fileConfig.filename || `%DATE%.log`,
-    dirname,
-    datePattern: fileConfig.datePattern || 'YYYY-MM-DD',
-    maxSize: fileConfig.maxSize || '20m',
-    maxFiles: fileConfig.maxFiles || LODY_LOG_RETENTION_MAX_FILES,
-    zippedArchive: fileConfig.zippedArchive ?? true,
     format: createFileFormatter(),
+    dirname,
+    openSink: () =>
+      asFileLogSink(
+        new DailyRotateFile({
+          filename: fileConfig.filename || `%DATE%.log`,
+          dirname,
+          datePattern: fileConfig.datePattern || 'YYYY-MM-DD',
+          maxSize: fileConfig.maxSize || '20m',
+          maxFiles: fileConfig.maxFiles || LODY_LOG_RETENTION_MAX_FILES,
+          zippedArchive: fileConfig.zippedArchive ?? true,
+        })
+      ),
+    probeWritable: () => probeDirectoryWritable(dirname),
+    ...seams,
   });
 };
 
@@ -195,7 +224,7 @@ class WinstonLogger implements Logger {
       if (transport instanceof winston.transports.Console) {
         transport.level = level === 'silent' ? 'error' : level;
         transport.silent = level === 'silent';
-      } else if (transport instanceof DailyRotateFile) {
+      } else if (transport instanceof ResilientFileTransport) {
         transport.level = resolveFileLogLevel();
       }
     });

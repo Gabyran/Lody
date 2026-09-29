@@ -337,6 +337,21 @@ describe('runCommand', () => {
     }).pipe(Effect.provide(NodeProcessLive))
   );
 
+  // A caller that persists the pid (Codex profile logout) needs it at spawn.
+  it.live('hands the started child to onSpawned', () =>
+    Effect.gen(function* () {
+      let spawnedPid: number | undefined;
+      yield* runCommand({
+        command: process.execPath,
+        args: ['-e', ''],
+        onSpawned: (child) => {
+          spawnedPid = child.pid;
+        },
+      });
+      expect(spawnedPid).toBeGreaterThan(0);
+    }).pipe(Effect.provide(NodeProcessLive))
+  );
+
   it.effect('ends the command tree and fails when it outlives its timeout', () => {
     const table = new FakeProcessTable('linux');
     return Effect.gen(function* () {

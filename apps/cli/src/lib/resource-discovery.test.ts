@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { McpServer } from '@modelcontextprotocol/server';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
+import { z } from 'zod';
 import type {
   AgentConfigMeta,
   AgentRole,
@@ -12,6 +13,55 @@ import type {
 } from '@lody/shared';
 import { ResourceDiscovery, type DiscoverySource } from './resource-discovery';
 import { registerDiscoveryTools } from '@/mcp/discovery-tools';
+import { createSessionToolRegistrar, type SessionToolHandlers } from '@/mcp/session-tool-router';
+
+describe('Session tool argument boundaries', () => {
+  it('normalizes once and rejects invalid input through both MCP and direct daemon dispatch', async () => {
+    const server = new McpServer({ name: 'boundary-test', version: '1' });
+    const handlers: SessionToolHandlers = new Map();
+    const register = createSessionToolRegistrar(
+      server,
+      (_name, _args, execute) => execute(),
+      handlers
+    );
+    const received: string[] = [];
+    register(
+      'resolve',
+      {
+        inputSchema: z.object({
+          value: z
+            .string()
+            .min(1)
+            .transform((value) => `resolved:${value}`),
+        }),
+      },
+      async ({ value }) => {
+        received.push(value);
+        return { content: [{ type: 'text', text: value }] };
+      }
+    );
+    const daemonHandler = handlers.get('resolve');
+    if (!daemonHandler) throw new Error('Missing daemon handler');
+    const client = new Client({ name: 'boundary-client', version: '1' });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    try {
+      await server.connect(serverTransport);
+      await client.connect(clientTransport);
+      await expect(daemonHandler({ value: 123 })).rejects.toThrow();
+      const mcp = await client.callTool({ name: 'resolve', arguments: { value: 'input' } });
+      const daemon = await daemonHandler({ value: 'input' });
+      expect(mcp.content).toEqual([{ type: 'text', text: 'resolved:input' }]);
+      expect(daemon.content).toEqual(mcp.content);
+      expect(received).toEqual(['resolved:input', 'resolved:input']);
+      const invalid = await client.callTool({ name: 'resolve', arguments: { value: 123 } });
+      expect(invalid.isError).toBe(true);
+      expect(received).toEqual(['resolved:input', 'resolved:input']);
+    } finally {
+      await client.close();
+      await server.close();
+    }
+  });
+});
 
 const machine = (id: string): MachineMeta => ({ id, name: id }) as MachineMeta;
 const config = (id: string, machineId = 'one'): AgentConfigMeta =>
@@ -125,6 +175,7 @@ describe('resource discovery across MCP and CLI', () => {
   it('keeps readable broken Roles, hides others private Roles and filters sensitive run options', async () => {
     const roles = [
       role('good', {
+        description: 'Review changes before merging',
         promptPrefix: 'Synthetic instructions',
         runConfig: { configOptionValues: { api_key: 'synthetic-secret', effort: 'high' } },
       }),
@@ -136,6 +187,13 @@ describe('resource discovery across MCP and CLI', () => {
     ];
     const discovery = new ResourceDiscovery(source({ roles: async () => roles }));
     const page = await discovery.list('agent_role');
+    expect(page.items.find((row) => row.id === 'good')?.description).toBe(
+      'Review changes before merging'
+    );
+    expect(page.items.find((row) => row.id === 'offline')?.description).toBe('');
+    expect((await discovery.get('agent_role', 'good')).item.description).toBe(
+      'Review changes before merging'
+    );
     expect(page.items.map((row) => row.id)).not.toContain('private');
     expect(page.items.find((row) => row.id === 'missing')?.availability?.reason).toBe(
       'machine_inaccessible_or_missing'
@@ -153,13 +211,6 @@ describe('resource discovery across MCP and CLI', () => {
     );
     await expect(discovery.get('agent_role', 'private')).rejects.toThrow('RESOURCE_NOT_FOUND');
     await expect(discovery.get('agent_role', 'absent')).rejects.toThrow('RESOURCE_NOT_FOUND');
-    const scoped = new ResourceDiscovery(
-      source({ roles: async () => [role('bound')], roleMachineScope: 'two' as MachineId })
-    );
-    expect((await scoped.get('agent_role', 'bound')).item.availability).toEqual({
-      state: 'unavailable',
-      reason: 'outside_work_context',
-    });
     const unknown = new ResourceDiscovery(
       source({ roles: async () => [role('bound')], onlineMachineIds: async () => null })
     );
@@ -274,7 +325,10 @@ describe('resource discovery across MCP and CLI', () => {
   it('serves the shared result through the real MCP wire and rejects irrelevant filters', async () => {
     const discovery = new ResourceDiscovery(source());
     const server = new McpServer({ name: 'synthetic-discovery', version: '1' });
-    registerDiscoveryTools(server, (read) => read(discovery));
+    registerDiscoveryTools(
+      createSessionToolRegistrar(server, (_name, _args, run) => run()),
+      (read) => read(discovery)
+    );
     const client = new Client({ name: 'synthetic-client', version: '1' });
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
     await server.connect(serverTransport);

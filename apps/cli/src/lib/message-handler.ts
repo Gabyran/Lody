@@ -295,6 +295,11 @@ import {
   type SessionEditAndResendInput,
 } from '@/session/session-edit-and-resend-service';
 import { LodyOperationCoordinator } from '@/orchestration/operation-coordinator';
+import {
+  createLocalSessionCommandEnvironment,
+  getSessionCommandEnvironment,
+  runWithSessionCommandEnvironment,
+} from './session-command-environment';
 import { getLodyOperationStorePath, LodyOperationStore } from '@/orchestration/operation-store';
 import {
   createSessionResult,
@@ -497,7 +502,11 @@ function getMachineCommandEventImpact(events: readonly MachineFlockEvent[]): {
     if (parsed?.kind === 'deleteLocalProjectCommand') {
       deleteLocalProject = true;
     }
-    if (parsed?.kind === 'providerSetup' || parsed?.kind === 'providerSetupCancellation') {
+    if (
+      parsed?.kind === 'providerSetup' ||
+      parsed?.kind === 'providerSetupCancellation' ||
+      parsed?.kind === 'agentConfig'
+    ) {
       providerSetup = true;
     }
   }
@@ -2761,7 +2770,7 @@ export class MessageHandler {
       throw new Error(`Operation ${operation.operationId} item ${index} has no prompt.`);
     }
 
-    const auth: AuthContext = {
+    const auth: AuthContext = getSessionCommandEnvironment()?.auth ?? {
       token: this.token,
       userId: this.userId,
       userName: this.userId,
@@ -3537,8 +3546,17 @@ export class MessageHandler {
       dispatchWatcher: this.sessionDispatchWatcher,
       userResolver: this.sessionUserResolver,
       logger: this.logger,
+      ...(this.cloudPort.kind === 'local'
+        ? {
+            confirmTargetReadable: async () => {
+              await this.workspaceDocument.repo.flush();
+            },
+          }
+        : {}),
       materializeTarget: async (operation, item, index) =>
-        await this.materializeOperationTarget(operation, item, index),
+        await this.withSessionCommandEnvironment(() =>
+          this.materializeOperationTarget(operation, item, index)
+        ),
     });
 
     this.setupSessionEventHandlers();
@@ -4787,6 +4805,7 @@ export class MessageHandler {
       if (notifications.length === 0) {
         return;
       }
+      const lateEvidenceOwners = new Set<string>();
       try {
         await appendACPNotificationsToAssistantEntry(
           args.sessionDoc,
@@ -4794,15 +4813,19 @@ export class MessageHandler {
           args.assistantEntryId,
           {
             logger: this.logger,
-            editCallback: async (edits) => {
+            editCallback: async (edits, assistantEntryId) => {
               // Edit tool calls (Codex apply_patch et al) bypass `fs/write_text_file` and
               // standard ACP diff blocks. Collect them so the turn-end persist can gap-fill
               // them into the diff store (old text chained from the prior recorded state),
               // keeping the turn-diff badge and its clickable content from the same source.
-              this.collectCodeCollabEditEvidence(args.sessionId, args.turnId, edits);
+              const ownerTurnId = assistantEntryId ?? args.turnId;
+              this.collectCodeCollabEditEvidence(args.sessionId, ownerTurnId, edits);
+              if (ownerTurnId !== args.turnId) lateEvidenceOwners.add(ownerTurnId);
             },
-            standardDiffCallback: async (diffs) => {
-              await this.collectCodeCollabStandardDiffs(args.sessionId, args.turnId, diffs);
+            standardDiffCallback: async (diffs, assistantEntryId) => {
+              const ownerTurnId = assistantEntryId ?? args.turnId;
+              await this.collectCodeCollabStandardDiffs(args.sessionId, ownerTurnId, diffs);
+              if (ownerTurnId !== args.turnId) lateEvidenceOwners.add(ownerTurnId);
             },
           },
           args.modelInfo
@@ -4827,6 +4850,9 @@ export class MessageHandler {
       await this.markACPNotificationsUnread(args.sessionId, args.sessionDoc, notifications);
       if (args.targetSource === 'finalized_turn') {
         await this.persistLateCodeCollabTurnDiffs(args.sessionId, args.turnId);
+      }
+      for (const ownerTurnId of lateEvidenceOwners) {
+        await this.persistLateCodeCollabTurnDiffs(args.sessionId, ownerTurnId);
       }
     };
 
@@ -6271,6 +6297,65 @@ export class MessageHandler {
     return requester === ownerUserId || requester === this.userId;
   }
 
+  private withSessionCommandEnvironment<T>(run: () => T): T {
+    if (this.cloudPort.kind !== 'local') return run();
+    return runWithSessionCommandEnvironment(
+      createLocalSessionCommandEnvironment({
+        manager: this.workspaceDocument,
+        workspaceId: this.workspaceId,
+        machineId: this.machineId,
+        machineName: this.machineName,
+        userId: this.userId,
+        host: {
+          readInvocation: (sessionId) => {
+            const invocation = this.executionService.getActiveInvocationContext(sessionId);
+            return invocation
+              ? {
+                  type: 'session/active-invocation-context',
+                  sessionId,
+                  active: true,
+                  ...invocation,
+                }
+              : { type: 'session/active-invocation-context', sessionId, active: false };
+          },
+          readLiveStatus: async (sessionId) => {
+            const live = resolveSessionLiveStatus({
+              presence: this.sessionActivePresence.getStatus(sessionId),
+              execution: this.executionService.getExecutionSnapshot(sessionId),
+              hasPendingDispatch: this.sessionDispatchWatcher.hasPendingDispatch(sessionId),
+            });
+            return {
+              sessionId,
+              machineOnline: true,
+              fresh: true,
+              state: live.state,
+              observedAt: getServerNow(),
+            };
+          },
+          cancelSession: async (sessionId, turnId) => {
+            const targetTurnId =
+              turnId ?? this.executionService.getExecutionSnapshot(sessionId).activeTurnId;
+            if (!targetTurnId) return { success: false, error: 'Session has no active turn' };
+            return this.executionService.cancelSession(
+              {
+                type: 'session/cancel',
+                machineId: this.machineId,
+                workspaceId: this.workspaceId,
+                sessionId,
+                turnId: targetTurnId,
+              },
+              { pendingInput: 'promote', prePromptSession: 'discard' }
+            );
+          },
+          dispatchSession: async (sessionId) => {
+            void this.sessionDispatchWatcher.enqueueSessionCheck(sessionId);
+          },
+        },
+      }),
+      run
+    );
+  }
+
   async handleLocalMachineRpc(
     request: LocalMachineRpcRequestValidated
   ): Promise<LocalMachineRpcResponse> {
@@ -6303,6 +6388,31 @@ export class MessageHandler {
     };
 
     switch (request.method) {
+      case 'session/call-tool': {
+        if (this.cloudPort.kind !== 'local')
+          throw new Error('Daemon Session tools require a local workspace');
+        const { sessionId, name, arguments: args } = request.params;
+        if (
+          request.workspaceId !== this.workspaceId ||
+          request.machineId !== this.machineId ||
+          request.ownerSessionId !== sessionId
+        )
+          throw new Error('Session tool scope mismatch');
+        const { executeDaemonSessionTool } = await import('@/mcp/daemon-session-tools');
+        return this.withSessionCommandEnvironment(() =>
+          executeDaemonSessionTool(
+            {
+              machineId: this.machineId,
+              workspaceId: this.workspaceId,
+              sessionId,
+              localControlSocketPath: undefined,
+              workdir: process.cwd(),
+            },
+            name,
+            args
+          )
+        );
+      }
       case 'code-collab/get-file-index':
         await assertOwner(request.params.sessionId as SessionId);
         return await this.codeCollabV2Service.getFileIndex(request.params);
@@ -8805,7 +8915,23 @@ export class MessageHandler {
       this.logger.debug(`[${sessionId}] Generating session title because title is missing`);
       const resolvedTitleConfig =
         titleConfig ?? (await this.resolveTitleConfig(sessionId, meta?.agentConfigId));
+      const provider = meta?.agentConfigId
+        ? await this.workspaceDocument.getAgentConfigById(meta.agentConfigId, this.machineId)
+        : null;
+      if (meta?.agentConfigId && !provider) return null;
+      if (
+        provider &&
+        !provider.codexAuth &&
+        (await getCodexProfileStore().list(this.workspaceId)).some(
+          (profile) => profile.configId === provider.id && profile.machineId === this.machineId
+        )
+      )
+        return null;
+      const codexProfile = provider?.codexAuth
+        ? await getCodexProfileStore().resolve(this.workspaceId, provider)
+        : undefined;
       const title = await generateTitleIsolated({
+        codexProfile: codexProfile ? { profile: codexProfile } : undefined,
         cliType,
         agentType,
         customAcp,
@@ -9775,3 +9901,4 @@ export class MessageHandler {
     this.logger.debug(`[GC] Session ${sessionId} cleaned`);
   }
 }
+import { getCodexProfileStore } from '@/agent/codex-profile-store';

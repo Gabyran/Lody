@@ -578,6 +578,7 @@ function CandidateRow({
   term,
   now,
   onSelect,
+  sourceLabel,
 }: {
   candidate: MentionCandidate;
   lead: RowLead;
@@ -585,6 +586,7 @@ function CandidateRow({
   term: string;
   now: Date;
   onSelect?: () => void;
+  sourceLabel?: string;
 }) {
   const stacked = Boolean(candidate.subtitle || candidate.disabledReason);
   // Lit only when the title is where the term matched: an issue found by its
@@ -643,7 +645,11 @@ function CandidateRow({
           <span {...stylex.props(styles.note)}>{candidate.disabledReason}</span>
         ) : null}
       </span>
-      {trailing ? <span {...stylex.props(styles.trailing)}>{trailing}</span> : null}
+      {trailing || sourceLabel ? (
+        <span {...stylex.props(styles.trailing)}>
+          {[sourceLabel, trailing].filter(Boolean).join(' · ')}
+        </span>
+      ) : null}
       {descends ? (
         <RowGlyph value={candidate.value}>
           <ChevronRight {...stylex.props(styles.chevron)} />
@@ -908,6 +914,43 @@ export function MentionTwoLevelMenuBody({
     }
 
     if (view.level === 'aggregate') {
+      if (view.rankedCandidates) {
+        const pendingGroups = view.groups.filter(
+          ({ category, candidates }) =>
+            candidates.length === 0 &&
+            (category.status === 'loading' || category.status === 'error')
+        );
+        if (view.rankedCandidates.length === 0 && pendingGroups.length === 0) {
+          return <Message>{noMatch(view.term)}</Message>;
+        }
+        return (
+          <div {...stylex.props(listStyle)}>
+            {view.rankedCandidates.map(({ category, candidate }, rank) => (
+              <CandidateRow
+                key={candidate.value}
+                candidate={candidate}
+                lead="mark"
+                term={term}
+                now={now}
+                sourceLabel={category.label}
+                onSelect={() => onCandidateSelect?.(category, rank)}
+              />
+            ))}
+            {pendingGroups.map(({ category }) => (
+              <React.Fragment key={category.id}>
+                <GroupLabel>{category.label}</GroupLabel>
+                {category.message ? (
+                  <Message tone={category.status === 'error' ? 'error' : undefined}>
+                    {category.message}
+                  </Message>
+                ) : (
+                  <Message tone="loading">{t('mention.menu.loading', 'Loading…')}</Message>
+                )}
+              </React.Fragment>
+            ))}
+          </div>
+        );
+      }
       if (view.categories.length === 0 && view.groups.length === 0) {
         return <Message>{noMatch(view.term)}</Message>;
       }
@@ -1016,12 +1059,25 @@ const width = stylex.create({
 export function MentionTwoLevelMenu({
   categories,
   surface = 'unknown',
+  menuSide = 'bottom',
+  anchor = 'caret',
+  mobileDocked = true,
 }: {
   categories: MentionCategory[];
   surface?: MentionSurface;
+  /** The preferred side of the caret; the positioner flips when it cannot fit. */
+  menuSide?: 'top' | 'bottom';
+  /** `caret` follows the insertion point; `composer` anchors to the nearest
+   *  `[data-mention-frame]` for surfaces that explicitly want a fixed menu. */
+  anchor?: 'caret' | 'composer';
+  /** Keep the <640px docked panel. False keeps the floating popover on mobile —
+   *  for an editor mid-conversation where "dock above the composer" has no
+   *  bottom-anchored composer to sit over. */
+  mobileDocked?: boolean;
 }) {
   const context = useMentionContext('MentionTwoLevelMenu');
-  const isMobile = useIsMentionMobile();
+  const isMobileViewport = useIsMentionMobile();
+  const isMobile = isMobileViewport && mobileDocked;
   const trigger = context.trigger;
   const search = context.filterStore.search;
   const open = context.open;
@@ -1133,13 +1189,14 @@ export function MentionTwoLevelMenu({
 
   return (
     // The docked mobile panel places itself; this width is the desktop popup's.
-    // Placed against the composer, not the caret, and pinned above it: the room
-    // pick could otherwise land it below a composer pressed to the layer's top,
-    // over the very rows being completed.
+    // Caret menus follow typing and may flip to fit.
     <MentionContent
-      positionAnchor="composer"
-      side="top"
+      positionAnchor={anchor}
+      side={menuSide}
       sideOffset={8}
+      dockedOnMobile={mobileDocked}
+      fitViewport={anchor === 'caret'}
+      style={anchor === 'caret' ? { overflowY: 'auto', overscrollBehavior: 'contain' } : undefined}
       className={stylex.props(width.menu, detail && width.menuWithDetail).className}
     >
       <MentionTwoLevelMenuBody

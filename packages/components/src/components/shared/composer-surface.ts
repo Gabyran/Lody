@@ -292,6 +292,12 @@ export const composerSurface = stylex.create({
     fontWeight: 500,
     letterSpacing: text.controlTracking,
   },
+  /** Groups selector rows without overriding `Menu.Content`'s inset. */
+  menuList: {
+    display: 'flex',
+    flexDirection: 'column',
+    minWidth: 0,
+  },
   /** The scrolling region under the search field. */
   popupScroll: {
     minHeight: 0,

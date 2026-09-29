@@ -31,7 +31,7 @@ Child directories (`sessions/`, `mobile/`, …) own their own rules.
   Keep geometry in `session-row-leading-slot.tsx`; context-menu expand/collapse uses
   the same toggle.
 - Conversation titles stay `font-normal`; pin with the glyph, never weight.
-- Desktop working/waiting/unread status belongs only in `SessionRowStatusIndicator`
+- Desktop work/wait/unread/send status belongs only in `SessionRowStatusIndicator`
   inside `SidebarRowEndSlot`, never the leading slot; it replaces resting `Mergeable`,
   worktree, PR icon or mobile time with one 14px mark. +/- totals: hover card only.
   Mobile: [mobile/AGENTS.md](mobile/AGENTS.md). Folded groups: only
