@@ -187,7 +187,7 @@ reconnection under Effect, so the decision is to go inside the libraries:
   - The Promise facade must let other consumers' existing tests pass unchanged. That is the
     acceptance condition for the library-side PRs.
 - **Order.**
-  - Finish the [loro-repo Flock persistence migration](2026-09-27-loro-repo-flock-persistence-migration.md)
+  - Finish the [loro-repo Flock persistence migration](../../implemented/architecture/2026-09-27-loro-repo-flock-persistence-migration.md)
     first, then start the libraries' Effect migration, so the two projects do not rewrite the
     persistence layer at the same time.
   - Each library's migration is its own project, with its own plan in its own repository.
