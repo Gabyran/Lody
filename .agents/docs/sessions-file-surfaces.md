@@ -14,6 +14,15 @@ this page is the full text of the rules summarised there.
   workspace-relative path and, when wired, opens a file-preview viewer tab
   through `handleOpenFile` with `pathKind: 'canonical'` (never the markdown
   href parser).
+- The Changes sidebar's Types view keeps the filename prominent and shows its
+  parent workspace path beneath it, so similarly named files remain identifiable
+  without relying on a hover-only title.
+- Diffs opened with a precise file focus open only that file by default; the other
+  cards start collapsed and remain individually expandable. A base (All Changes)
+  diff opened without a focus starts with every card collapsed, while a direct
+  conversation/turn diff without a file focus keeps its all-files-open default.
+  On mobile, the diff-header action closes the diff sheet before opening the
+  file drawer so the diff modal cannot cover the destination viewer.
 - Editor window (Monaco): `session-monaco-text-viewer.tsx` inside
   `session-file-content-view.tsx`.
 - **What a client may DO with a session file is one model, `hooks/use-session-file-actions.ts`,

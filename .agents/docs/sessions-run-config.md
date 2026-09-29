@@ -235,13 +235,23 @@ this page is the full text of the rules summarised there.
   float shadow). The old bottom bar row is gone: machine name + workdir badge moved to
   `SessionHeaderMenu` (`machineName` prop). Mobile keeps the single
   `MobileSessionRunConfig` button + sheet.
-  Pending-attachment state machines: `pendingImages` (images) **and** `pendingFiles`
-  (files; cloud upload via `@/lib/session-file-upload.ts` with sha256/textPreview,
-  abort + part retry). Oversize images (>5 MiB) auto-degrade to files. Send blocks
-  while either is uploading. Desktop same-machine uploads use
-  `@/lib/electron-session-file-sender.ts` / `localProjects.sendSessionFileLocal`, return
-  a `transport:'local'` block into the same `pendingFiles[].uploaded` slot, and fall
-  back to cloud on handoff failure. The composer exposes one unfiltered hidden
-  `<input type="file">` on every platform (Windows included — the renderer no
-  longer crashes once locale `.pak`s ship; see `apps/electron/AGENTS.md`) and
-  routes each selection by MIME into the image or file state machine.
+  Images and files stay as local drafts until Send. Oversize images (>5 MiB)
+  degrade to files using the existing validation. On Send the composer hands the
+  complete input to the shared send admission and clears. A send with unready
+  attachments is held in the workspace runtime's memory, and its pending row owns
+  progress, retry, and cancellation. Existing-session direct/queue/guide and new
+  or child-session sends share this boundary, including attachment-only input.
+  Same-session text waits behind a held send. A held new conversation's metadata
+  is an in-memory placeholder until its first turn is written. Held sends do not
+  survive the page; leaving asks first.
+
+The workspace Effect owner joins upload, local handoff, store borrows, and warmup
+cleanup before closing their dependencies. Successful attachment receipts survive
+retry; cancellation prevents stale completion from publishing history. Desktop
+same-machine files still use `localProjects.sendSessionFileLocal`, including its
+existing cloud fallback and backfill policy. Permanent local references remain a
+[separate proposal](../../specs/local-attachment-references.md).
+
+See the [draft Spec](../../specs/session-files.md) for ownership, accepted loss,
+and acceptance boundaries. Implementation and deterministic tests do not establish
+packaged-device or native-mobile-shell acceptance.

@@ -41,6 +41,8 @@ import {
   buildHistoryReplayImport,
   getExternalAcpHistoryImportKey,
   getLocalProjectHistoryProviderKey,
+  getLocalProjectHistoryCatalogKey,
+  matchesHistoryProviderBinding,
   getServerNow,
   getSessionRoomId,
   isLoroRepoDocDeleted,
@@ -251,6 +253,7 @@ export function buildExistingHistorySessionIndex(
   });
   for (const entry of sortedMetas) {
     if (entry.meta.machineId !== machineId) continue;
+    if (!matchesHistoryProviderBinding(entry.meta.agentConfigId, provider)) continue;
     if (entry.meta.cliType !== provider.cliType) continue;
     if (entry.meta.agentType !== provider.agentType) continue;
     if (entry.meta.project?.kind !== 'local') continue;
@@ -285,24 +288,6 @@ export function buildExistingHistorySessionIndex(
   return index;
 }
 
-function getProviderLabel(provider: LocalProjectHistoryProvider): string {
-  return getLocalProjectHistoryProviderKey(provider);
-}
-
-function getHistoryImportKey(args: {
-  machineId: MachineId;
-  localProjectId: LocalProjectId;
-  provider: LocalProjectHistoryProvider;
-  acpSessionId: string;
-}): string {
-  return getExternalAcpHistoryImportKey({
-    machineId: args.machineId,
-    localProjectId: args.localProjectId,
-    provider: args.provider,
-    sourceAcpSessionId: args.acpSessionId,
-  });
-}
-
 const MAX_IMPORTED_SESSION_TITLE_CHARS = 80;
 
 function resolveSessionTitle(info: SessionInfo, provider: LocalProjectHistoryProvider): string {
@@ -310,7 +295,7 @@ function resolveSessionTitle(info: SessionInfo, provider: LocalProjectHistoryPro
   // which can carry Lody-appended instruction tails.
   const cleaned = info.title?.trim() ? sanitizeLodyInternalInstructions(info.title) : '';
   const title = cleaned.replace(/\s+/g, ' ').trim().slice(0, MAX_IMPORTED_SESSION_TITLE_CHARS);
-  return title || `${getProviderLabel(provider)} session`;
+  return title || `${getLocalProjectHistoryProviderKey(provider)} session`;
 }
 
 function parseUpdatedAtMs(updatedAt: string | undefined): number {
@@ -425,30 +410,64 @@ export class LocalProjectHistorySyncService {
     this.providerKey = getLocalProjectHistoryProviderKey(provider);
   }
 
-  private soleAgentConfigLookup?: Promise<AgentConfigMeta | undefined>;
+  private agentConfigLookup?: Promise<AgentConfigMeta | undefined>;
 
-  private soleAgentConfig(): Promise<AgentConfigMeta | undefined> {
-    return (this.soleAgentConfigLookup ??= this.manager.findSoleAgentConfig(
-      this.provider.cliType,
-      this.provider.agentType,
+  private selectedAgentConfig(): Promise<AgentConfigMeta | undefined> {
+    return (this.agentConfigLookup ??= this.resolveImportAgentConfig());
+  }
+
+  private async resolveImportAgentConfig(): Promise<AgentConfigMeta | undefined> {
+    if (!this.provider.agentConfigId) {
+      return this.manager.findSoleAgentConfig(
+        this.provider.cliType,
+        this.provider.agentType,
+        this.context.machineId
+      );
+    }
+    const config = await this.manager.getAgentConfigById(
+      this.provider.agentConfigId,
       this.context.machineId
-    ));
+    );
+    if (
+      !config ||
+      config.id !== this.provider.agentConfigId ||
+      config.machineId !== this.context.machineId ||
+      config.cliType !== this.provider.cliType ||
+      config.agentType !== this.provider.agentType
+    ) {
+      throw new Error(
+        'The selected history Provider is unavailable or does not match this machine and agent.'
+      );
+    }
+    return config;
   }
 
   /** Same rule as continuing the session: its bound Provider, else the default launch. */
   private async sessionAgentConfig(meta: SessionMeta): Promise<AgentConfigMeta | null> {
-    return meta.agentConfigId
-      ? await this.manager.getAgentConfigById(meta.agentConfigId, this.context.machineId)
-      : null;
+    if (!meta.agentConfigId) return null;
+    const config = await this.manager.getAgentConfigById(
+      meta.agentConfigId,
+      this.context.machineId
+    );
+    if (!config)
+      throw new Error(
+        'The session’s bound provider is unavailable; history replay cannot use another account'
+      );
+    return config;
   }
 
-  private launchProvider(config: AgentConfigMeta | null | undefined): HistoryProviderLaunch {
+  private async launchProvider(
+    config: AgentConfigMeta | null | undefined
+  ): Promise<HistoryProviderLaunch> {
     return config
       ? {
           ...this.provider,
           customAcp: config.customAcp,
           runtimeOverrides: config.runtimeOverrides,
           env: config.env,
+          codexProfile: config.codexAuth
+            ? await getCodexProfileStore().resolve(this.context.workspaceId, config)
+            : undefined,
         }
       : this.provider;
   }
@@ -459,7 +478,7 @@ export class LocalProjectHistorySyncService {
     config: AgentConfigMeta | null | undefined
   ): Promise<MaterializedReplay> {
     const { notifications, runtimeConfig } = await loadHistorySessionReplay({
-      provider: this.launchProvider(config),
+      provider: await this.launchProvider(config),
       rootPath,
       acpSessionId,
       logger: this.logger,
@@ -481,9 +500,7 @@ export class LocalProjectHistorySyncService {
       `${this.providerKey}:${this.context.workspaceId}:` +
       `${this.context.machineId}:${args.localProjectId}`;
     if (syncLeases.has(leaseKey)) {
-      throw new Error(
-        `${getProviderLabel(this.provider)} history sync is already running for this local project`
-      );
+      throw new Error(`${this.providerKey} history sync is already running for this local project`);
     }
     syncLeases.add(leaseKey);
     try {
@@ -514,9 +531,7 @@ export class LocalProjectHistorySyncService {
       `${this.providerKey}:${this.context.workspaceId}:` +
       `${this.context.machineId}:${args.localProjectId}`;
     if (syncLeases.has(leaseKey)) {
-      throw new Error(
-        `${getProviderLabel(this.provider)} history sync is already running for this local project`
-      );
+      throw new Error(`${this.providerKey} history sync is already running for this local project`);
     }
     syncLeases.add(leaseKey);
     try {
@@ -536,9 +551,7 @@ export class LocalProjectHistorySyncService {
       `${this.providerKey}:${this.context.workspaceId}:` +
       `${this.context.machineId}:${args.localProjectId}`;
     if (syncLeases.has(leaseKey)) {
-      throw new Error(
-        `${getProviderLabel(this.provider)} history sync is already running for this local project`
-      );
+      throw new Error(`${this.providerKey} history sync is already running for this local project`);
     }
     syncLeases.add(leaseKey);
     try {
@@ -568,16 +581,14 @@ export class LocalProjectHistorySyncService {
       const info = infoByAcpSessionId.get(selectedId);
       try {
         if (!info) {
-          throw new Error(
-            `${getProviderLabel(this.provider)} session was not found in the local project catalog`
-          );
+          throw new Error(`${this.providerKey} session was not found in the local project catalog`);
         }
 
-        const importKey = getHistoryImportKey({
+        const importKey = getExternalAcpHistoryImportKey({
           machineId: this.context.machineId,
           localProjectId: args.localProjectId,
           provider: this.provider,
-          acpSessionId: selectedId,
+          sourceAcpSessionId: selectedId,
         });
         const existing =
           (await this.findExistingHistorySession(args.localProjectId, selectedId)) ??
@@ -586,7 +597,7 @@ export class LocalProjectHistorySyncService {
           const materialized = await this.loadReplay(
             args.rootPath,
             acpSessionId,
-            await this.soleAgentConfig()
+            await this.selectedAgentConfig()
           );
           const importedSession = await this.importNewSession({
             info,
@@ -614,9 +625,7 @@ export class LocalProjectHistorySyncService {
           message: formatErrorMessage(error),
         });
         this.logger.warn(
-          `[${this.providerKey}-history-sync] Failed to import ${getProviderLabel(
-            this.provider
-          )} session ${acpSessionId}: ${formatErrorMessage(error)}`
+          `[${this.providerKey}-history-sync] Failed to import ${this.providerKey} session ${acpSessionId}: ${formatErrorMessage(error)}`
         );
       }
     }
@@ -641,16 +650,14 @@ export class LocalProjectHistorySyncService {
     });
     const info = snapshot.sessions.find((session) => session.sessionId === args.acpSessionId);
     if (!info) {
-      throw new Error(
-        `${getProviderLabel(this.provider)} session was not found in the local project catalog`
-      );
+      throw new Error(`${this.providerKey} session was not found in the local project catalog`);
     }
 
-    const importKey = getHistoryImportKey({
+    const importKey = getExternalAcpHistoryImportKey({
       machineId: this.context.machineId,
       localProjectId: args.localProjectId,
       provider: this.provider,
-      acpSessionId: args.acpSessionId,
+      sourceAcpSessionId: args.acpSessionId,
     });
     const finishResolved = async (
       meta: SessionMeta
@@ -806,9 +813,9 @@ export class LocalProjectHistorySyncService {
     rootPath: string;
     requiredSessionIds?: readonly string[];
   }): Promise<HistoryCatalogSnapshot> {
-    const agentConfig = await this.soleAgentConfig();
+    const agentConfig = await this.selectedAgentConfig();
     const catalog = await listHistorySessionsForLocalProject({
-      provider: this.launchProvider(agentConfig),
+      provider: await this.launchProvider(agentConfig),
       rootPath: args.rootPath,
       logger: this.logger,
       requiredSessionIds: args.requiredSessionIds,
@@ -844,11 +851,11 @@ export class LocalProjectHistorySyncService {
     localProjectId: LocalProjectId,
     acpSessionId: string
   ): Promise<ExistingHistorySession | undefined> {
-    const importKey = getHistoryImportKey({
+    const importKey = getExternalAcpHistoryImportKey({
       machineId: this.context.machineId,
       localProjectId,
       provider: this.provider,
-      acpSessionId,
+      sourceAcpSessionId: acpSessionId,
     });
     const sessionMetas = await listWorkspaceSessionMetas(this.manager);
     return buildExistingHistorySessionIndex(
@@ -865,6 +872,7 @@ export class LocalProjectHistorySyncService {
     acpSessionId: string
   ): boolean {
     if (meta.machineId !== this.context.machineId) return false;
+    if (!matchesHistoryProviderBinding(meta.agentConfigId, this.provider)) return false;
     if (meta.cliType !== this.provider.cliType) return false;
     if (meta.agentType !== this.provider.agentType) return false;
     if (meta.project?.kind !== 'local') return false;
@@ -890,11 +898,11 @@ export class LocalProjectHistorySyncService {
           this.provider,
           info,
           args.existingByImportKey.get(
-            getHistoryImportKey({
+            getExternalAcpHistoryImportKey({
               machineId: this.context.machineId,
               localProjectId: args.localProjectId,
               provider: this.provider,
-              acpSessionId: info.sessionId,
+              sourceAcpSessionId: info.sessionId,
             })
           )
         )
@@ -929,7 +937,7 @@ export class LocalProjectHistorySyncService {
           ...previous,
           history: {
             ...(previous.history ?? {}),
-            [this.providerKey]: {
+            [getLocalProjectHistoryCatalogKey(this.provider)]: {
               lastListedAt,
               sessions: Object.fromEntries(sessions.map((item) => [item.acpSessionId, item])),
             },
@@ -953,7 +961,7 @@ export class LocalProjectHistorySyncService {
     const roomId = getSessionRoomId(sessionId);
     const nowMs = getServerNow();
     const lastMessageAt = resolveSourceUpdatedAtMs(args.info, nowMs);
-    const agentConfig = await this.soleAgentConfig();
+    const agentConfig = await this.selectedAgentConfig();
     const meta: SessionMeta = {
       id: sessionId,
       machineId: this.context.machineId,
@@ -1113,3 +1121,4 @@ export class LocalProjectHistorySyncService {
     } satisfies Partial<SessionMeta>);
   }
 }
+import { getCodexProfileStore } from '@/agent/codex-profile-store';

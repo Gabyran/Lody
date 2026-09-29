@@ -116,6 +116,7 @@ export type TitleGenerationConfig = {
 };
 
 export type AgentConfigMeta = {
+  codexAuth?: import('./codex-auth-profile').CodexAuthProfile;
   id: AgentConfigId;
   /**
    * Parent machine this config belongs to. Configs are scoped per-machine because
@@ -243,6 +244,27 @@ const historyMessageItemSchema = schema
     {
       type: schema.String<MessageContent['type']>(),
       text: schema.LoroText({ required: false }),
+      run: schema.Any({
+        storageSchema: schema
+          .LoroMap(
+            {
+              items: schema.LoroList(
+                schema
+                  .LoroMap({
+                    text: schema.LoroText({ required: false }),
+                    content: schema.Any({
+                      storageSchema: schema.LoroList(historyToolContentSchema, undefined, {
+                        required: false,
+                      }),
+                    }),
+                  })
+                  .catchall(historyNestedPayloadSchema)
+              ),
+            },
+            { required: false }
+          )
+          .catchall(historyNestedPayloadSchema),
+      }),
       // Streaming fields: a hint, not a validation constraint on old/future payloads.
       markdown: schema.Any({ storageSchema: schema.LoroText({ required: false }) }),
       content: schema.Any({
@@ -595,6 +617,14 @@ export const isSessionHistoryDelivered = (
   return entry?.read === true;
 };
 
+/**
+ * User input no execution has claimed. `seen` is only the CLI's read receipt:
+ * the turn still needs its dispatch pointer and has not started.
+ */
+export const isSessionHistoryStatusAwaitingStart = (
+  status: SessionHistoryStatus | undefined
+): boolean => status === 'pending' || status === 'seen';
+
 export const isSessionHistoryPendingForDispatch = (
   entry: SessionHistoryStatusReadable | null | undefined
 ): boolean => {
@@ -813,6 +843,7 @@ export type SessionExternalHistoryCursorDocState = {
  * resolve customAcp/env from AgentConfigMeta and worktree scripts from project config.
  */
 export type SessionLaunchConfig = {
+  codexAuth?: import('./codex-auth-profile').CodexAuthProfile;
   customAcp?: CustomAcpLaunchSpec;
   runtimeOverrides?: BuiltinRuntimeOverrides;
   env?: Record<string, string>;

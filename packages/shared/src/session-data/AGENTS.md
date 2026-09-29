@@ -50,3 +50,12 @@
   with a commit-time guard against regressing an advanced execution status.
 - Test the real Loro reader and writer. Delayed reads use small injected Promise
   gates; there is no test-only implementation of the complete command API.
+- Normalized subagent events persist inside `subagent_task.run`, keyed by root ACP
+  session plus run id. Bind the initiating turn once; child output never changes root
+  turn identity, plan, tools, or accounting. Ignore unregistered/terminal output,
+  reject lineage cycles, and retain incomplete observation across snapshots. Declare
+  nested transcript streaming fields in `schema.ts`; legacy rows stay unchanged.
+
+- Submissions append on the live doc as local commits; transports upload only
+  local events. Never author on a fork and import the export: it misses upload,
+  copies the whole doc and adds a permanent peer.

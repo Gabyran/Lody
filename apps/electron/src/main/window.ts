@@ -1,3 +1,4 @@
+import { installRendererUnloadConfirmation } from './renderer-unload'
 import { getWindowTargetPath, presentWindowTarget } from './window-target'
 import { app, BrowserWindow, dialog, nativeTheme, shell } from 'electron'
 import { is } from '@electron-toolkit/utils'
@@ -410,6 +411,7 @@ export function createMainWindow(options: CreateMainWindowOptions): BrowserWindo
     pendingInitialMaximize.add(window)
   }
   registerProductWindow(window, options.warm ?? false)
+  installRendererUnloadConfirmation(window)
   if (!options.auxiliary) trackMainWindowState(window)
   const initialDevbarEnabled = isDevbarRendererEnabled()
   const mainTarget = resolveMainRendererTarget(
