@@ -2,6 +2,7 @@
 
 Status: implemented
 Translation: current
+PR: https://github.com/LodyAI/Lody/pull/1132
 
 [中文](2026-09-29-send-without-repo-flush.zh.md)
 
