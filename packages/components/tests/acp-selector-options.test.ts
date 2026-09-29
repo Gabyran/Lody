@@ -158,6 +158,64 @@ describe('declared per-model controls', () => {
     expect(hasFast(selectorsFor('gpt-5.6-sol'))).toBe(false);
   });
 
+  it('adds the built-in effort control when the probed model had none', () => {
+    const probedWithoutEffort = (agentType: string) =>
+      machineWithCapabilities({
+        [agentConfigId]: {
+          cliType: 'builtin',
+          agentType,
+          cacheVersion: ACP_CAPABILITY_CACHE_VERSION,
+          provenance: 'runtime',
+          modes: [],
+          models: [],
+          configOptions: [
+            {
+              id: 'model',
+              name: 'Model',
+              category: 'model',
+              type: 'select',
+              currentValue: 'model-a',
+              options: [
+                { value: 'model-a', name: 'A' },
+                { value: 'model-b', name: 'B' },
+              ],
+            },
+          ],
+          declaredModelControls: {
+            'model-a': { effortValues: [] },
+            'model-b': { effortValues: ['low', 'medium', 'high'] },
+          },
+          fetchedAt: 1,
+        },
+      });
+    const effortFor = (agentType: string, selectedModelId: string) =>
+      buildAcpSelectorOptions({
+        configId: agentConfigId,
+        cliType: 'builtin',
+        agentType,
+        selectedModelId,
+        machine: probedWithoutEffort(agentType),
+      }).configOptionSelectors.find((selector) => selector.category === 'thought_level');
+
+    expect(effortFor('codex', 'model-b')).toMatchObject({
+      configId: 'reasoning_effort',
+      currentValue: 'medium',
+    });
+    // Claude's control carries its provider default and starts on it.
+    expect(effortFor('claude', 'model-b')).toMatchObject({
+      configId: 'effort',
+      currentValue: 'default',
+    });
+    expect(effortFor('claude', 'model-b')?.options.map((option) => option.value)).toEqual([
+      'default',
+      'low',
+      'medium',
+      'high',
+    ]);
+    // Declared without effort: no control, rather than a guessed one.
+    expect(effortFor('codex', 'model-a')).toBeUndefined();
+  });
+
   it("keeps today's behaviour for a model the declaration does not cover", () => {
     // gpt-6-astra is undeclared: Codex's own tiers extend the probed list.
     expect(effortValues(selectorsFor('gpt-6-astra'))).toEqual(

@@ -56,6 +56,38 @@ the selected model.
   - A declared Fast is never a reason to reject a request.
   - Undeclared models keep today's behavior.
 
+## Declaration versus the control the adapter really offers
+
+Review of the first version found three gaps, now closed. A shared built-in binding
+(`getBuiltinEffortBinding`) records each built-in adapter's effort option id and how
+it publishes the control. Unknown agents get no binding, and Lody never guesses their
+ids.
+
+- **Claude's `default`**: Claude publishes a `default` effort option on top of the
+  model's levels. It clears the effort pin and follows the provider's default,
+  whenever the client does not negotiate AIR `recommendedValue`, which Lody does not.
+  The declaration lists only the levels. `resolveDeclaredEffortSupport` therefore
+  adds `default` for Claude and uses it as the fallback value. `getModelEffortChoices`
+  gives UI, CLI and MCP the same list, so `effort=default` is never rewritten to
+  `medium` or rejected.
+- **Missing control**: when the probed model had no effort control, a declared
+  model's effort gets the built-in adapter's own control (Claude `effort`, Codex
+  `reasoning_effort`).
+- **Unsupported versus unknown**:
+  - a declared empty list means the model has no effort, and the control is hidden;
+  - Claude omits `effortValues` exactly when a model has no effort, so for Claude a
+    declared model without them is unsupported;
+  - for other adapters an omitted list is unknown and keeps today's behavior.
+- **Role across a model switch**: applying a Role filters its values with the
+  outgoing model's selectors. When the Role also switches model, effort and Fast
+  (`isPerModelControlConfigId`) now pass through even when the outgoing model has no
+  such control. The selection resolution then validates them against the incoming
+  model, so `fast=true` survives a switch away from a model without Fast.
+- **MCP**:
+  - a model declared without Fast rejects `fastMode=true` and treats `false` as a
+    no-op;
+  - a model declared with Fast that the probe lacked gets the built-in Fast id.
+
 ## Limits
 
 - **Stale display**: an account or entitlement change outside Lody is not tracked

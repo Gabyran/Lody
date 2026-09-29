@@ -86,19 +86,123 @@ export const getDeclaredModelControls = (
 ): AcpModelControls | undefined => (modelId ? entry?.declaredModelControls?.[modelId] : undefined);
 
 /**
- * Reasoning-effort values a model accepts: the adapter's declaration first,
- * then the legacy per-model map. Undefined means unknown for that model.
+ * How a built-in adapter exposes reasoning effort, for turning a model
+ * declaration into the control the adapter really offers. Unknown agents have
+ * no binding: Lody never guesses their option ids.
+ *
+ * - `configId`: the option id the adapter uses for effort.
+ * - `providerDefaultValue`: a value the adapter offers on top of the model's
+ *   levels. Claude publishes `default` (clear the effort pin and follow the
+ *   provider's default) unless the client negotiates AIR `recommendedValue`,
+ *   which Lody does not; its declaration lists only the model's levels.
+ * - `omittedMeansUnsupported`: the adapter omits `effortValues` exactly when a
+ *   model has no effort control, so a declared model without them is
+ *   unsupported rather than unknown.
  */
-export const getModelReasoningEffortValues = (
+type BuiltinEffortBinding = {
+  configId: string;
+  label: string;
+  providerDefaultValue?: { value: string; name: string };
+  omittedMeansUnsupported: boolean;
+};
+
+const BUILTIN_EFFORT_BINDINGS: Record<string, BuiltinEffortBinding> = {
+  claude: {
+    configId: 'effort',
+    label: 'Effort',
+    providerDefaultValue: { value: 'default', name: 'Default' },
+    omittedMeansUnsupported: true,
+  },
+  codex: {
+    configId: 'reasoning_effort',
+    label: 'Reasoning effort',
+    omittedMeansUnsupported: false,
+  },
+};
+
+export const getBuiltinEffortBinding = (agent: {
+  cliType?: string | null;
+  agentType?: string | null;
+}): BuiltinEffortBinding | undefined =>
+  agent.cliType === 'builtin' && agent.agentType
+    ? BUILTIN_EFFORT_BINDINGS[agent.agentType.toLowerCase()]
+    : undefined;
+
+export type DeclaredEffortSupport =
+  | {
+      state: 'supported';
+      /** Every value the control accepts, including the provider default. */
+      values: string[];
+      /** Value to fall back to when the current one is not offered. */
+      fallbackValue: string;
+    }
+  | { state: 'unsupported' }
+  | { state: 'unknown' };
+
+/**
+ * The effort control the selected model really has, from its declaration.
+ * A model the declaration does not cover is unknown, and so is an omitted
+ * list for an adapter whose omission means nothing.
+ */
+export const resolveDeclaredEffortSupport = (
+  entry: { declaredModelControls?: Record<string, AcpModelControls> } | undefined,
+  modelId: string | null | undefined,
+  agent: { cliType?: string | null; agentType?: string | null }
+): DeclaredEffortSupport => {
+  const controls = getDeclaredModelControls(entry, modelId);
+  if (!controls) return { state: 'unknown' };
+  const binding = getBuiltinEffortBinding(agent);
+  const levels = controls.effortValues;
+  if (levels === undefined) {
+    return binding?.omittedMeansUnsupported ? { state: 'unsupported' } : { state: 'unknown' };
+  }
+  if (levels.length === 0) return { state: 'unsupported' };
+  const providerDefault = binding?.providerDefaultValue?.value;
+  return {
+    state: 'supported',
+    values: providerDefault ? [providerDefault, ...levels] : [...levels],
+    fallbackValue: providerDefault ?? (levels.includes('medium') ? 'medium' : levels[0]!),
+  };
+};
+
+/**
+ * Reasoning-effort values a model accepts for validation: the declared control
+ * (including a provider default) first, then the legacy per-model map.
+ * Undefined means unknown; an empty list means the model has no effort control.
+ */
+export const getModelEffortChoices = (
   entry:
     | {
         declaredModelControls?: Record<string, AcpModelControls>;
         modelReasoningEfforts?: Record<string, string[]>;
       }
     | undefined,
-  modelId: string | null | undefined
-): string[] | undefined =>
-  modelId
-    ? (entry?.declaredModelControls?.[modelId]?.effortValues ??
-      entry?.modelReasoningEfforts?.[modelId])
+  modelId: string | null | undefined,
+  agent: { cliType?: string | null; agentType?: string | null }
+): string[] | undefined => {
+  const declared = resolveDeclaredEffortSupport(entry, modelId, agent);
+  if (declared.state === 'supported') return declared.values;
+  if (declared.state === 'unsupported') return [];
+  return modelId ? entry?.modelReasoningEfforts?.[modelId] : undefined;
+};
+
+/** Option ids that carry a per-model control (effort or Fast) for any agent Lody knows. */
+export const isPerModelControlConfigId = (configId: string): boolean =>
+  configId === 'reasoning_effort' ||
+  configId === 'effort' ||
+  configId === 'fast' ||
+  configId === 'fast-mode';
+
+const BUILTIN_FAST_MODE_CONFIG_IDS: Record<string, string> = {
+  codex: 'fast-mode',
+  claude: 'fast',
+};
+
+/** The Fast option id a built-in adapter uses; undefined for unknown agents. */
+export const getBuiltinFastModeConfigId = (agent: {
+  cliType?: string | null;
+  agentType?: string | null;
+}): string | undefined =>
+  agent.cliType === 'builtin' && agent.agentType
+    ? BUILTIN_FAST_MODE_CONFIG_IDS[agent.agentType.toLowerCase()]
     : undefined;

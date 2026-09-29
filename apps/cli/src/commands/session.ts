@@ -1,6 +1,6 @@
 import {
   getDeclaredModelControls,
-  getModelReasoningEffortValues,
+  getModelEffortChoices,
   machineSupportsPreparedSessionInputProtocol,
 } from '@lody/shared';
 import {
@@ -1581,7 +1581,7 @@ function validateModelDependentTurnConfigOptionValues(
     const option = optionsById.get(id);
     const isEffort = isAcpThoughtLevelConfigOption(option ?? { id }) || id === 'effort';
     if (isEffort) {
-      const efforts = getModelReasoningEffortValues(capability, targetModelId);
+      const efforts = getModelEffortChoices(capability, targetModelId, capability);
       if (efforts !== undefined) {
         if (typeof value !== 'string' || !efforts.includes(value)) {
           throw new Error(
@@ -1625,7 +1625,7 @@ export function filterCompatibleTurnConfigOptionValues(
       if (targetModelId) {
         const isEffort = isAcpThoughtLevelConfigOption(option ?? { id }) || id === 'effort';
         if (isEffort) {
-          const efforts = getModelReasoningEffortValues(capability, targetModelId);
+          const efforts = getModelEffortChoices(capability, targetModelId, capability);
           if (efforts !== undefined) return typeof value === 'string' && efforts.includes(value);
         }
         // A different (or unknown) probe model cannot invalidate the target's

@@ -1,4 +1,9 @@
-import type { AcpCapabilityAuthority, AcpConfigOptionValue, AcpModelControls } from '@lody/shared';
+import {
+  isPerModelControlConfigId,
+  type AcpCapabilityAuthority,
+  type AcpConfigOptionValue,
+  type AcpModelControls,
+} from '@lody/shared';
 import {
   isConfigOptionValueValid,
   isThoughtLevelSelector,
@@ -337,11 +342,12 @@ export const resolveAcpSessionConfigSelection = (
  * Keeps the values the given selectors still offer.
  *
  * `switchesModel` says the caller applies these values together with a new
- * model. Reasoning effort is per model and the selectors still describe the
- * OUTGOING one, so validating the effort here would drop a value the incoming
- * model does offer (Grok 4.5 has no `xhigh`, Grok 4.6 does). It passes through
- * instead, and the selection resolution re-validates it against the resolved
- * model.
+ * model. Reasoning effort and Fast are per model and the selectors still
+ * describe the OUTGOING one: validating against them would drop a value the
+ * incoming model does offer (Grok 4.5 has no `xhigh`, Grok 4.6 does), and a
+ * control the outgoing model lacks entirely (no Fast toggle on model A) would
+ * drop the incoming model's value outright. Those keys pass through, and the
+ * selection resolution re-validates them against the resolved model.
  */
 export const filterAcpSessionConfigOptionValues = (
   values: Record<string, AcpConfigOptionValue> | undefined,
@@ -354,12 +360,22 @@ export const filterAcpSessionConfigOptionValues = (
     if (value === undefined) {
       continue;
     }
-    if (options.switchesModel === true && isThoughtLevelSelector(selector)) {
+    if (
+      options.switchesModel === true &&
+      (isThoughtLevelSelector(selector) || isPerModelControlConfigId(selector.configId))
+    ) {
       filtered[selector.configId] = value;
       continue;
     }
     if (isConfigOptionValueValid(selector, value)) {
       filtered[selector.configId] = value;
+    }
+  }
+  if (options.switchesModel === true) {
+    for (const [configId, value] of Object.entries(values ?? {})) {
+      if (!(configId in filtered) && isPerModelControlConfigId(configId)) {
+        filtered[configId] = value;
+      }
     }
   }
   return filtered;

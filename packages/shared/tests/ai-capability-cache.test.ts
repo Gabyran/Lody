@@ -13,8 +13,9 @@ import {
   type AcpCapabilityCacheEntry,
 } from '../src/ai';
 import {
-  getModelReasoningEffortValues,
+  getModelEffortChoices,
   readAcpModelCapabilitiesMeta,
+  resolveDeclaredEffortSupport,
 } from '../src/acp-model-capabilities';
 
 const entry = (cacheVersion?: number): AcpCapabilityCacheEntry => ({
@@ -242,12 +243,47 @@ describe('declared per-model controls', () => {
   });
 
   it('prefers a model declaration over the legacy per-model map', () => {
+    const codex = { cliType: 'builtin', agentType: 'codex' } as const;
     const capability = {
       declaredModelControls: { 'gpt-6': { effortValues: ['low', 'ultra'] } },
       modelReasoningEfforts: { 'gpt-6': ['low'], 'gpt-5': ['medium'] },
     };
-    expect(getModelReasoningEffortValues(capability, 'gpt-6')).toEqual(['low', 'ultra']);
-    expect(getModelReasoningEffortValues(capability, 'gpt-5')).toEqual(['medium']);
-    expect(getModelReasoningEffortValues(capability, 'other')).toBeUndefined();
+    expect(getModelEffortChoices(capability, 'gpt-6', codex)).toEqual(['low', 'ultra']);
+    expect(getModelEffortChoices(capability, 'gpt-5', codex)).toEqual(['medium']);
+    expect(getModelEffortChoices(capability, 'other', codex)).toBeUndefined();
+  });
+
+  it("adds Claude's provider default and tells unsupported from unknown per adapter", () => {
+    const claude = { cliType: 'builtin', agentType: 'claude' } as const;
+    const codex = { cliType: 'builtin', agentType: 'codex' } as const;
+    const capability = {
+      declaredModelControls: {
+        opus: { effortValues: ['low', 'high'], fastMode: true },
+        haiku: { fastMode: false },
+        empty: { effortValues: [] },
+      },
+    };
+
+    expect(resolveDeclaredEffortSupport(capability, 'opus', claude)).toEqual({
+      state: 'supported',
+      values: ['default', 'low', 'high'],
+      fallbackValue: 'default',
+    });
+    expect(resolveDeclaredEffortSupport(capability, 'opus', codex)).toEqual({
+      state: 'supported',
+      values: ['low', 'high'],
+      fallbackValue: 'low',
+    });
+    // Claude omits the list exactly when a model has no effort; Codex's omission says nothing.
+    expect(resolveDeclaredEffortSupport(capability, 'haiku', claude)).toEqual({
+      state: 'unsupported',
+    });
+    expect(resolveDeclaredEffortSupport(capability, 'haiku', codex)).toEqual({ state: 'unknown' });
+    expect(resolveDeclaredEffortSupport(capability, 'empty', codex)).toEqual({
+      state: 'unsupported',
+    });
+    expect(resolveDeclaredEffortSupport(capability, 'undeclared', claude)).toEqual({
+      state: 'unknown',
+    });
   });
 });

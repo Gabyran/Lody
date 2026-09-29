@@ -44,6 +44,29 @@ Claude 和 Codex 适配器其实已经在 `_meta.lody.modelCapabilities` 中报�
   - 报告中的 Fast 信息从不作为拒绝请求的理由。
   - 没有报告的模型保持现有行为。
 
+## 声明与适配器实际提供的控件
+
+对第一版的评审发现了三个缺口，现已修复。共享的内置绑定（`getBuiltinEffortBinding`）记录了每个内置适配器的
+effort 选项 id，以及它如何发布这个控件。未知 agent 没有绑定，Lody 也从不猜测它们的 id。
+
+- **Claude 的 `default`**：Claude 在模型支持的档位之外，还会发布一个 `default` effort 选项。
+  它表示清除 effort 固定值、跟随 provider 的默认，只要客户端没有协商 AIR `recommendedValue` 就会出现，
+  而 Lody 没有协商。声明中只列出档位。因此 `resolveDeclaredEffortSupport` 会为 Claude 补上 `default`，
+  并把它作为回退值。`getModelEffortChoices` 让 UI、CLI 和 MCP 使用同一份列表，
+  所以 `effort=default` 不会被改写成 `medium`，也不会被拒绝。
+- **控件缺失**：如果 probe 时的模型没有 effort 控件，已声明模型的 effort 会使用内置适配器自己的控件
+  （Claude 的 `effort`、Codex 的 `reasoning_effort`）。
+- **不支持与未知**：
+  - 声明为空列表表示模型没有 effort，控件隐藏；
+  - Claude 恰好在模型没有 effort 时省略 `effortValues`，所以对 Claude 而言，已声明但没有该字段的模型就是不支持；
+  - 对其他适配器，省略表示未知，保持现有行为。
+- **Role 切换模型**：应用 Role 时，会用切换前模型的选择器过滤 Role 的值。
+  当 Role 同时切换模型时，effort 和 Fast（`isPerModelControlConfigId`）即使在切换前的模型上没有对应控件，
+  现在也会原样透传，随后由选择解析按切换后的模型校验，所以从没有 Fast 的模型切走时，`fast=true` 得以保留。
+- **MCP**：
+  - 声明为没有 Fast 的模型，会拒绝 `fastMode=true`，并把 `false` 视为无需操作；
+  - 声明为有 Fast、但 probe 时没有该选项的模型，会使用内置的 Fast id。
+
 ## 局限
 
 - **显示可能过时**：在 Lody 之外更换账号或权益，要等到下一次 probe 或新建 session 带回新报告时才会反映出来。

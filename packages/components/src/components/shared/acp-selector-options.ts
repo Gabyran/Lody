@@ -19,6 +19,10 @@ import {
   type AcpConfigOptionValue as SharedAcpConfigOptionValue,
   type BuiltinRuntimeOverrides,
   type AcpModelControls,
+  ACP_THOUGHT_LEVEL_CATEGORY,
+  getBuiltinEffortBinding,
+  getBuiltinFastModeConfigId,
+  resolveDeclaredEffortSupport,
 } from '@lody/shared';
 import type { AcpSessionSelectOption } from './acp-session-select';
 
@@ -455,12 +459,42 @@ export const normalizeReasoningEffortSelectors = (
 ): AcpConfigOptionSelector[] => {
   // The adapter's own per-model declaration is authoritative for the models it
   // covers, for every agent: it replaces both the probed snapshot and the
-  // hand-maintained Codex tiers.
-  const declaredEfforts = options.selectedModelId
-    ? options.declaredModelControls?.[options.selectedModelId]?.effortValues
-    : undefined;
-  if (declaredEfforts && declaredEfforts.length > 0) {
-    return applyEffortLadder(selectors, declaredEfforts);
+  // hand-maintained Codex tiers. An undeclared model keeps the paths below.
+  const declared = resolveDeclaredEffortSupport(
+    { declaredModelControls: options.declaredModelControls },
+    options.selectedModelId,
+    { cliType: options.cliType, agentType: options.agentType }
+  );
+  if (declared.state === 'unsupported') {
+    return selectors.filter(
+      (selector) => selector.type !== 'select' || !isThoughtLevelSelector(selector)
+    );
+  }
+  if (declared.state === 'supported') {
+    const hasEffort = selectors.some(
+      (selector) => selector.type === 'select' && isThoughtLevelSelector(selector)
+    );
+    const binding = getBuiltinEffortBinding({
+      cliType: options.cliType,
+      agentType: options.agentType,
+    });
+    // The probe ran on a model without effort, so there is no control to
+    // relabel. Add a built-in adapter's own one; never guess an id otherwise.
+    const withEffort: AcpConfigOptionSelector[] =
+      hasEffort || !binding
+        ? selectors
+        : [
+            ...selectors,
+            {
+              configId: binding.configId,
+              label: binding.label,
+              category: ACP_THOUGHT_LEVEL_CATEGORY,
+              type: 'select',
+              options: [],
+              currentValue: declared.fallbackValue,
+            },
+          ];
+    return applyEffortLadder(withEffort, declared.values, declared.fallbackValue);
   }
   if (options.cliType === 'builtin' && options.agentType?.toLowerCase() === 'codex') {
     return normalizeCodexReasoningEffortSelectors(selectors, {
@@ -483,7 +517,8 @@ export const normalizeReasoningEffortSelectors = (
 
 const applyEffortLadder = (
   selectors: AcpConfigOptionSelector[],
-  efforts: readonly string[]
+  efforts: readonly string[],
+  fallbackValue: string = efforts.includes('medium') ? 'medium' : (efforts[0] ?? '')
 ): AcpConfigOptionSelector[] =>
   selectors.map((selector) => {
     if (selector.type !== 'select' || !isThoughtLevelSelector(selector)) {
@@ -496,19 +531,9 @@ const applyEffortLadder = (
         label: reasoningEffortOptionLabel(value),
         description: undefined,
       })),
-      currentValue: efforts.includes(selector.currentValue)
-        ? selector.currentValue
-        : efforts.includes('medium')
-          ? 'medium'
-          : (efforts[0] ?? ''),
+      currentValue: efforts.includes(selector.currentValue) ? selector.currentValue : fallbackValue,
     };
   });
-
-/** Built-in agents' Fast option ids, for a model whose Fast the probe did not see. */
-const BUILTIN_FAST_MODE_CONFIG_IDS: Record<string, string> = {
-  codex: CODEX_FAST_MODE_CONFIG_ID,
-  claude: CLAUDE_FAST_MODE_CONFIG_ID,
-};
 
 /**
  * Shows the Fast toggle for exactly the models that have it. The probed options
@@ -533,10 +558,10 @@ export const normalizeFastModeSelectors = (
   if (!fastMode) {
     return hasFast ? selectors.filter((selector) => !isFastModeSelector(selector)) : selectors;
   }
-  const configId =
-    options.cliType === 'builtin' && options.agentType
-      ? BUILTIN_FAST_MODE_CONFIG_IDS[options.agentType.toLowerCase()]
-      : undefined;
+  const configId = getBuiltinFastModeConfigId({
+    cliType: options.cliType,
+    agentType: options.agentType,
+  });
   if (hasFast || !configId) return selectors;
   return [
     ...selectors,
