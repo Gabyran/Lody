@@ -5,6 +5,8 @@ Translation: current
 
 [中文](2026-09-29-streams-sync-serialization.zh.md)
 
+PR: [LodyAI/Lody#1099](https://github.com/LodyAI/Lody/pull/1099)
+
 ## Abstract
 
 Sending a message updates workspace metadata and immediately requests full synchronization while live synchronization may still be uploading that metadata. Streams CRDT 0.16.0 can reject this overlap with an internal error even when the live upload and independent message dispatch succeed. Lody now pins the published 0.16.1 fix, which serializes explicit synchronization with live uploads and keeps pending-batch acknowledgment and removal within the same queue transaction. Published-package regression tests pass; the specific production incident's original internal exception remains unavailable, so this does not establish that every synchronization failure has the same cause.
