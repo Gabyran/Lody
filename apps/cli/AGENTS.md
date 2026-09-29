@@ -45,8 +45,8 @@ Root `AGENTS.md` applies; this file adds CLI context. Build, PR-poller, and adap
 
 - Prefer Effect TS idioms for new/refactored CLI code — services via `Context.Tag` + `Layer`,
   typed errors, structured concurrency, `Schedule` retries: context/cli-effect-ts.md.
-- Start, await or signal processes only via `@lody/shared/node/process` (Promise code:
-  `src/platform/promise-facade`), never `child_process`, `cross-spawn` or `kill`; enforced
+- Run or signal processes only via `@lody/shared/node/process` (Promise code:
+  `src/platform/promise-facade`), not `child_process`, `cross-spawn` or `kill`; enforced
   by `check:cli-process-boundary` ([rules](../../packages/shared/src/node/AGENTS.md)).
 - Keep the strict tsconfig, no `any` or non-null assertions, and Zod at every foreign boundary:
   context/cli-type-safety.md.
