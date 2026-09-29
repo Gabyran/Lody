@@ -116,7 +116,6 @@ Workspace `sendResources` owns preparation, cancellation and store borrows acros
 React unmount. Dispose before transports/caches; join noncancelable IPC. Only the
 cache disposes stores. Cancel I/O, fence late results, await multipart cleanup.
 
-Admission uses the scoped journal. Commit turns locally; resume appends only
-absent ids after catch-up. Lock submission/delivery separately;
-sync before retiring records. Observe live work and scoped Web Locks; reads must
-not restart interrupted sends. Keep recovery actions reachable inline on mobile.
+Ready sends: local commits, then best-effort RPC; no persistence or retry. Unready
+sends live only in `pendingSends`; archive/delete cancel/join them. Never
+replay uncertain steers. [Why](../../../../.agents/notes/implemented/simplification/2026-09-29-remove-session-send-journal.md).

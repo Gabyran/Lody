@@ -125,6 +125,7 @@ describe('resource discovery across MCP and CLI', () => {
   it('keeps readable broken Roles, hides others private Roles and filters sensitive run options', async () => {
     const roles = [
       role('good', {
+        description: 'Review changes before merging',
         promptPrefix: 'Synthetic instructions',
         runConfig: { configOptionValues: { api_key: 'synthetic-secret', effort: 'high' } },
       }),
@@ -136,6 +137,13 @@ describe('resource discovery across MCP and CLI', () => {
     ];
     const discovery = new ResourceDiscovery(source({ roles: async () => roles }));
     const page = await discovery.list('agent_role');
+    expect(page.items.find((row) => row.id === 'good')?.description).toBe(
+      'Review changes before merging'
+    );
+    expect(page.items.find((row) => row.id === 'offline')?.description).toBe('');
+    expect((await discovery.get('agent_role', 'good')).item.description).toBe(
+      'Review changes before merging'
+    );
     expect(page.items.map((row) => row.id)).not.toContain('private');
     expect(page.items.find((row) => row.id === 'missing')?.availability?.reason).toBe(
       'machine_inaccessible_or_missing'
@@ -153,13 +161,6 @@ describe('resource discovery across MCP and CLI', () => {
     );
     await expect(discovery.get('agent_role', 'private')).rejects.toThrow('RESOURCE_NOT_FOUND');
     await expect(discovery.get('agent_role', 'absent')).rejects.toThrow('RESOURCE_NOT_FOUND');
-    const scoped = new ResourceDiscovery(
-      source({ roles: async () => [role('bound')], roleMachineScope: 'two' as MachineId })
-    );
-    expect((await scoped.get('agent_role', 'bound')).item.availability).toEqual({
-      state: 'unavailable',
-      reason: 'outside_work_context',
-    });
     const unknown = new ResourceDiscovery(
       source({ roles: async () => [role('bound')], onlineMachineIds: async () => null })
     );

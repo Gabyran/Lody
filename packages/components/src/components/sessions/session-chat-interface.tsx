@@ -79,7 +79,11 @@ import {
 } from './session-chat-input-area';
 import { useSessionMcpSelection } from '@/hooks/use-session-mcp-selection';
 import { useSessionMentionSource } from '@/hooks/use-session-mention-source';
-import { MessageQueueDisplay, shouldRequestNativeQueueSteer } from './message-queue';
+import {
+  MessageQueueDisplay,
+  shouldRequestNativeQueueSteer,
+  useHasPendingQueueRecords,
+} from './message-queue';
 import { useTranslation } from 'react-i18next';
 import { toast } from '@/lib/toast';
 import type {
@@ -95,6 +99,7 @@ import type {
   SessionInputBlock,
   SessionLegacyMetaFields,
   SessionMeta,
+  SessionPreviewDocState,
   SessionStatus,
   SessionTurnInputConfig,
   CommentReferencePayload,
@@ -221,6 +226,7 @@ import { RenameSessionDialog, type RenameSessionDialogTarget } from './rename-se
 import { useResolvedTheme } from '../../theme-provider';
 import { PullRequestBadge } from './pull-request-badge';
 import { SessionInfoBar } from './session-info-bar';
+import { SessionPreviewPreload } from './session-preview-preload';
 import { CurrentSessionRelationsChip, useHasSessionRelations } from './session-relations-chip';
 import {
   mapGitHubCheckRunToPrCiRun,
@@ -2964,6 +2970,7 @@ export const SessionChatInterface = memo(
       () => (sessionDoc?.mq ?? []) as MessageQueueItem[],
       [sessionDoc?.mq]
     );
+    const hasPendingQueueRecords = useHasPendingQueueRecords(session.id, messageQueue);
     const billableSessionTurnCount = useMemo(
       () =>
         (conversationView ? countUserTurns(conversationView) : 0) +
@@ -4206,12 +4213,9 @@ export const SessionChatInterface = memo(
           agentRole: options?.agentRole,
           attachments: options?.attachments,
         });
-        if (
-          accepted &&
-          runtime?.sendJournal
-            ?.getSnapshot()
-            .some((record) => record.sessionId === session.id && record.stage === 'saved')
-        ) {
+        // A held send (attachments still preparing) dispatches itself later;
+        // the composer is free again now.
+        if (accepted && runtime?.pendingSends?.hasSession(session.id)) {
           directDispatchInFlightRef.current = false;
           setInputActionState('ready');
         }
@@ -4227,7 +4231,7 @@ export const SessionChatInterface = memo(
         return accepted;
       },
       [
-        runtime?.sendJournal,
+        runtime?.pendingSends,
         session.id,
         captureSessionEvent,
         configOptionValues,
@@ -4313,11 +4317,6 @@ export const SessionChatInterface = memo(
     // NEW message — the old turn is never revived.
     const handleResendUndelivered = useCallback(
       async (userTurnId: string, inputBlocks: SessionInputBlock[]): Promise<boolean> => {
-        const pending = await runtime?.sendJournal?.read(userTurnId);
-        if (pending && pending.stage !== 'delivered') {
-          await runtime!.sendJournal!.retry(session.id);
-          return true;
-        }
         // This is a new Turn with the old content, not a replay of the old run:
         // freeze the currently committed composer Role beside the current run
         // config. Copying only the original Role would pair it with unrelated
@@ -4350,8 +4349,6 @@ export const SessionChatInterface = memo(
         return accepted;
       },
       [
-        runtime,
-        session.id,
         handleSendMessage,
         sessionConversationConfig.agentRoleId,
         sessionConversationConfig.agentRoleRevision,
@@ -5409,22 +5406,11 @@ export const SessionChatInterface = memo(
             throw new Error('Queued message is empty');
           }
           const queuedUserTurnId = item.userTurnId?.trim() || `queued-${item.$cid}`;
-          // Queue admission owns this ID, but its delivered operation only
-          // inserted the queue row. Promote that record back to saved work so
-          // the journal appends the matching history turn before queue removal.
-          const promoted = await runtime?.sendJournal?.promoteQueuedTurn(
-            queuedUserTurnId,
+          // History first, then the queue row: the input is never absent from both.
+          const { entry: historyEntry } = await addSessionHistory(
             { ...pendingHistoryEntry, id: queuedUserTurnId },
-            { kind: 'guide', expectedTurnId: activeAssistantTurnId }
+            { guideExpectedTurnId: activeAssistantTurnId }
           );
-          const historyEntry =
-            promoted?.entry ??
-            (
-              await addSessionHistory({
-                ...pendingHistoryEntry,
-                id: queuedUserTurnId,
-              })
-            ).entry;
           await removeMessageQueueItem(item.$cid);
           trackMessageSend(historyEntry.id);
           touchSessionActivity(session.id).catch((error: unknown) => {
@@ -5458,7 +5444,6 @@ export const SessionChatInterface = memo(
         guideHistoryEntry,
         isExternalHistoryRefreshing,
         removeMessageQueueItem,
-        runtime,
         session.id,
         t,
         touchSessionActivity,
@@ -6111,6 +6096,15 @@ export const SessionChatInterface = memo(
     return (
       <PrLinkProvider prUrl={latestPr?.url} onOpenPrTab={prLinkHandler}>
         {isVisible &&
+          !preparingWindow &&
+          onOpenBrowser &&
+          (!browserActionSession || browserActionSession.id === session.id) && (
+            <SessionPreviewPreload
+              session={session}
+              preview={sessionDoc.preview as SessionPreviewDocState | undefined}
+            />
+          )}
+        {isVisible &&
           sessionDocReady &&
           (sessionHistory.length > 0 || (sessionHistoryLength === 0 && sessionDocSynced)) && (
             <span
@@ -6431,7 +6425,7 @@ export const SessionChatInterface = memo(
                     // bar is empty). Hidden with the composer: a pending
                     // permission bypasses the queue, as does share selection.
                     queue={
-                      messageQueue.length > 0 &&
+                      (messageQueue.length > 0 || hasPendingQueueRecords) &&
                       !shouldReplaceComposerWithPermission &&
                       !shareSelection.active ? (
                         <MessageQueueDisplay

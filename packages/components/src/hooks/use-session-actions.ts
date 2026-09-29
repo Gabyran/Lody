@@ -322,18 +322,9 @@ async function upsertSessionActivityPatch(
   const existing = await runtime.repo.getDocMeta(roomId);
   if (isLoroRepoDocDeleted(existing)) return undefined;
   const meta = existing?.meta as SessionMeta | undefined;
-  // A pending creation belongs to the local journal until its input is ready.
-  // Activity must not publish a partial session that hides that placeholder.
-  if (
-    !meta?.id &&
-    runtime.sendJournal
-      ?.getSnapshot()
-      .some(
-        (record) =>
-          record.sessionId === sessionId && record.creation && record.stage !== 'delivered'
-      )
-  )
-    return undefined;
+  // A held creation is written with its first message. Activity must not
+  // publish a partial session that hides its local placeholder meanwhile.
+  if (!meta?.id && runtime.pendingSends?.hasPendingCreation(sessionId)) return undefined;
   const patch = buildSessionActivityPatch(meta, proposal);
   if (Object.keys(patch).length > 0) {
     await runtime.writer.upsertDocMeta(roomId, patch as RepoDocMetaPatch);
@@ -699,14 +690,6 @@ export function useSessionActions(): SessionActions {
         throw new Error('Runtime not ready');
       }
 
-      await runtime.sendJournal?.refresh();
-      if (
-        runtime.sendJournal
-          ?.getSnapshot()
-          .some((record) => record.sessionId === sessionId && record.stage !== 'delivered')
-      ) {
-        throw new Error('Complete or cancel pending messages before deleting this conversation');
-      }
       const sessionRoomId = getSessionRoomId(sessionId);
       const sessionMeta = (await runtime.repo.getDocMeta(sessionRoomId))?.meta as
         | SessionMeta
@@ -721,10 +704,11 @@ export function useSessionActions(): SessionActions {
         );
       }
 
-      await Promise.all([
-        runtime.writer.deleteDoc(sessionRoomId),
-        runtime.releaseSessionStore(sessionId),
-      ]);
+      // Held sends never write after this: cancellation joins any in-flight write.
+      await runtime.pendingSends?.cancelSessions([sessionId]);
+      await runtime.writer.deleteDoc(sessionRoomId);
+      await runtime.repo.flush();
+      await runtime.releaseSessionStore(sessionId);
     },
     [invalidateExternalHistoryCatalog, runtime]
   );
@@ -745,25 +729,20 @@ export function useSessionActions(): SessionActions {
       if (!runtime) {
         throw new Error('Runtime not ready');
       }
+      // A conversation whose creation is still held exists only in memory:
+      // archiving it cancels that send (and its pending children) and ends here.
+      const unwritten = runtime.pendingSends?.hasPendingCreation(sessionId) ?? false;
+      await runtime.pendingSends?.cancelSessions([sessionId]);
+      if (unwritten && !(await runtime.repo.getDocMeta(getSessionRoomId(sessionId)))?.meta?.id) {
+        log('[session-archive] canceled unwritten conversation', { sessionId });
+        return;
+      }
       const archiveTargets = await runtime.readSessionOperationTargets(sessionId, 'archive');
       if (store.get(activeWorkspaceRuntimeAtom) !== runtime) {
         throw new Error('Workspace changed before archiving');
       }
-      await runtime.sendJournal?.refresh();
-      if (
-        runtime.sendJournal
-          ?.getSnapshot()
-          .some(
-            (record) =>
-              record.stage !== 'delivered' &&
-              archiveTargets.some(
-                (target) =>
-                  target.id === record.sessionId || target.id === record.creation?.parentSessionId
-              )
-          )
-      ) {
-        throw new Error('Complete or cancel pending messages before archiving this conversation');
-      }
+      // Held follow-ups would otherwise be written into archived conversations.
+      await runtime.pendingSends?.cancelSessions(archiveTargets.map((session) => session.id));
       for (const session of archiveTargets) {
         // The archived state is the whole request: the owning machine observes
         // it, releases the runtime, and reconciles the worktree directory.
@@ -780,6 +759,7 @@ export function useSessionActions(): SessionActions {
           }
         }
       }
+      await runtime.repo.flush();
       log('[session-archive] archived', {
         sessionId,
         targetSessionIds: archiveTargets.map((session) => session.id),

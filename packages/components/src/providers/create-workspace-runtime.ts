@@ -1,5 +1,5 @@
-import { createWorkspaceSessionSendJournal } from './workspace-session-send-journal';
-import { throwIfSendAborted } from '../lib/session-send-resources';
+import { createWorkspacePendingSends } from './workspace-pending-sends';
+import { migrateLegacySessionSends } from '../lib/legacy-session-send-migration';
 import { createSessionSendResources } from '@/lib/session-send-resources';
 import { waitForScheduleWriteSync, withScheduleWrite } from './schedule-write-sync';
 import {
@@ -185,11 +185,6 @@ export function resolveWorkspaceRuntimeCacheIdentity(
 }
 
 type RuntimeDeps = {
-  getSendAdmissionContext?: () => {
-    entitlement?: import('@lody/shared').BillingQuotaEntitlement;
-    sessionCount: number | null;
-  };
-
   accountId?: string | null;
   /**
    * Used for caching the (slug, id) mapping in localStorage.
@@ -512,6 +507,8 @@ export async function createWorkspaceRuntime(deps: RuntimeDeps): Promise<Workspa
   let localPresenceUnsubscribe: (() => void) | null = null;
   let transportAttached = false;
   let authToken: string | null = null;
+  // Assigned once the send resources exist; runs after the first meta sync.
+  let startLegacySendMigration: (() => void) | null = null;
   let cloudTransportAttached = false;
   let cloudTransportAttachPromise: Promise<void> | null = null;
   let metaSub: RepoRoomSubscription | null = null;
@@ -1025,6 +1022,28 @@ export async function createWorkspaceRuntime(deps: RuntimeDeps): Promise<Workspa
   >();
   const machineRpcClients = new Map<MachineId, LoroStreamsMachineRpcClient>();
   let machineRpcResponseDispatcher: LoroStreamsRpcResponseDispatcher | null = null;
+  const machineProtocolCapabilitiesCache = new Map<MachineId, MachineProtocolCapabilities>();
+  const machineProtocolCapabilitiesReads = new Map<
+    MachineId,
+    Promise<MachineProtocolCapabilities | undefined>
+  >();
+  const machineProtocolCapabilitiesEpoch = new Map<MachineId, number>();
+
+  const invalidateMachineProtocolCapabilities = (machineId: MachineId): void => {
+    machineProtocolCapabilitiesCache.delete(machineId);
+    machineProtocolCapabilitiesReads.delete(machineId);
+    machineProtocolCapabilitiesEpoch.set(
+      machineId,
+      (machineProtocolCapabilitiesEpoch.get(machineId) ?? 0) + 1
+    );
+  };
+
+  const invalidateMachineProtocolCapabilitiesForDoc = (docId: string): void => {
+    if (!docId.startsWith(MACHINE_DOC_PREFIX)) return;
+    const machineId = docId.slice(MACHINE_DOC_PREFIX.length).trim();
+    if (machineId) invalidateMachineProtocolCapabilities(machineId as MachineId);
+  };
+
   const emitControlConnectionState = () => {
     if (disposePromise) {
       return;
@@ -1442,6 +1461,7 @@ export async function createWorkspaceRuntime(deps: RuntimeDeps): Promise<Workspa
       if (event.kind !== 'doc-metadata') {
         return;
       }
+      invalidateMachineProtocolCapabilitiesForDoc(event.docId);
       targetRouter.observeDocMeta(event.docId, event.patch);
       deps.onDocMetaPatch?.(event.docId, event.patch);
     },
@@ -1819,8 +1839,33 @@ export async function createWorkspaceRuntime(deps: RuntimeDeps): Promise<Workspa
   async function getMachineProtocolCapabilities(
     machineId: MachineId
   ): Promise<MachineProtocolCapabilities | undefined> {
-    const entry = await repo.getDocMeta(getMachineRoomId(machineId));
-    return (entry?.meta as Partial<MachineMeta> | undefined)?.protocolCapabilities;
+    if (machineProtocolCapabilitiesCache.has(machineId)) {
+      return machineProtocolCapabilitiesCache.get(machineId);
+    }
+
+    const existingRead = machineProtocolCapabilitiesReads.get(machineId);
+    if (existingRead) return await existingRead;
+
+    const epoch = machineProtocolCapabilitiesEpoch.get(machineId) ?? 0;
+    const read = (async () => {
+      const entry = await repo.getDocMeta(getMachineRoomId(machineId));
+      const capabilities = (entry?.meta as Partial<MachineMeta> | undefined)?.protocolCapabilities;
+      if (
+        capabilities !== undefined &&
+        (machineProtocolCapabilitiesEpoch.get(machineId) ?? 0) === epoch
+      ) {
+        machineProtocolCapabilitiesCache.set(machineId, capabilities);
+      }
+      return capabilities;
+    })();
+    machineProtocolCapabilitiesReads.set(machineId, read);
+    try {
+      return await read;
+    } finally {
+      if (machineProtocolCapabilitiesReads.get(machineId) === read) {
+        machineProtocolCapabilitiesReads.delete(machineId);
+      }
+    }
   }
 
   const dispatchMachineStatusViaRpc = async (
@@ -3298,6 +3343,7 @@ export async function createWorkspaceRuntime(deps: RuntimeDeps): Promise<Workspa
           }
           initialMetaSyncCompleted = true;
           initialMetaSyncFailed = false;
+          startLegacySendMigration?.();
           currentMetaTracker.markFirstSynced();
           // Dual watches its local binding here; its marker is cleared by the
           // cloud Meta binding instead (attachCloudMetaHealthTracker).
@@ -4647,9 +4693,10 @@ export async function createWorkspaceRuntime(deps: RuntimeDeps): Promise<Workspa
     windowBootstrap?.close();
     sharedWindowDocuments.clear();
     disposePromise = (async () => {
+      // Held sends are in memory only: closing the workspace drops them.
+      pendingSends.dispose();
       // Cancel and join send I/O while its cache, transport and repo still exist.
       await sendResources.dispose();
-      await sendJournal?.close();
       cancelDelayedBackgroundSyncStart?.();
       cancelDelayedBackgroundSyncStart = null;
       cancelDelayedStartupAcpCapabilitiesRefresh?.();
@@ -4715,6 +4762,11 @@ export async function createWorkspaceRuntime(deps: RuntimeDeps): Promise<Workspa
       machineAcpBinaryProgressListeners.clear();
       machineAcpBinaryProgressSnapshots.clear();
       machineAcpAuthenticationProgressListeners.clear();
+      for (const machineId of machineProtocolCapabilitiesReads.keys()) {
+        invalidateMachineProtocolCapabilities(machineId);
+      }
+      machineProtocolCapabilitiesCache.clear();
+      machineProtocolCapabilitiesReads.clear();
 
       for (const handle of watchHandles) {
         try {
@@ -4842,57 +4894,49 @@ export async function createWorkspaceRuntime(deps: RuntimeDeps): Promise<Workspa
     acquire: sessionStoreCache.acquire,
     releaseRef: sessionStoreCache.releaseRef,
   });
-  const sendJournal = deps.accountId
-    ? createWorkspaceSessionSendJournal({
-        accountId: deps.accountId,
-        getAdmissionContext: deps.getSendAdmissionContext,
-        token: () => authToken,
-        localMachineId: () => sendLocalMachineId,
-        sourceReplica: cacheIdentity.repoDbName,
+  const isMachineRpcUnreachable = (machineId: MachineId) =>
+    targetRouter.getPlaneForMachine(machineId) === 'cloud' && !isBrowserOnline();
+  const pendingSends = createWorkspacePendingSends({
+    runtime: {
+      repo,
+      writer: workspaceWriter,
+      sendResources,
+      requestSessionDispatchTurn,
+      requestSessionSteer,
+      isMachineRpcUnreachable,
+    },
+    token: () => authToken,
+    localMachineId: () => sendLocalMachineId,
+  });
+  if (deps.accountId) {
+    const accountId = deps.accountId;
+    let migrationStarted = false;
+    startLegacySendMigration = () => {
+      if (migrationStarted || disposePromise) return;
+      migrationStarted = true;
+      void migrateLegacySessionSends({
+        accountId,
+        workspaceId,
         runtime: {
-          workspaceId,
           repo,
           writer: workspaceWriter,
           sendResources,
           requestSessionDispatchTurn,
           requestSessionSteer,
         },
-        waitForTargetSync: async (sessionId, signal) => {
-          await waitForPromiseOrAbort(transportReady.promise, signal);
-          throwIfSendAborted(signal);
-          await targetRouter.prepareSessionTarget(sessionId);
-          throwIfSendAborted(signal);
-          const roomId = getSessionRoomId(sessionId);
-          const plane = targetRouter.getReadinessTransportForRoom({ kind: 'doc', id: roomId });
-          // Imported prepared operations do not emit subscribeLocalUpdates. Explicit
-          // sync exports the missing operations and reuses the transport's room.
-          // Upstream sync races its AbortSignal without joining raw stream.sync();
-          // omit that signal here so our owner retains dependencies until it settles.
-          const report = await repo.sync({
-            scope: 'full',
-            docIds: [roomId],
-            flockDocIds: [],
-            requireTransports: [plane],
-          });
-          throwIfSendAborted(signal);
-          if (
-            !report.transports.some(
-              (transport) => transport.transportId === plane && transport.ok
-            ) ||
-            targetRouter.getReadinessTransportForRoom({ kind: 'doc', id: roomId }) !== plane
-          ) {
-            throw new Error('Target synchronization is not confirmed');
-          }
-        },
-      })
-    : null;
+      }).catch((error: unknown) => {
+        console.warn('Legacy pending messages could not be migrated', error);
+      });
+    };
+    if (initialMetaSyncCompleted) startLegacySendMigration();
+  }
   return {
     workspaceSlug: deps.workspaceSlug,
     workspaceId,
     repo,
-    sourceReplica: cacheIdentity.repoDbName,
     accountId: deps.accountId ?? null,
-    sendJournal,
+    pendingSends,
+    isMachineRpcUnreachable,
     codeCollabFileIndexCache,
     sendResources,
     writer: workspaceWriter,
