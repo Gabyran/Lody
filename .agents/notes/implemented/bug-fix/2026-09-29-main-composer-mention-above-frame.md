@@ -42,3 +42,4 @@ it still reports broken links to absent submodules elsewhere in this checkout.
 - [Placement Spec](../../../../specs/composer-mention-menu-placement.md)
 - [Composer caller](../../../../packages/components/src/components/chat/chat-composer.tsx)
 - [Composer test](../../../../packages/components/tests/chat-composer-focus.test.tsx)
+- [PR #1140](https://github.com/LodyAI/Lody/pull/1140)

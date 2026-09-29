@@ -37,3 +37,4 @@ Translation: current
 - [定位 Spec](../../../../specs/composer-mention-menu-placement.zh.md)
 - [Composer 调用方](../../../../packages/components/src/components/chat/chat-composer.tsx)
 - [Composer 测试](../../../../packages/components/tests/chat-composer-focus.test.tsx)
+- [PR #1140](https://github.com/LodyAI/Lody/pull/1140)
