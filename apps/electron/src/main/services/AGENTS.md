@@ -51,3 +51,11 @@ access without a new capability/security decision in the owning
   `installNavigationGuard` in `window.ts`: `will-navigate` does not fire for a
   server-side 3xx, so a public page redirecting to loopback would otherwise
   commit here and never reach Managed Preview.
+
+Renderer `beforeunload` vetoes on product windows (close, reload, quit) surface
+through one native Stay/Leave confirmation (`../renderer-unload.ts`); Leave only
+ignores that document's veto. Quit closes product windows, and so gets unload
+approval, before it destroys relays or stops the CLI; Stay cancels quit with the
+app fully running. A quit close whose renderer hangs or dies is destroyed so quit
+cannot wait forever. Never destroy a normally closing window or add a path that
+bypasses unrelated `beforeunload` guards such as unsaved editors.

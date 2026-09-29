@@ -17,6 +17,8 @@ import {
   Suspense,
 } from 'react';
 import { createPortal } from 'react-dom';
+import type { SessionId } from '@lody/shared';
+import { useAtomValue } from 'jotai';
 import type { StreamdownProps } from '@lobehub/streamdown';
 import Markdown, {
   defaultUrlTransform,
@@ -29,9 +31,9 @@ import rehypeRaw from 'rehype-raw';
 import rehypeSanitize from 'rehype-sanitize';
 import remarkGfm from 'remark-gfm';
 import remarkMath from 'remark-math';
-import { Check, Copy } from 'lucide-react';
+import { Check, Copy, MessagesSquare } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
-import { DEFAULT_CONVERSATION_FONT_SIZE } from '@/atoms/settings';
+import { DEFAULT_CONVERSATION_FONT_SIZE, inlineMathEnabledAtom } from '@/atoms/settings';
 import { MonochromeFileIcon } from '@/components/icons/file-icons';
 import { writeTextToClipboard } from '@/lib/clipboard';
 import {
@@ -39,9 +41,13 @@ import {
   parseMarkdownAgentFileHref,
 } from '@/lib/markdown-agent-file-link';
 import { matchWholeFilePath, splitTextIntoFilePathSegments } from '@/lib/linkify-file-paths';
-import { normalizeTexMathDelimiters } from '@/lib/markdown-single-dollar-math';
+import {
+  normalizeTexMathDelimiters,
+  remarkSingleDollarTextMath,
+} from '@/lib/markdown-single-dollar-math';
 import { cn } from '@/lib/utils';
 import { usePrLinkInterceptor } from './pr-link-context';
+import { parseSessionLinkHref, useSessionLinkNavigator } from './session-link-context';
 import {
   SEARCH_HIGHLIGHT_ACTIVE_MARK_CLASS_NAME,
   SEARCH_HIGHLIGHT_MARK_CLASS_NAME,
@@ -270,6 +276,53 @@ function MarkdownExternalLink({
     <a {...rest} href={href} target="_blank" rel={ensureLinkRel(rel)} onClick={handleClick}>
       {children}
     </a>
+  );
+}
+
+const SESSION_LINK_CHIP_CLASS_NAME =
+  'markdown-reference-chip mx-[0.1em] inline-flex max-w-full items-center gap-[0.35em] rounded-md px-[0.4em] align-[-0.12em] text-[0.92em] leading-[1.55] transition-colors';
+
+/**
+ * A `[Title](session://<id>)` link as a conversation chip. It is a button, not
+ * an anchor: `session://` is not a navigable URL, so the only way there is the
+ * in-app Session navigation. Without one (share pages, read-only surfaces) the
+ * chip still names the conversation but does nothing.
+ */
+function MarkdownSessionLink({
+  sessionId,
+  children,
+  inert,
+}: {
+  sessionId: SessionId;
+  children: ReactNode;
+  inert: boolean;
+}) {
+  const navigate = useSessionLinkNavigator();
+  // Composer mentions label the link `@Title`; the glyph already says "session".
+  const title = markdownLinkText(children).trim().replace(/^@/u, '') || sessionId;
+  const body = (
+    <>
+      <MessagesSquare className="h-[0.95em] w-[0.95em] shrink-0 self-center" aria-hidden="true" />
+      <span className="min-w-0 truncate">{title}</span>
+    </>
+  );
+  if (!navigate || inert) {
+    return (
+      <span data-session-link={sessionId} title={title} className={SESSION_LINK_CHIP_CLASS_NAME}>
+        {body}
+      </span>
+    );
+  }
+  return (
+    <button
+      type="button"
+      data-session-link={sessionId}
+      title={title}
+      className={cn(SESSION_LINK_CHIP_CLASS_NAME, 'cursor-pointer')}
+      onClick={() => navigate({ sessionId })}
+    >
+      {body}
+    </button>
   );
 }
 
@@ -686,6 +739,10 @@ const MARKDOWN_REMARK_PLUGINS = [
   remarkMarkUnclosedFences,
   [remarkMath, { singleDollarTextMath: false }],
 ] satisfies StreamdownProps['remarkPlugins'];
+const INLINE_MATH_REMARK_PLUGINS = [
+  ...MARKDOWN_REMARK_PLUGINS,
+  remarkSingleDollarTextMath,
+] satisfies StreamdownProps['remarkPlugins'];
 
 const KATEX_REHYPE_PLUGIN = [
   rehypeKatex,
@@ -732,7 +789,9 @@ const StreamingMarkdown = lazy<ComponentType<StreamdownProps>>(() =>
 const MERMAID_FENCE_PATTERN = /^[ \t]{0,3}(?:`{3,}|~{3,})[ \t]*mermaid\b/mu;
 
 const markdownUrlTransform: UrlTransform = (value) =>
-  isMarkdownAgentFileHref(value) ? value : defaultUrlTransform(value);
+  isMarkdownAgentFileHref(value) || parseSessionLinkHref(value)
+    ? value
+    : defaultUrlTransform(value);
 
 type HastElement = NonNullable<ExtraProps['node']>;
 
@@ -904,6 +963,11 @@ const createMarkdownComponents = ({
   readonly: boolean;
   theme: ResolvedTheme;
 }): Components => ({
+  p: ({ children, className, node: _node, ...props }) => (
+    <p {...props} className={className}>
+      {children}
+    </p>
+  ),
   pre: (props) => <MarkdownPre {...props} theme={theme} />,
   code: (props: MarkdownCodeProps) => {
     const { className, children, style: _style, node: _node, ...rest } = props;
@@ -923,6 +987,14 @@ const createMarkdownComponents = ({
   a: (props: MarkdownLinkProps) => {
     const { children, href, node: _node, rel, ...rest } = props;
     if (!href) return <span>{children}</span>;
+    const linkedSessionId = parseSessionLinkHref(href);
+    if (linkedSessionId) {
+      return (
+        <MarkdownSessionLink sessionId={linkedSessionId} inert={readonly}>
+          {children}
+        </MarkdownSessionLink>
+      );
+    }
     // Workspace resource links are display-only in a publication, not a second
     // download API. Ordinary article/GitHub links remain explicit external navigation.
     if (readonly && href && isWorkspaceResourceHref(href)) {
@@ -1090,6 +1162,9 @@ function normalizeMarkdownRendererSize(size: MarkdownRendererSize): Conversation
   return size;
 }
 
+/** A React-owned text node cut short by search marks, and how to restore it. */
+type SearchTextSplit = { node: Text; value: string; head: string; inserted: ChildNode[] };
+
 export const MarkdownRenderer = memo(function MarkdownRenderer({
   text,
   size = DEFAULT_CONVERSATION_FONT_SIZE,
@@ -1121,14 +1196,15 @@ export const MarkdownRenderer = memo(function MarkdownRenderer({
   const readonly = useContext(SessionReadonlyContext);
   const getAgentFileLinkContextMenuItems = useContext(AgentFileLinkContextMenuItemsContext);
   const containerRef = useRef<HTMLDivElement>(null);
-  /** Whether this block currently holds search marks that need unwrapping. */
-  const markedRef = useRef(false);
+  /** Text nodes split for search marks in this block, with what to undo. */
+  const searchSplitsRef = useRef<SearchTextSplit[]>([]);
   const search = useSelectionStableValue(useSessionSearch());
   const searchMatch = useSelectionStableValue(useSessionSearchBlock(searchBlockId ?? ''));
   const copyAgentFileLabel = t('sessions.copyAgentFilePath', 'Copy agent file path');
   const openAgentFileLabel = t('sessions.openAgentFile', 'Open agent file');
   const canvasLabel = t('sessions.diagram.canvas', 'Zoom and pan diagram');
   const openDiagramLabel = t('sessions.diagramViewer.open', 'Open diagram');
+  const inlineMathEnabled = useAtomValue(inlineMathEnabledAtom);
   // Both scans below re-run over the whole accumulated answer on every streamed
   // delta. A substring test settles the common case before the line-anchored
   // pattern runs.
@@ -1136,7 +1212,10 @@ export const MarkdownRenderer = memo(function MarkdownRenderer({
     () => text.includes('mermaid') && MERMAID_FENCE_PATTERN.test(text),
     [text]
   );
-  const normalizedText = useMemo(() => normalizeTexMathDelimiters(text), [text]);
+  const normalizedText = useMemo(
+    () => normalizeTexMathDelimiters(text, inlineMathEnabled),
+    [inlineMathEnabled, text]
+  );
   const {
     blocks: mermaidBlocks,
     selection: diagramSelection,
@@ -1171,6 +1250,7 @@ export const MarkdownRenderer = memo(function MarkdownRenderer({
   );
 
   const components = useSelectionStableValue(currentComponents);
+  const remarkPlugins = inlineMathEnabled ? INLINE_MATH_REMARK_PLUGINS : MARKDOWN_REMARK_PLUGINS;
   const rehypePlugins = allowHtml ? HTML_MARKDOWN_REHYPE_PLUGINS : MARKDOWN_REHYPE_PLUGINS;
   const normalizedSize = normalizeMarkdownRendererSize(size);
   // The engine keeps revealing its buffered tail after the stream ends. Staying
@@ -1191,7 +1271,7 @@ export const MarkdownRenderer = memo(function MarkdownRenderer({
   const staticMarkdown = (
     <Markdown
       components={components}
-      remarkPlugins={MARKDOWN_REMARK_PLUGINS}
+      remarkPlugins={remarkPlugins}
       rehypePlugins={rehypePlugins}
       urlTransform={markdownUrlTransform}
     >
@@ -1206,23 +1286,16 @@ export const MarkdownRenderer = memo(function MarkdownRenderer({
     }
 
     const clearSearchHighlights = () => {
-      // Nothing was ever marked in this block, so there is nothing to unwrap.
-      // This effect re-runs on every streamed delta, and the query below walks
-      // the rendered subtree.
-      if (!markedRef.current) return;
-      markedRef.current = false;
-      const existingMarks = root.querySelectorAll('mark[data-session-search-mark="true"]');
-      existingMarks.forEach((mark) => {
-        const parent = mark.parentNode;
-        if (!parent) {
-          return;
-        }
-        while (mark.firstChild) {
-          parent.insertBefore(mark.firstChild, mark);
-        }
-        parent.removeChild(mark);
-        parent.normalize();
-      });
+      // This effect re-runs on every streamed delta; a block without marks
+      // has nothing to undo.
+      const splits = searchSplitsRef.current;
+      if (!splits.length) return;
+      searchSplitsRef.current = [];
+      for (const { node, value, head, inserted } of splits) {
+        for (const child of inserted) child.remove();
+        // React may have rewritten the node since it was split; its text wins.
+        if (node.nodeValue === head) node.nodeValue = value;
+      }
     };
 
     clearSearchHighlights();
@@ -1293,8 +1366,18 @@ export const MarkdownRenderer = memo(function MarkdownRenderer({
         return;
       }
 
+      const parent = node.parentNode;
+      if (!parent) {
+        return;
+      }
+
+      // React owns `node` and inserts or removes its siblings relative to it,
+      // so it stays in place holding the text before the first match; marks
+      // and the remaining text follow it. Replacing it would leave React an
+      // anchor outside the DOM (`insertBefore` throws once a link arms).
+      const head = value.slice(0, Math.max(0, overlaps[0]!.start - start));
       const fragment = document.createDocumentFragment();
-      let localCursor = 0;
+      let localCursor = head.length;
 
       overlaps.forEach((match) => {
         const localStart = Math.max(0, match.start - start);
@@ -1320,13 +1403,14 @@ export const MarkdownRenderer = memo(function MarkdownRenderer({
         fragment.appendChild(document.createTextNode(value.slice(localCursor)));
       }
 
-      const parent = node.parentNode;
-      if (!parent) {
-        return;
-      }
-      markedRef.current = true;
-      parent.insertBefore(fragment, node);
-      parent.removeChild(node);
+      searchSplitsRef.current.push({
+        node,
+        value,
+        head,
+        inserted: [...fragment.childNodes],
+      });
+      node.nodeValue = head;
+      parent.insertBefore(fragment, node.nextSibling);
     });
 
     return clearSearchHighlights;
@@ -1349,7 +1433,7 @@ export const MarkdownRenderer = memo(function MarkdownRenderer({
               content={normalizedText}
               remend={STREAMING_REMEND_OPTIONS}
               components={components}
-              remarkPlugins={MARKDOWN_REMARK_PLUGINS}
+              remarkPlugins={remarkPlugins}
               rehypePlugins={rehypePlugins}
               urlTransform={markdownUrlTransform}
             />

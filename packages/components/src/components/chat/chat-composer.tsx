@@ -78,7 +78,7 @@ export interface ChatComposerImageItem {
   id: string;
   name: string;
   previewUrl: string;
-  status: 'uploading' | 'uploaded' | 'failed';
+  status: 'draft' | 'uploading' | 'uploaded' | 'failed';
   progress: number;
   error?: string;
 }
@@ -88,7 +88,7 @@ export interface ChatComposerFileItem {
   name: string;
   /** Human-readable size (e.g. "2.4 MB"); rendered as the chip subtitle. */
   sizeLabel: string;
-  status: 'preparing' | 'uploading' | 'verifying' | 'uploaded' | 'failed';
+  status: 'draft' | 'preparing' | 'uploading' | 'verifying' | 'uploaded' | 'failed';
   progress: number;
   error?: string;
 }
@@ -704,9 +704,7 @@ export function ChatComposer({
         ) : null}
 
         {!isDialog ? (
-          // The `@` menu opens against this frame, above the chip row, so it lines
-          // up with the composer and never cuts a chip in half.
-          <div data-mention-frame="" className={cn('flex flex-col', isLanding ? 'gap-2' : 'gap-1')}>
+          <div className={cn('flex flex-col', isLanding ? 'gap-2' : 'gap-1')}>
             {/* Top selector (repo, branch) - shown outside and above the input box */}
             {topSelector ? (
               <div className="flex w-full min-w-0 select-none items-center gap-1">
@@ -715,6 +713,7 @@ export function ChatComposer({
             ) : null}
             <div
               ref={composerBoxRef}
+              data-mention-frame=""
               className={cn(boxContainerClassName, imageDropClassName, 'group relative')}
               onDragEnter={canHandleImageDrop ? handleImageDragEnter : undefined}
               onDragOver={canHandleImageDrop ? handleImageDragOver : undefined}
@@ -799,7 +798,11 @@ export function ChatComposer({
                                 image.status !== 'uploaded' && 'grayscale'
                               )}
                             />
-                            {image.status === 'uploading' ? (
+                            {image.status === 'draft' ? (
+                              <span className="text-[10px] text-muted-foreground">
+                                {t('sessions.attachmentDraft')}
+                              </span>
+                            ) : image.status === 'uploading' ? (
                               <div
                                 className="absolute inset-0 bg-black/45 transition-[clip-path]"
                                 style={{
@@ -826,7 +829,11 @@ export function ChatComposer({
                           <X className="h-3 w-3" />
                         </Button>
                       </div>
-                      {image.status === 'uploading' ? (
+                      {image.status === 'draft' ? (
+                        <span className="text-[10px] text-muted-foreground">
+                          {t('sessions.attachmentDraft')}
+                        </span>
+                      ) : image.status === 'uploading' ? (
                         <div className="absolute inset-x-0 bottom-0 bg-black/60 px-1 py-0.5 text-center text-[10px] text-white">
                           {image.progress}%
                         </div>
@@ -887,20 +894,24 @@ export function ChatComposer({
                         </button>
                       ) : (
                         <span className="mt-auto truncate pt-1 text-[10px] text-muted-foreground">
-                          {file.status === 'preparing'
-                            ? t('sessions.filePreparing', 'Preparing… {{progress}}%', {
-                                progress: file.progress,
-                              })
-                            : file.status === 'uploading'
-                              ? `${file.progress}%`
-                              : file.status === 'verifying'
-                                ? t('sessions.fileVerifying', 'Verifying…')
-                                : file.sizeLabel}
+                          {file.status === 'draft'
+                            ? t('sessions.attachmentDraft')
+                            : file.status === 'preparing'
+                              ? t('sessions.filePreparing', 'Preparing… {{progress}}%', {
+                                  progress: file.progress,
+                                })
+                              : file.status === 'uploading'
+                                ? `${file.progress}%`
+                                : file.status === 'verifying'
+                                  ? t('sessions.fileVerifying', 'Verifying…')
+                                  : file.sizeLabel}
                         </span>
                       )}
-                      {file.status === 'preparing' ||
-                      file.status === 'uploading' ||
-                      file.status === 'verifying' ? (
+                      {file.status === 'draft' ? (
+                        t('sessions.attachmentDraft')
+                      ) : file.status === 'preparing' ||
+                        file.status === 'uploading' ||
+                        file.status === 'verifying' ? (
                         <div className="absolute inset-x-0 bottom-0 h-1 bg-muted">
                           <div
                             className="h-full bg-primary transition-[width]"
