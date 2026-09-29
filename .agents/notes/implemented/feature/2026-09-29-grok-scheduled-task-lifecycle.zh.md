@@ -3,6 +3,7 @@
 Status: implemented
 Translation: current
 
+PR: https://github.com/LodyAI/Lody/pull/1102
 适配器 PR：https://github.com/LodyAI/acp-extension-grok/pull/24
 
 [English](2026-09-29-grok-scheduled-task-lifecycle.md)
