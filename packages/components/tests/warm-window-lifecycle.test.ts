@@ -72,6 +72,7 @@ class NativeWindow extends EventEmitter {
       this.throttling = value;
     },
     id: this.id,
+    isDestroyed: () => this.destroyed,
     send: (_channel: string, target: unknown) => {
       // Navigation can trigger window lifecycle work; adoption must already be complete.
       expect(isWarmWindow(this.native)).toBe(_channel === 'app.prepareWindowTarget');
@@ -98,7 +99,10 @@ class NativeWindow extends EventEmitter {
     this.focused = true;
   }
   vetoUnload = false;
+  /** A hung renderer never answers `beforeunload`, so close() settles nothing. */
+  hung = false;
   close() {
+    if (this.hung) return;
     let prevented = false;
     this.emit('close', {
       preventDefault: () => {
@@ -486,5 +490,20 @@ describe('renderer unload confirmation', () => {
     nativeState.unloadResponse = 1;
     expect(await closeProductWindowsForQuit()).toBe(true);
     expect(main.destroyed).toBe(true);
+  });
+
+  it('quit destroys a window whose renderer hangs or dies instead of waiting on it', async () => {
+    for (const [emitter, event] of [
+      ['window', 'unresponsive'],
+      ['webContents', 'render-process-gone'],
+    ] as const) {
+      const main = productWindow({ main: true });
+      main.hung = true;
+      const quit = closeProductWindowsForQuit();
+      expect(main.destroyed).toBe(false);
+      (emitter === 'window' ? main : main.webContents).emit(event);
+      await expect(quit).resolves.toBe(true);
+      expect(main.destroyed).toBe(true);
+    }
   });
 });
