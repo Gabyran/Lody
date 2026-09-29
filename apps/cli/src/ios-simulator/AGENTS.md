@@ -22,6 +22,9 @@
 - Keep Baguette version, artifact digest and executable digest pinned in the manifest;
   no PATH/Homebrew discovery or upstream fallback. Fetch through the platform runtime
   artifact channel. License notices accompany the managed installation; see [README](README.md).
+- Patched Baguette builds use a distinct `-lody.N` runtime version/cache/key. Keep
+  the patch and source/toolchain provenance with the archive; never relabel patched
+  bytes as an upstream release. Packaging: `scripts/package-baguette-runtime.mjs`.
 - Local controls use trusted Machine RPC without Cloud I/O. Remote commands require
   exact signed preview-control proofs, including list/status and the ephemeral response
   key. Never put a viewer URL in workspace-readable Streams. Revocation fences proof

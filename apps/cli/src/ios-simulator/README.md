@@ -13,11 +13,11 @@ frames never enter React, RPC, or synchronized documents.
 
 ## Runtime artifact
 
-`baguette-manifest.json` pins the upstream archive and executable digests. The
+`baguette-manifest.json` pins the Lody-patched archive and executable digests. The
 installer fetches only the platform runtime channel:
 
 ```
-/api/runtimes/baguette/0.2.0/darwin-arm64/baguette_v0.2.0_macOS_arm64.tar.gz
+/api/runtimes/baguette/0.2.0-lody.1/darwin-arm64/baguette_v0.2.0-lody.1_macOS_arm64.tar.gz
 ```
 
 The deployment composition must publish these exact bytes before shipping. The
@@ -26,7 +26,7 @@ baguette` (use `--dry-run` to inspect the plan). There is no upstream, Homebrew 
 PATH fallback. Reuse the verified versioned cache; downloads need connectivity,
 while a cached same-machine preview does not require Cloud authorization.
 
-`baguette-notices.json` contains Baguette's MIT license and licenses/notices from
+`baguette-notices.json` contains Baguette's Apache-2.0 license and licenses/notices from
 the exact dependency revisions in v0.2.0's `Package.resolved`; source URLs accompany
 each notice. The installer writes them as `THIRD_PARTY_NOTICES.txt`. Version changes
 must refresh both digests and notices, then rerun native compatibility checks.
@@ -36,6 +36,43 @@ runtime. Intel has no pinned artifact. Local smoke evidence used Xcode 26.6 / iO
 26.5 and verified device enumeration, managed installation, real JPEG delivery and
 preview cleanup. Full Electron sidebar, remote Quick Tunnel and mobile E2E remain
 unverified. H.264, multitouch, keyboard and device configuration are later work.
+
+## Maintaining the patched build
+
+The upstream v0.2.0 Release binary crashes at the first 30-second WebSocket
+ping. A symbolized source build reproduces this at `Task.sleep(for:)`; replacing
+all three sleeps in `swift-websocket`'s `WebSocketHandler` also prevents the same
+crash during connection shutdown. See the [decision](../../../../.agents/notes/implemented/bug-fix/2026-09-29-baguette-runtime-sleep.md).
+
+`baguette-manifest.json.build` records the exact source revision, dependency
+revision, patch digest, Swift version and build command. To rebuild, clone the
+upstream repository at that revision, resolve the checked-in `Package.resolved`
+with `swift package resolve --force-resolved-versions`, and check the
+`swift-websocket` checkout revision. Apply
+`patches/swift-websocket-continuous-clock.patch` in that checkout (SwiftPM marks
+it read-only; grant owner write access to `Sources/WSCore/WebSocketHandler.swift`
+first). Run the recorded build command. Keep the executable and adjacent
+`Baguette_Baguette.bundle` together.
+
+From this repository root, package the already verified build:
+
+```sh
+node scripts/package-baguette-runtime.mjs --build-dir <swift-release-directory> --output-dir <artifact-directory>
+```
+
+The packager verifies the pinned executable and patch, includes resources,
+notices, the patch and `BUILD_PROVENANCE.json`, and compares two normalized gzip
+archives. It excludes debug-symbol bundles. `--print-pins` writes the candidate
+archive and prints its hash/size without changing the manifest or publishing.
+A new native build requires a reviewed executable pin and a fresh `-lody.N`
+version if any published bytes differ. Archive packaging is deterministic;
+Swift compilation across paths/toolchains is not promised byte-reproducible.
+Never overwrite an existing immutable version to accept a rebuild.
+
+The initial publication supplies the local archive to the distribution mirror
+with `--runtime baguette --baguette-artifact <archive>`. Later mirror runs can
+retrieve the same pinned bytes from the manifest's public channel URL. Publish
+and verify the new object before shipping the updated CLI manifest.
 
 ## Verification
 
