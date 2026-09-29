@@ -7,8 +7,7 @@ import {
 import {
   isConfigOptionValueValid,
   isThoughtLevelSelector,
-  normalizeFastModeSelectors,
-  normalizeReasoningEffortSelectors,
+  normalizePerModelSelectors,
   type AcpConfigOptionSelector,
   type AcpSelectorTarget,
 } from '@/components/shared/acp-selector-options';
@@ -270,21 +269,13 @@ export const resolveAcpSessionConfigSelection = (
   );
   let selectors = configOptionSelectors;
   if (target) {
-    selectors = normalizeFastModeSelectors(
-      normalizeReasoningEffortSelectors(selectors, {
-        cliType: target.cliType,
-        agentType: target.agentType,
-        modelReasoningEfforts,
-        declaredModelControls,
-        selectedModelId,
-      }),
-      {
-        cliType: target.cliType,
-        agentType: target.agentType,
-        declaredModelControls,
-        selectedModelId,
-      }
-    );
+    selectors = normalizePerModelSelectors(selectors, {
+      cliType: target.cliType,
+      agentType: target.agentType,
+      modelReasoningEfforts,
+      declaredModelControls,
+      selectedModelId,
+    });
   }
 
   const runtimeTable = runtimePreferences?.configOptionValues;
@@ -360,10 +351,7 @@ export const filterAcpSessionConfigOptionValues = (
     if (value === undefined) {
       continue;
     }
-    if (
-      options.switchesModel === true &&
-      (isThoughtLevelSelector(selector) || isPerModelControlConfigId(selector.configId))
-    ) {
+    if (options.switchesModel === true && isThoughtLevelSelector(selector)) {
       filtered[selector.configId] = value;
       continue;
     }

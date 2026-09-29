@@ -20,8 +20,9 @@ import {
   type BuiltinRuntimeOverrides,
   type AcpModelControls,
   ACP_THOUGHT_LEVEL_CATEGORY,
-  getBuiltinEffortBinding,
-  getBuiltinFastModeConfigId,
+  defaultEffortValue,
+  getBuiltinModelControlBinding,
+  getDeclaredModelControls,
   resolveDeclaredEffortSupport,
 } from '@lody/shared';
 import type { AcpSessionSelectOption } from './acp-session-select';
@@ -418,7 +419,7 @@ const normalizeCodexReasoningEffortSelectors = (
 
     const currentValue = options.some((option) => option.value === selector.currentValue)
       ? selector.currentValue
-      : (options.find((option) => option.value === 'medium')?.value ?? options[0]?.value ?? '');
+      : defaultEffortValue(options.map((option) => option.value));
     if (options === selector.options && currentValue === selector.currentValue) {
       return selector;
     }
@@ -447,24 +448,23 @@ const reasoningEffortOptionLabel = (value: string): string =>
  * path stays inert for it. This is the one entry point; the per-agent split
  * lives here rather than at every call site.
  */
+/** What the per-model normalizers need to know about the target and its model. */
+export type PerModelSelectorContext = {
+  cliType?: AcpSelectorTarget['cliType'];
+  agentType?: AcpSelectorTarget['agentType'];
+  modelReasoningEfforts?: Record<string, string[]>;
+  declaredModelControls?: Record<string, AcpModelControls>;
+  selectedModelId?: string | null;
+};
+
 export const normalizeReasoningEffortSelectors = (
   selectors: AcpConfigOptionSelector[],
-  options: {
-    cliType?: AcpSelectorTarget['cliType'];
-    agentType?: AcpSelectorTarget['agentType'];
-    modelReasoningEfforts?: Record<string, string[]>;
-    declaredModelControls?: Record<string, AcpModelControls>;
-    selectedModelId?: string | null;
-  }
+  options: PerModelSelectorContext
 ): AcpConfigOptionSelector[] => {
   // The adapter's own per-model declaration is authoritative for the models it
   // covers, for every agent: it replaces both the probed snapshot and the
   // hand-maintained Codex tiers. An undeclared model keeps the paths below.
-  const declared = resolveDeclaredEffortSupport(
-    { declaredModelControls: options.declaredModelControls },
-    options.selectedModelId,
-    { cliType: options.cliType, agentType: options.agentType }
-  );
+  const declared = resolveDeclaredEffortSupport(options, options.selectedModelId);
   if (declared.state === 'unsupported') {
     return selectors.filter(
       (selector) => selector.type !== 'select' || !isThoughtLevelSelector(selector)
@@ -474,10 +474,7 @@ export const normalizeReasoningEffortSelectors = (
     const hasEffort = selectors.some(
       (selector) => selector.type === 'select' && isThoughtLevelSelector(selector)
     );
-    const binding = getBuiltinEffortBinding({
-      cliType: options.cliType,
-      agentType: options.agentType,
-    });
+    const binding = getBuiltinModelControlBinding(options);
     // The probe ran on a model without effort, so there is no control to
     // relabel. Add a built-in adapter's own one; never guess an id otherwise.
     const withEffort: AcpConfigOptionSelector[] =
@@ -486,8 +483,8 @@ export const normalizeReasoningEffortSelectors = (
         : [
             ...selectors,
             {
-              configId: binding.configId,
-              label: binding.label,
+              configId: binding.effortConfigId,
+              label: binding.effortLabel,
               category: ACP_THOUGHT_LEVEL_CATEGORY,
               type: 'select',
               options: [],
@@ -518,7 +515,7 @@ export const normalizeReasoningEffortSelectors = (
 const applyEffortLadder = (
   selectors: AcpConfigOptionSelector[],
   efforts: readonly string[],
-  fallbackValue: string = efforts.includes('medium') ? 'medium' : (efforts[0] ?? '')
+  fallbackValue: string = defaultEffortValue(efforts)
 ): AcpConfigOptionSelector[] =>
   selectors.map((selector) => {
     if (selector.type !== 'select' || !isThoughtLevelSelector(selector)) {
@@ -541,27 +538,17 @@ const applyEffortLadder = (
  * present for one that lacks it. A declared `fastMode` decides; an undeclared
  * model keeps what the probe showed.
  */
-export const normalizeFastModeSelectors = (
+const normalizeFastModeSelectors = (
   selectors: AcpConfigOptionSelector[],
-  options: {
-    cliType?: AcpSelectorTarget['cliType'];
-    agentType?: AcpSelectorTarget['agentType'];
-    declaredModelControls?: Record<string, AcpModelControls>;
-    selectedModelId?: string | null;
-  }
+  options: PerModelSelectorContext
 ): AcpConfigOptionSelector[] => {
-  const fastMode = options.selectedModelId
-    ? options.declaredModelControls?.[options.selectedModelId]?.fastMode
-    : undefined;
+  const fastMode = getDeclaredModelControls(options, options.selectedModelId)?.fastMode;
   if (fastMode === undefined) return selectors;
   const hasFast = selectors.some(isFastModeSelector);
   if (!fastMode) {
     return hasFast ? selectors.filter((selector) => !isFastModeSelector(selector)) : selectors;
   }
-  const configId = getBuiltinFastModeConfigId({
-    cliType: options.cliType,
-    agentType: options.agentType,
-  });
+  const configId = getBuiltinModelControlBinding(options)?.fastConfigId;
   if (hasFast || !configId) return selectors;
   return [
     ...selectors,
@@ -575,6 +562,17 @@ export const normalizeFastModeSelectors = (
     },
   ];
 };
+
+/**
+ * Fits the effort ladder and the Fast toggle to the selected model. Every
+ * surface that shows or validates model-dependent selectors goes through this
+ * one entry point.
+ */
+export const normalizePerModelSelectors = (
+  selectors: AcpConfigOptionSelector[],
+  context: PerModelSelectorContext
+): AcpConfigOptionSelector[] =>
+  normalizeFastModeSelectors(normalizeReasoningEffortSelectors(selectors, context), context);
 
 /**
  * Extracts mode options from configOptions (category: 'mode').
@@ -701,25 +699,12 @@ export const buildAcpSelectorOptions = (target?: AcpSelectorTarget): AcpSelector
     (option) => option.category === 'model' && option.type === 'select'
   );
 
-  const selectedModelId = target ? resolveSelectedModelId(configOptions, target) : undefined;
-  const allSelectors = normalizeFastModeSelectors(
-    normalizeReasoningEffortSelectors(
-      buildConfigOptionSelectors(configOptions, target, capabilityAuthority),
-      {
-        cliType: target?.cliType,
-        agentType: target?.agentType,
-        modelReasoningEfforts,
-        declaredModelControls,
-        selectedModelId,
-      }
-    ),
-    {
-      cliType: target?.cliType,
-      agentType: target?.agentType,
-      declaredModelControls,
-      selectedModelId,
-    }
-  );
+  const allSelectors = buildNormalizedSelectors(target, {
+    authority: capabilityAuthority,
+    configOptions,
+    modelReasoningEfforts,
+    declaredModelControls,
+  });
   const configOptionSelectors = allSelectors.filter((selector) => {
     const category = selector.category ?? '';
     if (selector.configId === 'interaction_mode') {
@@ -750,26 +735,19 @@ export const buildAcpSelectorOptions = (target?: AcpSelectorTarget): AcpSelector
  */
 export const buildAllConfigOptionSelectors = (
   target?: AcpSelectorTarget
-): AcpConfigOptionSelector[] => {
-  const { authority, configOptions, modelReasoningEfforts, declaredModelControls } =
-    resolveConfigOptions(target);
-  const selectedModelId = target ? resolveSelectedModelId(configOptions, target) : undefined;
-  return normalizeFastModeSelectors(
-    normalizeReasoningEffortSelectors(
-      buildConfigOptionSelectors(configOptions, target, authority),
-      {
-        cliType: target?.cliType,
-        agentType: target?.agentType,
-        modelReasoningEfforts,
-        declaredModelControls,
-        selectedModelId,
-      }
-    ),
+): AcpConfigOptionSelector[] => buildNormalizedSelectors(target, resolveConfigOptions(target));
+
+const buildNormalizedSelectors = (
+  target: AcpSelectorTarget | undefined,
+  resolved: ResolvedConfigOptions
+): AcpConfigOptionSelector[] =>
+  normalizePerModelSelectors(
+    buildConfigOptionSelectors(resolved.configOptions, target, resolved.authority),
     {
       cliType: target?.cliType,
       agentType: target?.agentType,
-      declaredModelControls,
-      selectedModelId,
+      modelReasoningEfforts: resolved.modelReasoningEfforts,
+      declaredModelControls: resolved.declaredModelControls,
+      selectedModelId: target ? resolveSelectedModelId(resolved.configOptions, target) : undefined,
     }
   );
-};

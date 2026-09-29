@@ -1,6 +1,7 @@
 import { Command } from 'commander';
 import { addDiscoveryOptions, runDiscoveryList, type DiscoveryCommandOptions } from './discovery';
 import {
+  ACP_CAPABILITY_ROW_FAMILIES,
   getMachineFlockAcpCapabilities,
   getMachineFlockDocId,
   getMachineFlockRateLimits,
@@ -147,7 +148,7 @@ async function mergeMachineFlockJsonState(
   const handle = await repo.openFlockDoc(getMachineFlockDocId(workspaceId, machine.id));
   const rows = readMachineFlockRowsFromFlock(handle.flock, {
     families: includeAcpCapabilities
-      ? ['acpCapability', 'acpModelCapability', 'rateLimit']
+      ? [...ACP_CAPABILITY_ROW_FAMILIES, 'rateLimit']
       : ['rateLimit'],
   });
   const acpCapabilities = includeAcpCapabilities ? getMachineFlockAcpCapabilities(rows) : {};

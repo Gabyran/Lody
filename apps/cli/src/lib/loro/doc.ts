@@ -3114,7 +3114,7 @@ export class MachineDocument implements LoroDocument<{}, MachineMeta> {
         await handle.syncOnce().catch(() => undefined);
       }
     }
-    return capabilityUnchanged && existing ? existing : entry;
+    return (capabilityUnchanged ? existing : undefined) ?? entry;
   }
 
   async getAcpCapabilities(configId: AgentConfigId): Promise<AcpCapabilityCacheEntry | undefined> {

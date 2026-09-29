@@ -276,15 +276,11 @@ export const DraftSessionChatInterface = memo(
       });
       const {
         availableCommands,
-        capabilityAuthority,
         configOptionSelectors,
-        defaultModeId,
-        defaultModelId,
         machineFlockRows,
         modeOptions,
         modelOptions,
-        modelReasoningEfforts,
-        declaredModelControls,
+        selectorOptions,
         sessionMachine,
       } = useSessionAcpSelectorContext({
         machineId: parentSession.machineId,
@@ -295,28 +291,6 @@ export const DraftSessionChatInterface = memo(
         selectedModelId: sessionConfigCandidates.modelId,
         configOptionValues: sessionConfigCandidates.configOptionValues,
       });
-      const selectorOptions = useMemo(
-        () => ({
-          capabilityAuthority,
-          configOptionSelectors,
-          defaultModeId,
-          defaultModelId,
-          modeOptions,
-          modelOptions,
-          modelReasoningEfforts,
-          declaredModelControls,
-        }),
-        [
-          capabilityAuthority,
-          configOptionSelectors,
-          defaultModeId,
-          defaultModelId,
-          modeOptions,
-          modelOptions,
-          modelReasoningEfforts,
-          declaredModelControls,
-        ]
-      );
       const {
         selectedModeId,
         selectedModelId,

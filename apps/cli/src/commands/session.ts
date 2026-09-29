@@ -1,4 +1,5 @@
 import {
+  ACP_CAPABILITY_ROW_FAMILIES,
   getDeclaredModelControls,
   getModelEffortChoices,
   machineSupportsPreparedSessionInputProtocol,
@@ -1581,7 +1582,7 @@ function validateModelDependentTurnConfigOptionValues(
     const option = optionsById.get(id);
     const isEffort = isAcpThoughtLevelConfigOption(option ?? { id }) || id === 'effort';
     if (isEffort) {
-      const efforts = getModelEffortChoices(capability, targetModelId, capability);
+      const efforts = getModelEffortChoices(capability, targetModelId);
       if (efforts !== undefined) {
         if (typeof value !== 'string' || !efforts.includes(value)) {
           throw new Error(
@@ -1625,7 +1626,7 @@ export function filterCompatibleTurnConfigOptionValues(
       if (targetModelId) {
         const isEffort = isAcpThoughtLevelConfigOption(option ?? { id }) || id === 'effort';
         if (isEffort) {
-          const efforts = getModelEffortChoices(capability, targetModelId, capability);
+          const efforts = getModelEffortChoices(capability, targetModelId);
           if (efforts !== undefined) return typeof value === 'string' && efforts.includes(value);
         }
         // A different (or unknown) probe model cannot invalidate the target's
@@ -1721,7 +1722,7 @@ export async function readAgentAcpCapability(args: {
   );
   const capabilities = getMachineFlockAcpCapabilities(
     readMachineFlockRowsFromFlock(handle.flock, {
-      families: ['acpCapability', 'acpModelCapability'],
+      families: ACP_CAPABILITY_ROW_FAMILIES,
     })
   );
   return capabilities[getAcpCapabilityCacheKey(args.agentConfigId)];

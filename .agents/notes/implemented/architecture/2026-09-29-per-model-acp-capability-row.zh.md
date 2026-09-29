@@ -40,13 +40,13 @@ Claude 和 Codex 适配器其实已经在 `_meta.lody.modelCapabilities` 中报�
 - **使用**：
   - UI 选择器使用所选模型报告的推理强度列表。Codex 也包括在内：报告会取代手工档位表。
   - UI 选择器对报告为不支持 Fast 的模型隐藏 Fast；对报告为支持、但 probe 时没看到的模型，补上内置的 Fast 开关。
-  - CLI 校验和 MCP 解析通过 `getModelReasoningEffortValues` 读取推理强度（报告优先）。
+  - CLI 校验和 MCP 解析通过 `getModelEffortChoices` 读取推理强度（报告优先）。
   - 报告中的 Fast 信息从不作为拒绝请求的理由。
   - 没有报告的模型保持现有行为。
 
 ## 声明与适配器实际提供的控件
 
-对第一版的评审发现了三个缺口，现已修复。共享的内置绑定（`getBuiltinEffortBinding`）记录了每个内置适配器的
+对第一版的评审发现了三个缺口，现已修复。共享的内置绑定（`getBuiltinModelControlBinding`）记录了每个内置适配器的
 effort 选项 id，以及它如何发布这个控件。未知 agent 没有绑定，Lody 也从不猜测它们的 id。
 
 - **Claude 的 `default`**：Claude 在模型支持的档位之外，还会发布一个 `default` effort 选项。

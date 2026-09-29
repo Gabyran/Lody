@@ -52,14 +52,14 @@ the selected model.
   - UI selectors hide Fast for a model declared without it, and add the built-in Fast
     toggle for a model declared with it that the probe did not show.
   - CLI validation and MCP resolution read effort through
-    `getModelReasoningEffortValues` (declaration first).
+    `getModelEffortChoices` (declaration first).
   - A declared Fast is never a reason to reject a request.
   - Undeclared models keep today's behavior.
 
 ## Declaration versus the control the adapter really offers
 
 Review of the first version found three gaps, now closed. A shared built-in binding
-(`getBuiltinEffortBinding`) records each built-in adapter's effort option id and how
+(`getBuiltinModelControlBinding`) records each built-in adapter's effort option id and how
 it publishes the control. Unknown agents get no binding, and Lody never guesses their
 ids.
 

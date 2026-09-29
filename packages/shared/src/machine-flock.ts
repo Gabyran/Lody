@@ -683,6 +683,39 @@ export function getMachineFlockDeleteLocalProjectIds(
 }
 
 /**
+ * Row families a capability reader asks for, so per-model controls are never
+ * dropped by a reader that forgot the second family.
+ */
+export const ACP_CAPABILITY_ROW_FAMILIES = ['acpCapability', 'acpModelCapability'] as const;
+
+/**
+ * Merged entries keyed by the stored capability row and then by the stored
+ * declaration, so an unchanged pair keeps one object identity across the
+ * incremental row updates the renderer re-merges on.
+ */
+const mergedAcpCapabilityEntries = new WeakMap<
+  AcpCapabilityCacheEntry,
+  WeakMap<AcpModelCapabilities, AcpCapabilityCacheEntry>
+>();
+
+const withDeclaredModelControls = (
+  entry: AcpCapabilityCacheEntry,
+  declaration: AcpModelCapabilities
+): AcpCapabilityCacheEntry => {
+  let byDeclaration = mergedAcpCapabilityEntries.get(entry);
+  if (!byDeclaration) {
+    byDeclaration = new WeakMap();
+    mergedAcpCapabilityEntries.set(entry, byDeclaration);
+  }
+  let merged = byDeclaration.get(declaration);
+  if (!merged) {
+    merged = { ...entry, declaredModelControls: declaration.models };
+    byDeclaration.set(declaration, merged);
+  }
+  return merged;
+};
+
+/**
  * Capability entries by cache key. When the rows include the config's
  * `acpModelCapability` row for the same source version, the entry carries its
  * per-model controls as `declaredModelControls`, so every reader resolves effort
@@ -692,22 +725,17 @@ export function getMachineFlockAcpCapabilities(
   rows: MachineFlockRowMap
 ): Record<string, AcpCapabilityCacheEntry> {
   const capabilities: Record<string, AcpCapabilityCacheEntry> = {};
-  const modelCapabilities = new Map<string, AcpModelCapabilities>();
   for (const row of Object.values(rows)) {
-    if (isMachineFlockAcpModelCapabilityRow(row)) {
-      modelCapabilities.set(row.key[1], row.value);
-      continue;
+    if (isMachineFlockAcpCapabilityRow(row)) {
+      capabilities[getAcpCapabilityCacheKey(row.key[1])] = row.value;
     }
-    if (!isMachineFlockAcpCapabilityRow(row)) {
-      continue;
-    }
-    capabilities[getAcpCapabilityCacheKey(row.key[1])] = row.value;
   }
-  for (const [configId, declaration] of modelCapabilities) {
-    const key = getAcpCapabilityCacheKey(configId as AgentConfigId);
+  for (const row of Object.values(rows)) {
+    if (!isMachineFlockAcpModelCapabilityRow(row)) continue;
+    const key = getAcpCapabilityCacheKey(row.key[1]);
     const entry = capabilities[key];
-    if (entry && entry.sourceVersion === declaration.sourceVersion) {
-      capabilities[key] = { ...entry, declaredModelControls: declaration.models };
+    if (entry && entry.sourceVersion === row.value.sourceVersion) {
+      capabilities[key] = withDeclaredModelControls(entry, row.value);
     }
   }
   return capabilities;
