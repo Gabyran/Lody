@@ -61,6 +61,8 @@ import {
   isMachineDocRoomId,
   isSessionDocRoomId,
   hasAgentRunConfigSelection,
+  ACP_CONFIG_OPTION_OFF_VALUE,
+  ACP_CONFIG_OPTION_ON_VALUE,
   isAcpFastModeConfigId,
   isAcpThoughtLevelConfigOption,
   resolveAgentRunConfigSelection,
@@ -1578,11 +1580,10 @@ function validateModelDependentTurnConfigOptionValues(
   const optionsById = new Map(
     (capability.configOptions ?? []).map((option) => [option.id, option])
   );
+  const efforts = getModelEffortChoices(capability, targetModelId);
+  const declaredFast = getDeclaredModelControls(capability, targetModelId)?.fastMode;
   for (const [id, value] of Object.entries(values)) {
-    const option = optionsById.get(id);
-    const isEffort = isAcpThoughtLevelConfigOption(option ?? { id }) || id === 'effort';
-    if (isEffort) {
-      const efforts = getModelEffortChoices(capability, targetModelId);
+    if (isTurnEffortEntry(optionsById, id)) {
       if (efforts !== undefined) {
         if (typeof value !== 'string' || !efforts.includes(value)) {
           throw new Error(
@@ -1594,21 +1595,25 @@ function validateModelDependentTurnConfigOptionValues(
         validatedIds.add(id);
       }
     } else if (isAcpFastModeConfigId(id)) {
-      const declaredFast = getDeclaredModelControls(capability, targetModelId)?.fastMode;
-      if (declaredFast === false) {
-        // Off on a model without Fast is already the case; on cannot happen.
-        if (value === true || value === 'on') {
-          throw new Error(`Model ${targetModelId} does not offer fast mode.`);
-        }
-        validatedIds.add(id);
-      } else if (declaredFast === true || targetModelId !== probedModelId) {
-        // The probe's snapshot says nothing about the target model's Fast; a
-        // declared Fast, or an unknown one, is left to the agent at dispatch.
+      // Off on a model without Fast is already the case; on cannot happen.
+      if (declaredFast === false && (value === true || value === ACP_CONFIG_OPTION_ON_VALUE)) {
+        throw new Error(`Model ${targetModelId} does not offer fast mode.`);
+      }
+      // The probe's snapshot says nothing about the target model's Fast; a
+      // declared Fast, or an unknown one, is left to the agent at dispatch.
+      if (declaredFast !== undefined || targetModelId !== probedModelId) {
         validatedIds.add(id);
       }
     }
   }
   return validatedIds;
+}
+
+function isTurnEffortEntry(
+  optionsById: ReadonlyMap<string, AcpConfigOptionSummary>,
+  id: string
+): boolean {
+  return isAcpThoughtLevelConfigOption(optionsById.get(id) ?? { id }) || id === 'effort';
 }
 
 export function filterCompatibleTurnConfigOptionValues(
@@ -1622,36 +1627,31 @@ export function filterCompatibleTurnConfigOptionValues(
   const optionsById = new Map(
     (capability.configOptions ?? []).map((option) => [option.id, option])
   );
-  const probedModelId = capability.configOptions?.find(
-    (option) => option.category === 'model'
-  )?.currentValue;
+  const probedModelId = findTurnConfigOptionByCategory(capability, 'model')?.currentValue;
+  const efforts = getModelEffortChoices(capability, targetModelId);
+  const declared = getDeclaredModelControls(capability, targetModelId);
+  // A different (or unknown) probe model cannot invalidate the target's
+  // recorded controls. Without per-model data, preserve them for runtime.
+  const keepUnverified = targetModelId !== probedModelId || declared !== undefined;
   const compatible = Object.fromEntries(
     Object.entries(values).filter(([id, value]) => {
-      const option = optionsById.get(id);
       if (targetModelId) {
-        const isEffort = isAcpThoughtLevelConfigOption(option ?? { id }) || id === 'effort';
-        if (isEffort) {
-          const efforts = getModelEffortChoices(capability, targetModelId);
+        if (isTurnEffortEntry(optionsById, id)) {
           if (efforts !== undefined) return typeof value === 'string' && efforts.includes(value);
-        }
-        // A model declared without Fast has nothing to carry a Fast value to.
-        if (
-          isAcpFastModeConfigId(id) &&
-          getDeclaredModelControls(capability, targetModelId)?.fastMode === false
-        ) {
-          return false;
-        }
-        // A different (or unknown) probe model cannot invalidate the target's
-        // recorded controls. Without per-model data, preserve them for runtime.
-        if (
-          targetModelId !== probedModelId ||
-          getDeclaredModelControls(capability, targetModelId) !== undefined
-        ) {
-          if (isEffort) return typeof value === 'string';
-          if (isAcpFastModeConfigId(id))
-            return typeof value === 'boolean' || value === 'on' || value === 'off';
+          if (keepUnverified) return typeof value === 'string';
+        } else if (isAcpFastModeConfigId(id)) {
+          // A model declared without Fast has nothing to carry a Fast value to.
+          if (declared?.fastMode === false) return false;
+          if (keepUnverified) {
+            return (
+              typeof value === 'boolean' ||
+              value === ACP_CONFIG_OPTION_ON_VALUE ||
+              value === ACP_CONFIG_OPTION_OFF_VALUE
+            );
+          }
         }
       }
+      const option = optionsById.get(id);
       return option !== undefined && validateConfigOptionValue(option, value) === undefined;
     })
   );
