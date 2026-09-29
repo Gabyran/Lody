@@ -3,6 +3,8 @@
 Status: implemented
 Translation: current
 
+PR: [#1104](https://github.com/LodyAI/Lody/pull/1104)
+
 [English](2026-09-29-local-first-session-send.md)
 
 ## 摘要
