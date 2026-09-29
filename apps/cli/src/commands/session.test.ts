@@ -1972,9 +1972,8 @@ describe('session command helpers', () => {
 });
 
 describe('delegated machine access', () => {
-  // A synthetic model of the hosted rules: the token user reaches machines it
-  // owns or that are shared (projects too); a served requester additionally
-  // needs the target to belong to the token user.
+  // A synthetic model of the hosted rules. `reach` is one user's own access:
+  // owned, or shared (and, with a project, the project shared too).
   const machines: Record<string, { owner: string; shared: boolean; sharedProjects?: string[] }> = {
     'owner-private': { owner: 'owner', shared: false },
     'owner-shared': { owner: 'owner', shared: true },
@@ -1995,44 +1994,84 @@ describe('delegated machine access', () => {
       return { allowed: false, reason: 'project_not_shared' };
     return { allowed: true };
   };
-  const readers: MachineAccessReaders = {
+  const legacyReaders: MachineAccessReaders = {
+    delegated: async () => null,
     asTokenUser: async (input) => reach(tokenUser, input.machineId, input.localProjectId),
     asServedRequester: async (input) =>
       machines[input.machineId]?.owner === tokenUser
         ? reach(input.requesterUserId, input.machineId, input.localProjectId)
         : { allowed: false, reason: 'not_visible' },
   };
-  const read = (requesterUserId: string, machineId: string, localProjectId?: string) =>
-    readDelegatedMachineAccess(
-      {
-        token: 'synthetic-token',
-        tokenUserId: tokenUser,
-        workspaceId: 'workspace',
-        machineId,
-        requesterUserId,
-        ...(localProjectId ? { localProjectId } : {}),
-      },
-      readers
-    );
+  const hostedReaders: MachineAccessReaders = {
+    ...legacyReaders,
+    delegated: async (input) => {
+      const owner = reach(tokenUser, input.machineId, input.localProjectId);
+      return owner.allowed
+        ? reach(input.requesterUserId, input.machineId, input.localProjectId)
+        : owner;
+    },
+  };
+  const read =
+    (readers: MachineAccessReaders) =>
+    (requesterUserId: string, machineId: string, localProjectId?: string) =>
+      readDelegatedMachineAccess(
+        {
+          token: 'synthetic-token',
+          tokenUserId: tokenUser,
+          workspaceId: 'workspace',
+          machineId,
+          requesterUserId,
+          ...(localProjectId ? { localProjectId } : {}),
+        },
+        readers
+      );
 
-  it('reaches every machine and project the executing machine owner may use', async () => {
-    expect(await read('owner', 'owner-private')).toEqual({ allowed: true });
-    expect(await read('owner', 'peer-shared')).toEqual({ allowed: true });
-    expect(await read('owner', 'peer-shared', 'public-project')).toEqual({ allowed: true });
-    expect(await read('owner', 'peer-shared', 'private-project')).toEqual({
-      allowed: false,
-      reason: 'project_not_shared',
-    });
-    expect(await read('owner', 'peer-private')).toEqual({ allowed: false, reason: 'not_visible' });
-  });
+  it.each([
+    ['hosted', hostedReaders],
+    ['legacy', legacyReaders],
+  ] as const)(
+    'reaches every machine and project the executing owner may use (%s backend)',
+    async (_backend, readers) => {
+      const check = read(readers);
+      expect(await check('owner', 'owner-private')).toEqual({ allowed: true });
+      expect(await check('owner', 'peer-shared')).toEqual({ allowed: true });
+      expect(await check('owner', 'peer-shared', 'public-project')).toEqual({ allowed: true });
+      expect(await check('owner', 'peer-shared', 'private-project')).toEqual({
+        allowed: false,
+        reason: 'project_not_shared',
+      });
+      expect(await check('owner', 'peer-private')).toEqual({
+        allowed: false,
+        reason: 'not_visible',
+      });
+    }
+  );
 
-  it('never widens a teammate driving the owner machine beyond their own reach', async () => {
-    expect(await read('teammate', 'owner-shared')).toEqual({ allowed: true });
-    expect(await read('teammate', 'owner-private')).toEqual({
-      allowed: false,
-      reason: 'not_visible',
+  it.each([
+    ['hosted', hostedReaders],
+    ['legacy', legacyReaders],
+  ] as const)(
+    'never widens a teammate driving the owner machine beyond their own reach (%s backend)',
+    async (_backend, readers) => {
+      const check = read(readers);
+      expect(await check('teammate', 'owner-shared')).toEqual({ allowed: true });
+      expect(await check('teammate', 'owner-private')).toEqual({
+        allowed: false,
+        reason: 'not_visible',
+      });
+      expect(await check('teammate', 'peer-private')).toEqual({
+        allowed: false,
+        reason: 'not_visible',
+      });
+    }
+  );
+
+  it("lets a teammate reach a third person's shared machine once the backend checks both users", async () => {
+    expect(await read(hostedReaders)('teammate', 'peer-shared', 'public-project')).toEqual({
+      allowed: true,
     });
-    expect(await read('teammate', 'peer-private')).toEqual({
+    // The fallback cannot check the teammate on a machine the owner does not own.
+    expect(await read(legacyReaders)('teammate', 'peer-shared', 'public-project')).toEqual({
       allowed: false,
       reason: 'not_visible',
     });

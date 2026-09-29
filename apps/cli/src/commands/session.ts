@@ -104,6 +104,7 @@ import {
 import { LoroDocumentManager, type SessionDocument } from '@/lib/loro/doc';
 import { renderTerminalTable } from '@/lib/terminal-table';
 import {
+  canDelegateMachineUseForCliToken,
   canRequestMachineForCliToken,
   canUseMachineForCliToken,
   type WorkspaceBillingEntitlement,
@@ -2101,6 +2102,8 @@ export async function readSessionMachineAccess(args: {
 }
 
 export type MachineAccessReaders = {
+  /** Hosted check of both users; `null` while the backend predates it. */
+  delegated: typeof canDelegateMachineUseForCliToken;
   /** Access of the CLI token's user: owned, or shared with the team (and project shared). */
   asTokenUser: typeof canRequestMachineForCliToken;
   /** A requester served by the token user's machines; the target must be one of them. */
@@ -2108,15 +2111,18 @@ export type MachineAccessReaders = {
 };
 
 const defaultMachineAccessReaders: MachineAccessReaders = {
+  delegated: canDelegateMachineUseForCliToken,
   asTokenUser: canRequestMachineForCliToken,
   asServedRequester: canUseMachineForCliToken,
 };
 
 /**
- * A delegated caller acts through the machine it runs on, so the target is
- * reachable when that machine's owner (the token user) may use it. A different
- * human driving a shared machine must additionally be served on the target, so
- * delegation never widens what that human could reach alone.
+ * A delegated caller acts through the machine it runs on, so the target must
+ * be usable by that machine's owner (the token user) and by the human driving
+ * the Turn, each on their own: delegation never widens either one's reach.
+ *
+ * Older backends lack the combined query. Their fallback cannot check a
+ * different human on a machine the owner does not own, so it denies that case.
  */
 export async function readDelegatedMachineAccess(
   input: {
@@ -2135,6 +2141,10 @@ export async function readDelegatedMachineAccess(
     machineId: input.machineId,
     ...(input.localProjectId ? { localProjectId: input.localProjectId } : {}),
   };
+  const verdict = await readers.delegated({ ...target, requesterUserId: input.requesterUserId });
+  if (verdict) {
+    return verdict;
+  }
   const owner = await readers.asTokenUser({ ...target, requesterUserId: input.tokenUserId });
   if (!owner.allowed || input.requesterUserId === input.tokenUserId) {
     return owner;
