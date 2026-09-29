@@ -48,11 +48,6 @@ Root rules apply. For `src/**`, read module, IPC and window contracts in
   and the AppImage runtime desktop entry must all resolve to the same desktop-file
   basename. KDE uses that identity to associate Wayland/X11 windows with the
   installed icon.
-- A product window opens on the COMMITTED theme, not the OS appearance: `theme-settings.ts`
-  feeds `getInitialMainWindowThemeSource` before the `BrowserWindow` exists (native frame
-  and win32 overlay; the `.dark` class is the CSP-hashed boot script's job). A preview
-  never reaches that store. `createMainSettingsStore` degrades to in-memory defaults:
-  `conf` validates at import, so a malformed file would otherwise stop launch.
 
 ## Embedded CLI and native dependencies
 
