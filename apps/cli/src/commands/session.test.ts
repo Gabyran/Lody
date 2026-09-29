@@ -896,6 +896,42 @@ describe('session command helpers', () => {
     expect(dispatch({ effort: 'max' })).toThrow(/Allowed values: default, low, high/);
   });
 
+  it('keeps Fast values away from a model declared without Fast', () => {
+    // The probe ran on haiku, which has no Fast option; the declaration agrees.
+    const capability: AcpCapabilityCacheEntry = {
+      cliType: 'builtin',
+      agentType: 'claude',
+      modes: [{ id: 'default', name: 'Default' }],
+      models: [{ modelId: 'haiku', name: 'Haiku' }],
+      configOptions: [
+        {
+          id: 'model',
+          name: 'Model',
+          category: 'model',
+          type: 'select',
+          currentValue: 'haiku',
+          options: [{ value: 'haiku', name: 'Haiku' }],
+        },
+      ],
+      declaredModelControls: { haiku: { fastMode: false } },
+      fetchedAt: 1,
+    };
+    const target = createSessionMeta({ agentType: 'claude' });
+    const dispatch = (configOptionValues: Record<string, string | boolean>) => () =>
+      resolveEffectiveSessionChatDispatchConfig({
+        dispatchConfig: { modelId: 'haiku', configOptionValues },
+        target,
+        capability,
+      });
+
+    expect(dispatch({ fast: true })).toThrow(/does not offer fast mode/);
+    expect(dispatch({ fast: false })).not.toThrow();
+    // An inherited Fast value is dropped rather than sent to a model without it.
+    expect(
+      filterCompatibleTurnConfigOptionValues({ fast: true, effort: 'default' }, capability, 'haiku')
+    ).toBeUndefined();
+  });
+
   it('fills omitted chat follow-up selectors from the target turn and keeps explicit overrides', () => {
     const target = createSessionMeta();
     const capability: AcpCapabilityCacheEntry = {
