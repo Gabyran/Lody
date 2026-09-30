@@ -1,0 +1,181 @@
+// @vitest-environment jsdom
+
+import React, { act } from 'react';
+import { createRoot, type Root } from 'react-dom/client';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+
+import { MentionInput } from '../src/ui/mention/mention-input';
+import { MentionItem } from '../src/ui/mention/mention-item';
+import {
+  MentionRoot,
+  useMentionContext,
+  type Mention as MentionRange,
+} from '../src/ui/mention/mention-root';
+
+(
+  globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean }
+).IS_REACT_ACT_ENVIRONMENT = true;
+
+/** Reads the menu's open state out of the mention context. */
+function OpenProbe() {
+  const context = useMentionContext('OpenProbe');
+  return <div data-testid="open" data-open={context.open ? 'yes' : 'no'} />;
+}
+
+function Harness({ trigger }: { trigger: string }) {
+  const [value, setValue] = React.useState('');
+  const [mentions, setMentions] = React.useState<MentionRange[]>([]);
+  const [selected, setSelected] = React.useState<string[]>([]);
+  return (
+    <MentionRoot
+      triggers={[trigger]}
+      trigger={trigger}
+      inputValue={value}
+      onInputValueChange={setValue}
+      mentions={mentions}
+      onMentionsChange={setMentions}
+      value={selected}
+      onValueChange={setSelected}
+      onFilter={(options) => options}
+      autoCloseOnEmpty={false}
+    >
+      <OpenProbe />
+      <MentionInput value={value} onChange={() => {}} aria-label="composer" />
+      <MentionItem value="alpha">Alpha</MentionItem>
+    </MentionRoot>
+  );
+}
+
+/** Types `text` into the textarea the way a real keystroke would. */
+function typeInto(textarea: HTMLTextAreaElement, text: string) {
+  const setter = Object.getOwnPropertyDescriptor(
+    window.HTMLTextAreaElement.prototype,
+    'value'
+  )!.set!;
+  setter.call(textarea, text);
+  textarea.setSelectionRange(text.length, text.length);
+  textarea.dispatchEvent(new Event('input', { bubbles: true }));
+}
+
+/** Presses a key on the textarea the way a real keystroke would. */
+function pressKey(textarea: HTMLTextAreaElement, key: string) {
+  textarea.dispatchEvent(new KeyboardEvent('keydown', { key, bubbles: true }));
+}
+
+describe('MentionInput trigger detection', () => {
+  let root: Root;
+  let container: HTMLDivElement;
+  let textarea: HTMLTextAreaElement;
+
+  beforeEach(() => {
+    container = document.createElement('div');
+    document.body.appendChild(container);
+  });
+
+  afterEach(async () => {
+    await act(async () => root.unmount());
+    container.remove();
+  });
+
+  function renderHarness(trigger: string) {
+    act(() => {
+      root = createRoot(container);
+      root.render(<Harness trigger={trigger} />);
+    });
+    textarea = container.querySelector('textarea')!;
+  }
+
+  function isOpen() {
+    return container.querySelector('[data-testid="open"]')?.getAttribute('data-open') === 'yes';
+  }
+
+  describe('`@` opens anywhere in the sentence', () => {
+    beforeEach(() => renderHarness('@'));
+
+    it('opens at the start of the input', () => {
+      act(() => typeInto(textarea, '@'));
+      expect(isOpen()).toBe(true);
+    });
+
+    it('opens after a space', () => {
+      act(() => typeInto(textarea, 'hey @'));
+      expect(isOpen()).toBe(true);
+    });
+
+    it('opens mid-sentence after CJK text', () => {
+      act(() => typeInto(textarea, '我想@'));
+      expect(isOpen()).toBe(true);
+    });
+
+    it('opens mid-sentence after an English word, with a query', () => {
+      act(() => typeInto(textarea, 'fix this bug@alpha'));
+      expect(isOpen()).toBe(true);
+    });
+
+    it('keeps the menu open for a still-ambiguous email prefix', () => {
+      act(() => typeInto(textarea, 'user@example'));
+      expect(isOpen()).toBe(true);
+    });
+
+    it('closes the menu once the query takes a domain shape', () => {
+      act(() => typeInto(textarea, 'user@example'));
+      expect(isOpen()).toBe(true);
+      act(() => typeInto(textarea, 'user@example.com'));
+      expect(isOpen()).toBe(false);
+    });
+
+    it('never opens for a domain query inside a CJK sentence', () => {
+      act(() => typeInto(textarea, '我的邮箱是gabi@example.com'));
+      expect(isOpen()).toBe(false);
+    });
+
+    it('never opens for a multi-label domain query', () => {
+      act(() => typeInto(textarea, 'user@mail.example.com'));
+      expect(isOpen()).toBe(false);
+    });
+
+    it('still opens for namespace and path queries', () => {
+      act(() => typeInto(textarea, 'see @issue:123'));
+      expect(isOpen()).toBe(true);
+    });
+
+    it('still opens for a standalone file mention with an extension', () => {
+      act(() => typeInto(textarea, '@README.md'));
+      expect(isOpen()).toBe(true);
+    });
+
+    it('still opens for a file mention with an extension after a space', () => {
+      act(() => typeInto(textarea, 'open @package.json'));
+      expect(isOpen()).toBe(true);
+    });
+
+    it('closes for a glued dotted query after an English word', () => {
+      act(() => typeInto(textarea, 'fix bug@readme.md'));
+      expect(isOpen()).toBe(false);
+    });
+
+    it('Enter after the menu gave up on a domain query leaves the text alone', () => {
+      act(() => typeInto(textarea, 'user@example'));
+      expect(isOpen()).toBe(true);
+      act(() => pressKey(textarea, 'Escape'));
+      act(() => typeInto(textarea, 'user@example.com'));
+      expect(isOpen()).toBe(false);
+      act(() => pressKey(textarea, 'Enter'));
+      expect(textarea.value).toBe('user@example.com');
+    });
+  });
+
+  describe('`$` keeps its word guard', () => {
+    beforeEach(() => renderHarness('$'));
+
+    it('opens at the start of the input', () => {
+      act(() => typeInto(textarea, '$'));
+      expect(isOpen()).toBe(true);
+    });
+
+    it('stays closed inside a word so code stays plain text', () => {
+      act(() => typeInto(textarea, 'price$'));
+      expect(isOpen()).toBe(false);
+    });
+  });
+});

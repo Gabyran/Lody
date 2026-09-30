@@ -21,6 +21,40 @@ export function findTriggerCandidates(
   return candidates;
 }
 
+const DOMAIN_QUERY_RE = /^[\w-]+(?:\.[\w-]+)+$/;
+
+/**
+ * Whether a trigger sits glued to non-whitespace text before it
+ * (`gabi@example.com`, `price$100`) rather than standing alone at the start of
+ * the input or after a space (`@README.md`, `hey @alpha`).
+ *
+ * The single owner of this shape: the `$` word guard treats a glued `$` as
+ * part of code, and the email check only fires on a glued trigger.
+ */
+export function isTriggerGluedToWord(value: string, triggerIndex: number): boolean {
+  const charBeforeTrigger = value.slice(0, triggerIndex).slice(-1);
+  return charBeforeTrigger !== '' && !/\s/.test(charBeforeTrigger);
+}
+
+/**
+ * Whether the trigger and the query after it read as a finished email address
+ * — a glued trigger followed by a domain, `gabi@example.com`, `me@mail.co.uk`.
+ *
+ * Typing one is not a mention attempt: the menu gives up once the query takes
+ * this shape, so a finished address is never matched against skills, files, or
+ * sessions. A standalone trigger with a dotted query (`@README.md`) is a file
+ * mention and keeps its menu. The partial query (`user@example`) is
+ * deliberately left alone — it is still ambiguous, and mid-sentence mentions
+ * after an English word (`fix this bug@alpha`) must keep working.
+ */
+export function looksLikeEmailAddress(
+  value: string,
+  triggerIndex: number,
+  search: string
+): boolean {
+  return isTriggerGluedToWord(value, triggerIndex) && DOMAIN_QUERY_RE.test(search);
+}
+
 const NAMESPACE_SEARCH_RE = /^([a-z][a-z0-9-]*):(.*)$/;
 
 /**

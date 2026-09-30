@@ -14,7 +14,12 @@ import {
   removeMentionText,
 } from './mention-input-core';
 import { MentionHighlighter } from './mention-highlighter';
-import { findTriggerCandidates, isMentionNavigationPrefix } from './mention-trigger';
+import {
+  findTriggerCandidates,
+  isMentionNavigationPrefix,
+  isTriggerGluedToWord,
+  looksLikeEmailAddress,
+} from './mention-trigger';
 import { type Mention, useMentionContext } from './mention-root';
 
 const INPUT_NAME = 'MentionInput';
@@ -350,12 +355,14 @@ const MentionInput = React.forwardRef<InputElement, MentionInputProps>((props, f
         }
 
         function isTriggerPartOfText() {
-          if (trigger === '#') return false;
-          const textBeforeTrigger = value.slice(0, lastTriggerIndex);
-          const hasTextBeforeTrigger = /\S/.test(textBeforeTrigger);
-          if (!hasTextBeforeTrigger) return false;
-          const lastCharBeforeTrigger = textBeforeTrigger.slice(-1);
-          return lastCharBeforeTrigger !== ' ' && lastCharBeforeTrigger !== '\n';
+          // `#` and `@` open anywhere, even mid-word: a mention typed
+          // mid-sentence in scripts without spaces (`我想@张三`) must not
+          // depend on what precedes the trigger. Committing still requires
+          // choosing a menu item, so an email address keeps typing as text.
+          // `$` keeps the word guard so identifiers and code (`price$100`,
+          // `${x}`) stay plain text.
+          if (trigger === '#' || trigger === '@') return false;
+          return isTriggerGluedToWord(value, lastTriggerIndex);
         }
 
         if (isTriggerPartOfText()) {
@@ -363,6 +370,11 @@ const MentionInput = React.forwardRef<InputElement, MentionInputProps>((props, f
         }
 
         const textAfterTrigger = value.slice(lastTriggerIndex + trigger.length, currentPosition);
+        // `user@example.com`: a finished email address is not a mention, so
+        // the menu gives up rather than matching its domain against items.
+        if (trigger === '@' && looksLikeEmailAddress(value, lastTriggerIndex, textAfterTrigger)) {
+          continue;
+        }
         const isValidMention = !/\s/.test(textAfterTrigger);
         const isCursorAfterTrigger = currentPosition > lastTriggerIndex;
         const isImmediatelyAfterTrigger = currentPosition === lastTriggerIndex + trigger.length;
