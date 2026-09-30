@@ -149,9 +149,29 @@ describe('MentionInput trigger detection', () => {
       expect(isOpen()).toBe(true);
     });
 
-    it('closes for a glued dotted query after an English word', () => {
+    it('closes for a glued dotted query that reads as an address', () => {
       act(() => typeInto(textarea, 'fix bug@readme.md'));
       expect(isOpen()).toBe(false);
+    });
+
+    it('opens for a file name glued to CJK text', () => {
+      act(() => typeInto(textarea, '请@README.md'));
+      expect(isOpen()).toBe(true);
+    });
+
+    it('opens for a dotted role name glued to CJK text', () => {
+      act(() => typeInto(textarea, '我想@GPT-5.6-Code-Reviewer'));
+      expect(isOpen()).toBe(true);
+    });
+
+    it('opens for a dotted name whose last label is not a TLD', () => {
+      act(() => typeInto(textarea, 'ask bug@GPT-5.6-Code-Reviewer'));
+      expect(isOpen()).toBe(true);
+    });
+
+    it('opens for a mention typed after an address in the same sentence', () => {
+      act(() => typeInto(textarea, '我的邮箱是gabi@example.com，请@README.md'));
+      expect(isOpen()).toBe(true);
     });
 
     it('Enter after the menu gave up on a domain query leaves the text alone', () => {

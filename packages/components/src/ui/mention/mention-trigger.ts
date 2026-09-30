@@ -21,15 +21,16 @@ export function findTriggerCandidates(
   return candidates;
 }
 
-const DOMAIN_QUERY_RE = /^[\w-]+(?:\.[\w-]+)+$/;
+const EMAIL_LOCAL_PART_RE = /[A-Za-z0-9._%+-]$/;
+const EMAIL_DOMAIN_RE = /^(?:[A-Za-z0-9-]+\.)+[A-Za-z]{2,}$/;
 
 /**
  * Whether a trigger sits glued to non-whitespace text before it
- * (`gabi@example.com`, `price$100`) rather than standing alone at the start of
- * the input or after a space (`@README.md`, `hey @alpha`).
+ * (`price$100`) rather than standing alone at the start of the input or after
+ * a space (`$review`, `hey $review`).
  *
  * The single owner of this shape: the `$` word guard treats a glued `$` as
- * part of code, and the email check only fires on a glued trigger.
+ * part of code.
  */
 export function isTriggerGluedToWord(value: string, triggerIndex: number): boolean {
   const charBeforeTrigger = value.slice(0, triggerIndex).slice(-1);
@@ -38,21 +39,29 @@ export function isTriggerGluedToWord(value: string, triggerIndex: number): boole
 
 /**
  * Whether the trigger and the query after it read as a finished email address
- * — a glued trigger followed by a domain, `gabi@example.com`, `me@mail.co.uk`.
+ * — an ASCII local part right against the trigger, then a domain that ends in
+ * an alphabetic TLD: `gabi@example.com`, `me@mail.co.uk`.
  *
- * Typing one is not a mention attempt: the menu gives up once the query takes
- * this shape, so a finished address is never matched against skills, files, or
- * sessions. A standalone trigger with a dotted query (`@README.md`) is a file
- * mention and keeps its menu. The partial query (`user@example`) is
- * deliberately left alone — it is still ambiguous, and mid-sentence mentions
- * after an English word (`fix this bug@alpha`) must keep working.
+ * Typing one is not a mention attempt: the menu gives up once the address is
+ * complete, so it is never matched against skills, files, or sessions. Both
+ * halves must hold, so a mention is not mistaken for an address:
+ * - the character before the trigger must be a local-part character, which
+ *   keeps `请@README.md` and `我想@GPT-5.6-Code-Reviewer` (CJK before the
+ *   trigger, the very case this menu exists for) and any standalone `@README.md`
+ *   open;
+ * - the query must end in a letters-only TLD, which keeps a dotted name such as
+ *   `bug@GPT-5.6-Code-Reviewer` open.
+ *
+ * The partial query (`user@example`) is deliberately left alone — it is still
+ * ambiguous, and mid-sentence mentions after an English word
+ * (`fix this bug@alpha`) must keep working.
  */
 export function looksLikeEmailAddress(
   value: string,
   triggerIndex: number,
   search: string
 ): boolean {
-  return isTriggerGluedToWord(value, triggerIndex) && DOMAIN_QUERY_RE.test(search);
+  return EMAIL_LOCAL_PART_RE.test(value.slice(0, triggerIndex)) && EMAIL_DOMAIN_RE.test(search);
 }
 
 const NAMESPACE_SEARCH_RE = /^([a-z][a-z0-9-]*):(.*)$/;
