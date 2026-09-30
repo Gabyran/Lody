@@ -1,4 +1,5 @@
 import { desktopInstallationProfile } from './platform'
+import { getDesktopCallbackProtocol } from './desktop-channel'
 import { parseDeepLinkArg } from './deep-link-url'
 import { consumePendingDeepLink, getMainWindow, setPendingDeepLink } from './window-state'
 import { readDesktopLoginCallback } from './services/desktop-login'
@@ -13,9 +14,16 @@ export function initializeAuthDeepLinks(handler: (token: string) => Promise<void
   authCallbackHandler = handler
   const pending = consumePendingDeepLink()
   if (!pending) return
-  const token = readDesktopLoginCallback(pending, desktopInstallationProfile.desktopProtocol)
+  const token = readLoginCallback(pending)
   if (token !== null) void handler(token)
   else setPendingDeepLink(pending)
+}
+
+function readLoginCallback(url: string): string | null {
+  return (
+    readDesktopLoginCallback(url, getDesktopCallbackProtocol(desktopInstallationProfile)) ??
+    readDesktopLoginCallback(url, desktopInstallationProfile.desktopProtocol)
+  )
 }
 
 function shouldSkipDuplicateDeepLink(url: string): boolean {
@@ -39,10 +47,7 @@ export function handleDeepLink(url: string): void {
     })
     return
   }
-  const authToken = readDesktopLoginCallback(
-    parsedDeepLink,
-    desktopInstallationProfile.desktopProtocol
-  )
+  const authToken = readLoginCallback(parsedDeepLink)
   if (authToken !== null && authCallbackHandler) {
     // Authentication belongs to main even if there is no mounted product page.
     void authCallbackHandler(authToken)

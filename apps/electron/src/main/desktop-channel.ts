@@ -12,6 +12,13 @@ export type DesktopProfile = Omit<
   releaseChannel: 'local' | 'stable' | 'staging' | 'nightly'
 }
 
+/** The shared lody scheme is a resource entry, never a new login's return address. */
+export function getDesktopCallbackProtocol(
+  profile: Pick<DesktopProfile, 'desktopProtocol'>
+): string {
+  return profile.desktopProtocol === 'lody' ? 'ai.lody.stable' : profile.desktopProtocol
+}
+
 /** Desktop identity is separate from the CLI's shared installation namespace. */
 export function resolveDesktopProfile(
   installation: InstallationProfile,

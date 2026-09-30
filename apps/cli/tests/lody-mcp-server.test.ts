@@ -300,7 +300,9 @@ describe('lody MCP server internals', () => {
 });
 
 describe('resolveMcpSessionId', () => {
-  const ctx = { sessionId: 'current-session' } as ReturnType<typeof getSessionContext>;
+  const ctx = { sessionId: 'current-session', workspaceId: 'workspace-1' } as ReturnType<
+    typeof getSessionContext
+  >;
 
   it('accepts a bare session id', () => {
     expect(resolveMcpSessionId('ses_abc', ctx)).toBe('ses_abc');
@@ -308,6 +310,15 @@ describe('resolveMcpSessionId', () => {
 
   it('strips a session:// mention URI', () => {
     expect(resolveMcpSessionId('session://ses_abc', ctx)).toBe('ses_abc');
+  });
+
+  it('resolves common links only in the authorized workspace', () => {
+    expect(resolveMcpSessionId(`lody://session/ses_abc?workspace=${ctx.workspaceId}`, ctx)).toBe(
+      'ses_abc'
+    );
+    expect(() => resolveMcpSessionId('lody://session/ses_abc?workspace=another', ctx)).toThrow(
+      'different workspace'
+    );
   });
 
   it('falls back to the current session', () => {

@@ -1,10 +1,45 @@
 import { describe, expect, it } from 'vitest';
+import { readPastedSessionLink, resolveSessionLinkWorkspace } from '../src/lib/session-deep-link';
 import {
   buildAppSessionUrl,
   getAppSessionUrlOrigins,
   isPlainLinkPasteShortcut,
   parseAppSessionUrl,
 } from '../src/lib/session-app-url';
+
+describe('workspace-scoped resource links', () => {
+  const target = { sessionId: 'session_1', workspaceId: 'workspace_1' };
+  const directory = {
+    status: 'ready' as const,
+    activeWorkspaceId: 'workspace_2',
+    workspaces: [
+      { id: 'workspace_1', slug: 'renamed', name: 'One', role: 'owner' },
+      { id: 'workspace_2', slug: 'other', name: 'Two', role: 'owner' },
+    ],
+  };
+  it('waits for startup and resolves the explicit ID even when another workspace is active', () => {
+    expect(resolveSessionLinkWorkspace(target, { status: 'loading' }, 'workspace_2')).toEqual({
+      kind: 'wait',
+    });
+    expect(resolveSessionLinkWorkspace(target, directory, null)).toEqual({ kind: 'wait' });
+    expect(resolveSessionLinkWorkspace(target, directory, 'workspace_2')).toEqual({
+      kind: 'open',
+      workspaceId: 'workspace_1',
+      slug: 'renamed',
+    });
+  });
+  it('never falls back to the current workspace when the link belongs elsewhere', () => {
+    expect(
+      resolveSessionLinkWorkspace({ ...target, workspaceId: 'missing' }, directory, 'workspace_2')
+    ).toEqual({ kind: 'unavailable', workspaceId: 'missing' });
+    expect(
+      readPastedSessionLink('lody://session/session_1?workspace=workspace_1', 'workspace_2')
+    ).toBeNull();
+    expect(
+      readPastedSessionLink('lody://session/session_1?workspace=workspace_1', 'workspace_1')
+    ).toEqual(target);
+  });
+});
 
 describe('parseAppSessionUrl', () => {
   const allowedOrigins = ['https://lody.ai', 'http://localhost:5173'];

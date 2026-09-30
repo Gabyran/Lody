@@ -1,4 +1,6 @@
 import { desktopInstallationProfile } from './platform'
+import { parseSessionLink } from '@lody/shared/session-link'
+import { getDesktopCallbackProtocol } from './desktop-channel'
 
 const DEEP_LINK_PROTOCOL = desktopInstallationProfile.desktopProtocol
 const PROTOCOL_PATTERN = DEEP_LINK_PROTOCOL.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
@@ -24,6 +26,14 @@ export function parseDeepLinkArg(arg: string): string | null {
   if (!normalized) {
     return null
   }
+  // Resource URLs are channel-neutral; callback URLs still belong to the profile.
+  if (parseSessionLink(normalized) && !normalized.startsWith('session://')) return normalized
+  if (
+    normalized.startsWith(
+      `${getDesktopCallbackProtocol(desktopInstallationProfile)}://auth/callback`
+    )
+  )
+    return normalized
 
   const directPattern = new RegExp(`${PROTOCOL_PATTERN}:\\/\\/.+`, 'i')
   const directMatch = normalized.match(directPattern)
