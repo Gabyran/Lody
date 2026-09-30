@@ -174,6 +174,25 @@ describe('MentionInput trigger detection', () => {
       expect(isOpen()).toBe(true);
     });
 
+    it('stays closed through every keystroke after the first dot of an address', () => {
+      const address = 'gabi@example.com.cn';
+      const firstDot = address.indexOf('.');
+      act(() => typeInto(textarea, address.slice(0, firstDot)));
+      expect(isOpen()).toBe(true);
+      for (let end = firstDot + 1; end <= address.length; end += 1) {
+        act(() => typeInto(textarea, address.slice(0, end)));
+        expect(isOpen(), address.slice(0, end)).toBe(false);
+      }
+    });
+
+    it('keeps a dotted name open at every keystroke when CJK precedes the trigger', () => {
+      const text = '我想@GPT-5.6-Code-Reviewer';
+      for (let end = '我想@'.length; end <= text.length; end += 1) {
+        act(() => typeInto(textarea, text.slice(0, end)));
+        expect(isOpen(), text.slice(0, end)).toBe(true);
+      }
+    });
+
     it('Enter after the menu gave up on a domain query leaves the text alone', () => {
       act(() => typeInto(textarea, 'user@example'));
       expect(isOpen()).toBe(true);
