@@ -169,6 +169,30 @@ CLI 时按 Ctrl-C 不再能传到这些命令；打开 `/dev/tty` 的提示（�
   - supervisor 不再通过一个共享的永不 settle 的 promise 保留每一次运行；
   - 调用方未传入 logger 时，进程层的警告会进入 daemon 的根 logger（或控制台）。
 
+## 后续：最后几处进程调用
+
+审查之后的全仓库排查发现还有三处进程不经过这一层，都在同一个 PR 中迁移：
+
+- **CLI 的登录 shell 探测用的是 `shell-env` 库。** 它通过 execa 启动 shell，3 秒超时只能停止等待，不能结束
+  shell：rc 文件卡住时，这个 shell 会一直存活到 daemon 退出。桌面端另有一套不同的探测。两者现在调用同一个探测
+  `@lody/shared/node/login-shell-env`，它经由 `runCommandText` 运行，上限 15 秒。它保留了 `shell-env` 的分隔符、
+  oh-my-zsh 与 tmux 防护，以及非 POSIX shell 的 zsh/bash 回退；也保留了桌面端的 `env -0` 与 `~/.bashrc` 加载，
+  在不支持 `-0` 的环境（BusyBox）回退到普通 `env`。CLI 仍在 3 秒后放行 ACP 启动，探测结束后替换缓存值。
+  该依赖已删除。
+- **`@lody/code-review-helper` 用 `execFile` 跑 git**（供 `lody review` 使用），没有超时。现在改用
+  `runCommandText`，上限 60 秒，同时适用 Windows 上命令绝不从仓库目录解析的规则。
+- **守卫漏掉了几种写法：** 可选链与带括号的 `.kill(` 调用、`child_process` 的动态 import 与 `createRequire`
+  导入、re-export，以及 cross-spawn 以外的进程库。现在它匹配任意导入位置上的模块名、一组进程库，以及任意接收者的
+  `.kill(`，并且也扫描 `packages/code-review-helper/src`。用一个包含每种写法的探针文件验证过：每种都会被报告，
+  而类型导入、`np.kill` 和非导入位置的字符串不会。
+
+有意不迁的：
+- 为独立进程生成的脚本（已在白名单中）；
+- node-pty：唯一的 PTY 启动方式，它的进程组经由这一层结束；
+- 构建脚本与 ACP 扩展子模块；
+- Electron 的 `shell.openExternal`/`openPath`；
+- worker 线程。
+
 ## 验证
 
 - 新增 `@effect/vitest` 0.26。新测试（现为 `packages/shared/tests/process.test.ts`） 用 `TestClock` 驱动时间，

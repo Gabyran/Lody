@@ -1,11 +1,12 @@
 #!/usr/bin/env node
 
-// Every OS process the CLI, the desktop main process, the CLI supervisor and the
-// shared Node helpers start, wait for or signal goes through the Effect process
-// layer (`@lody/shared/node/process`). This guard fails when their source
-// reaches for child_process, cross-spawn, node-pty or process.kill directly, so
-// a second process implementation cannot creep back in.
-// Rules: apps/cli/src/platform/AGENTS.md.
+// Every OS process the CLI, the desktop main process, the CLI supervisor, the
+// review helper and the shared Node helpers start, wait for or signal goes
+// through the Effect process layer (`@lody/shared/node/process`). This guard
+// fails when their source reaches for child_process, a process-spawning library
+// (cross-spawn, execa, shell-env, node-pty, ...) or a direct kill, so a second
+// process implementation cannot creep back in.
+// Rules: packages/shared/src/node/AGENTS.md.
 
 import { execFile } from 'node:child_process';
 import { readFile } from 'node:fs/promises';
@@ -19,6 +20,7 @@ const sourceRoots = [
   'apps/cli/src/',
   'apps/electron/src/main/',
   'packages/cli-supervisor/src/',
+  'packages/code-review-helper/src/',
   'packages/shared/src/node/',
 ];
 
@@ -51,21 +53,41 @@ const allowlist = new Map([
   ],
 ]);
 
+const lineAt = (text, index) => {
+  const start = text.lastIndexOf('\n', index - 1) + 1;
+  const end = text.indexOf('\n', index);
+  return text.slice(start, end === -1 ? text.length : end);
+};
+
+// A module specifier position: `from`, a side-effect `import`, dynamic
+// `import(...)`, `require(...)` and `createRequire(...)(...)`. A string that
+// only names a module (Tinypool's `runtime: 'child_process'`) is not one.
+const MODULE_POSITION = String.raw`(?:\bfrom\s+|\bimport\s+|\bimport\s*\(\s*|\brequire\s*\(\s*|\)\s*\(\s*)`;
+
 const forbidden = [
   {
-    // Type-only imports carry no behaviour and stay allowed.
-    pattern: /import\s+(?!type\b)[^;]*?from\s+['"](?:node:)?child_process['"]/gu,
-    label: 'child_process import',
+    // Static, dynamic and `require` imports, re-exports and
+    // `createRequire(...)('child_process')`. Type-only imports carry no
+    // behaviour and stay allowed.
+    pattern: new RegExp(`${MODULE_POSITION}['"](?:node:)?child_process['"]`, 'gu'),
+    label: 'child_process reference',
+    skip: (match, text) => /^\s*import\s+type\b/u.test(lineAt(text, match.index ?? 0)),
   },
-  { pattern: /require\(\s*['"](?:node:)?child_process['"]\s*\)/gu, label: 'child_process require' },
-  { pattern: /from\s+['"]cross-spawn['"]/gu, label: 'cross-spawn import' },
-  { pattern: /['"](?:@lydell\/)?node-pty['"]/gu, label: 'node-pty reference' },
+  {
+    // Libraries that start or signal processes on their own.
+    pattern: new RegExp(
+      `${MODULE_POSITION}['"](?:cross-spawn|execa|shell-env|tree-kill|ps-tree|find-process|pidusage|(?:@lydell/)?node-pty)['"]`,
+      'gu'
+    ),
+    label: 'process library reference',
+  },
   { pattern: /\bprocess\.kill\s*\(/gu, label: 'process.kill call' },
   // Signalling a ChildProcess (or PTY) directly is a hand-written termination
   // path; `terminateTree` owns escalation and bounded waits. The `NodeProcess`
-  // service's own `kill` is the sanctioned door.
+  // service's own `kill` is the sanctioned door. Covers `child?.kill(`,
+  // `(child as T).kill(` and `children[i].kill(` too.
   {
-    pattern: /\b([\w$]+)\.kill\s*\(/gu,
+    pattern: /([\w$]+|[)\]])\s*\??\.kill\s*\(/gu,
     label: 'direct child signal',
     skip: (match) => ['process', 'np', 'nodeProcess', 'nodeProcessLive'].includes(match[1] ?? ''),
   },
@@ -95,7 +117,7 @@ for (const file of await listSources()) {
   }
   for (const { pattern, label, skip } of forbidden) {
     for (const match of text.matchAll(pattern)) {
-      if (skip?.(match)) continue;
+      if (skip?.(match, text)) continue;
       violations.push(`${file}:${lineOf(text, match.index ?? 0)} ${label}`);
     }
   }

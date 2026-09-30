@@ -34,8 +34,11 @@ export interface PlatformFacadeOptions {
 }
 
 // Without a caller's logger the daemon's root logger still records process
-// diagnostics, such as a tree that survived termination.
-const toShared = (options: PlatformFacadeOptions): processLayer.ProcessFacadeOptions => ({
+// diagnostics, such as a tree that survived termination. Exported for shared
+// helpers that run commands themselves (the login-shell probe).
+export const toShared = (
+  options: PlatformFacadeOptions = {}
+): processLayer.ProcessFacadeOptions => ({
   nodeProcess: options.nodeProcess,
   loggerLayer: lodyLoggerLayer(options.logger ?? getLogger()),
 });

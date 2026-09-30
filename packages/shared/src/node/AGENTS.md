@@ -12,11 +12,15 @@ Electron main, the CLI supervisor and these helpers. Effect usage and boundary
 rules: [cli-effect-ts](../../../../.agents/docs/cli-effect-ts.md). Decision
 record: [process tree layer](../../../../.agents/notes/implemented/architecture/2026-09-27-effect-process-tree-layer.md).
 
-- Only `process.ts` imports `child_process`/`cross-spawn` or calls `kill`
-  (`process.kill`, `child.kill`). Everything else uses its services or its
-  Promise facades. `pnpm check:cli-process-boundary` enforces this across
-  `apps/cli`, `apps/electron/src/main`, `packages/cli-supervisor` and this
-  directory; its allowlist names each exception and its reason.
+- Only `process.ts` imports `child_process`, a process library (`cross-spawn`,
+  `execa`, `shell-env`, ...) or calls `kill` (`process.kill`, `child.kill`).
+  Everything else uses its services or its Promise facades.
+  `pnpm check:cli-process-boundary` enforces this across `apps/cli`,
+  `apps/electron/src/main`, `packages/cli-supervisor`,
+  `packages/code-review-helper` and this directory; its allowlist names each
+  exception and its reason.
+- The login-shell environment has one probe, `login-shell-env.ts`, shared by
+  the CLI and the desktop.
 - `process.ts` stays one module with no relative imports: Electron's
   `node --test` cannot resolve extensionless relative imports.
 - Missing a capability (a new spawn shape, a pid-only kill)? Add it to

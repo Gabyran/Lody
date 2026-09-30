@@ -272,6 +272,40 @@ all fixed on the top PR with a failing-first test each unless noted:
   - process-layer warnings reach the daemon's root logger (or the console)
     when a caller passes no logger.
 
+## Follow-up: the last process callers
+
+A repository-wide audit after the review found three processes still outside
+the layer, all moved in the same PR:
+
+- **The CLI's login-shell probe used the `shell-env` library.** It spawned the
+  shell through execa, so the 3 s timeout could stop waiting but not end the
+  shell: a hung rc file kept it alive until the daemon exited. The desktop ran
+  a second, different probe. Both now call one probe,
+  `@lody/shared/node/login-shell-env`, which runs through `runCommandText`,
+  bounded at 15 s. It keeps `shell-env`'s delimiters, its oh-my-zsh and tmux
+  guards and its zsh/bash fallback for non-POSIX shells. It also keeps the
+  desktop's `env -0` and `~/.bashrc` sourcing, falling back to plain `env`
+  where `-0` is missing (BusyBox). The CLI still lets ACP spawns go ahead after
+  3 s and replaces the cached value when the probe finishes. The dependency is
+  removed.
+- **`@lody/code-review-helper` ran git with `execFile`** for `lody review`,
+  with no timeout. It now uses `runCommandText` with a 60 s bound, which also
+  applies the Windows rule that commands never resolve from the repository.
+- **The guard missed several shapes:** optional-chained and parenthesized
+  `.kill(` calls, dynamic and `createRequire` imports of `child_process`,
+  re-exports, and process libraries other than cross-spawn. It now matches
+  module specifiers in any import position, a list of process libraries, and
+  any `.kill(` receiver. It also scans `packages/code-review-helper/src`. A
+  probe file with each shape confirmed every one is reported, and that type
+  imports, `np.kill` and non-import strings are not.
+
+Left out on purpose:
+- scripts generated for their own processes (already allowlisted);
+- node-pty, the only PTY spawner, whose groups end through the layer;
+- build scripts and ACP extension submodules;
+- Electron `shell.openExternal`/`openPath`;
+- worker threads.
+
 ## Verification
 
 - `@effect/vitest` 0.26 was added. The new tests (now `packages/shared/tests/process.test.ts`)
