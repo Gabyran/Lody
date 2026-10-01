@@ -29,11 +29,11 @@ const EMAIL_DOMAIN_RE = /^(?:[A-Za-z0-9-]+\.)+[A-Za-z]*$/;
  * (`price$100`) rather than standing alone at the start of the input or after
  * a space (`$review`, `hey $review`).
  *
- * The single owner of this shape: the `$` word guard treats a glued `$` as
- * part of code.
+ * Consumers: the word guard shared by every trigger the menu does not open
+ * mid-word (`$`, `/`, `、`) treats a glued trigger as part of code.
  */
 export function isTriggerGluedToWord(value: string, triggerIndex: number): boolean {
-  const charBeforeTrigger = value.slice(0, triggerIndex).slice(-1);
+  const charBeforeTrigger = value[triggerIndex - 1] ?? '';
   return charBeforeTrigger !== '' && !/\s/.test(charBeforeTrigger);
 }
 
@@ -64,7 +64,7 @@ export function looksLikeEmailAddress(
   triggerIndex: number,
   search: string
 ): boolean {
-  return EMAIL_LOCAL_PART_RE.test(value.slice(0, triggerIndex)) && EMAIL_DOMAIN_RE.test(search);
+  return EMAIL_LOCAL_PART_RE.test(value[triggerIndex - 1] ?? '') && EMAIL_DOMAIN_RE.test(search);
 }
 
 const NAMESPACE_SEARCH_RE = /^([a-z][a-z0-9-]*):(.*)$/;

@@ -372,8 +372,8 @@ const MentionInput = React.forwardRef<InputElement, MentionInputProps>((props, f
           // mid-sentence in scripts without spaces (`我想@张三`) must not
           // depend on what precedes the trigger. Committing still requires
           // choosing a menu item, so an email address keeps typing as text.
-          // `$` keeps the word guard so identifiers and code (`price$100`,
-          // `${x}`) stay plain text.
+          // The remaining triggers (`$`, `/`, `、`) keep the word guard so
+          // identifiers and code (`price$100`, `${x}`) stay plain text.
           if (trigger === '#' || trigger === '@') return false;
           return isTriggerGluedToWord(value, lastTriggerIndex);
         }
