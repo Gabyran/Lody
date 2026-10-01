@@ -10,7 +10,9 @@ import {
   findAdjacentMentionForHorizontalNavigation,
   findMentionBeforeCursorForDeletion,
   getMentionValuesFromMentions,
+  type DismissedTrigger,
   getTextDiff,
+  remapDismissedTrigger,
   removeMentionText,
 } from './mention-input-core';
 import { MentionHighlighter } from './mention-highlighter';
@@ -124,6 +126,7 @@ const MentionInput = React.forwardRef<InputElement, MentionInputProps>((props, f
 
   const pendingSelectionRef = React.useRef<PendingSelection | null>(null);
   const virtualAnchorSnapshotRef = React.useRef<VirtualAnchorSnapshot | null>(null);
+  const dismissedTriggerRef = React.useRef<DismissedTrigger | null>(null);
   // Simplified IME handling: only track if we're in composition, ignore all updates
   // during composition, and sync the final value after composition ends.
   const isComposingRef = React.useRef(false);
@@ -340,6 +343,10 @@ const MentionInput = React.forwardRef<InputElement, MentionInputProps>((props, f
       if (currentPosition === null) return false;
 
       const value = element.value;
+      const dismissed = dismissedTriggerRef.current
+        ? remapDismissedTrigger(dismissedTriggerRef.current, value)
+        : null;
+      dismissedTriggerRef.current = dismissed;
       const candidates = findTriggerCandidates(value, context.triggers, currentPosition);
 
       for (const { trigger, index: lastTriggerIndex } of candidates) {
@@ -351,6 +358,12 @@ const MentionInput = React.forwardRef<InputElement, MentionInputProps>((props, f
           mentionAtTrigger?.value.endsWith('/') && currentPosition === mentionAtTrigger.end;
         const isPartOfExistingMention = Boolean(mentionAtTrigger) && !isDirectoryMentionAtEnd;
         if (isPartOfExistingMention) {
+          continue;
+        }
+
+        // Escape on this trigger chose plain text: typing on after it must not
+        // reopen the menu until the trigger itself is edited away.
+        if (dismissed?.trigger === trigger && dismissed.index === lastTriggerIndex) {
           continue;
         }
 
@@ -820,6 +833,14 @@ const MentionInput = React.forwardRef<InputElement, MentionInputProps>((props, f
           break;
         }
         case 'Escape': {
+          const span = getTriggerSpan();
+          if (span) {
+            dismissedTriggerRef.current = {
+              trigger: context.trigger,
+              index: span.triggerIndex,
+              value: input.value,
+            };
+          }
           onMenuClose();
           event.stopPropagation();
           break;

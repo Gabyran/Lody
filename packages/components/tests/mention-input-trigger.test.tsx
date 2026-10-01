@@ -204,6 +204,49 @@ describe('MentionInput trigger detection', () => {
     });
   });
 
+  describe('Escape keeps the menu closed for that trigger', () => {
+    beforeEach(() => renderHarness('@'));
+
+    it('stays closed while the user types on after the dismissed trigger', () => {
+      act(() => typeInto(textarea, 'user@gm'));
+      expect(isOpen()).toBe(true);
+      act(() => pressKey(textarea, 'Escape'));
+      expect(isOpen()).toBe(false);
+      act(() => typeInto(textarea, 'user@gmail'));
+      expect(isOpen()).toBe(false);
+    });
+
+    it('stays closed when text is inserted before the dismissed trigger', () => {
+      act(() => typeInto(textarea, 'a@x'));
+      act(() => pressKey(textarea, 'Escape'));
+      act(() => typeInto(textarea, 'za@x'));
+      expect(isOpen()).toBe(false);
+    });
+
+    it('opens again for a new trigger typed after the dismissed one', () => {
+      act(() => typeInto(textarea, 'a@x'));
+      act(() => pressKey(textarea, 'Escape'));
+      act(() => typeInto(textarea, 'a@x @'));
+      expect(isOpen()).toBe(true);
+    });
+
+    it('opens again once the dismissed trigger is deleted and retyped', () => {
+      act(() => typeInto(textarea, 'user@gm'));
+      act(() => pressKey(textarea, 'Escape'));
+      act(() => typeInto(textarea, 'user'));
+      act(() => typeInto(textarea, 'user@'));
+      expect(isOpen()).toBe(true);
+    });
+
+    it('opens again after the input is cleared', () => {
+      act(() => typeInto(textarea, '@x'));
+      act(() => pressKey(textarea, 'Escape'));
+      act(() => typeInto(textarea, ''));
+      act(() => typeInto(textarea, '@'));
+      expect(isOpen()).toBe(true);
+    });
+  });
+
   describe('`$` keeps its word guard', () => {
     beforeEach(() => renderHarness('$'));
 
